@@ -162,10 +162,22 @@
               '("ZIP member name is not valid UTF-8")))
     decoded))
 
+(defun epub-reader-container--full-case-fold-character (character)
+  "Return Unicode full case fold of CHARACTER as a string.
+
+Emacs 29 expands most full folds through `upcase' followed by `downcase',
+including sharp s and ligatures.  It lacks the two mappings below; folding
+one character at a time also avoids context-sensitive final sigma output."
+  (pcase character
+    (#x017f "s")                 ; LATIN SMALL LETTER LONG S
+    (#x1e9e "ss")                ; LATIN CAPITAL LETTER SHARP S
+    (_ (downcase (upcase (char-to-string character))))))
+
 (defun epub-reader-container--canonical-component (component)
-  "Return normalization and case-fold key for COMPONENT."
+  "Return canonical normalization plus full case-fold key for COMPONENT."
   (ucs-normalize-NFC-string
-   (downcase (upcase (ucs-normalize-NFC-string component)))))
+   (mapconcat #'epub-reader-container--full-case-fold-character
+              (ucs-normalize-NFC-string component) "")))
 
 (defun epub-reader-container--canonical-path (entry)
   "Return collision key for validated archive path ENTRY."
@@ -177,6 +189,15 @@
   (or (cl-some (lambda (character)
                  (or (< character 32)
                      (and (>= character 127) (<= character 159))
+                     (and (>= character #xd800) (<= character #xdfff))
+                     (and (>= character #xe000) (<= character #xf8ff))
+                     (and (>= character #xf0000) (<= character #xffffd))
+                     (and (>= character #x100000)
+                          (<= character #x10fffd))
+                     (and (>= character #xfdd0) (<= character #xfdef))
+                     (and (>= character #xfff0) (<= character #xffff))
+                     (= (logand character #xffff) #xfffe)
+                     (= (logand character #xffff) #xffff)
                      (memq character '(42 63 91 93 34 58 60 62 124))))
                (string-to-list component))
       (string-suffix-p "." component)

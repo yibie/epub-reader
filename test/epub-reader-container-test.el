@@ -89,7 +89,33 @@
      :type 'epub-reader-unsafe-archive))
   (should
    (equal (epub-reader-container--canonical-path "书/e\u0301.xhtml")
-          (epub-reader-container--canonical-path "书/É.XHTML"))))
+          (epub-reader-container--canonical-path "书/É.XHTML")))
+  (dolist (pair '(("ſ.xhtml" "s.xhtml")
+                  ("ς.xhtml" "σ.xhtml")
+                  ("ẞ.xhtml" "ss.xhtml")))
+    (should
+     (equal (epub-reader-container--canonical-path (car pair))
+            (epub-reader-container--canonical-path (cadr pair))))))
+
+(ert-deftest epub-reader-container-rejects-full-fold-collision-fixture ()
+  (epub-reader-container-test--for-each-adapter _adapter
+    (should-error
+     (epub-reader-container-open
+      (epub-reader-test-fixture "full-fold-collision.epub"))
+     :type 'epub-reader-unsafe-archive)))
+
+(ert-deftest epub-reader-container-rejects-all-ocf-forbidden-ranges ()
+  (epub-reader-container-test--for-each-adapter _adapter
+    (should-error
+     (epub-reader-container-open
+      (epub-reader-test-fixture "ocf-forbidden.epub"))
+     :type 'epub-reader-unsafe-archive))
+  (dolist (character '(#xe000 #xf8ff #xf0000 #xffffd #x100000 #x10fffd
+                       #xfdd0 #xfdef #xfff0 #xfff9 #xffff #x1fffe #x10ffff))
+    (should-error
+     (epub-reader-container--validate-entry
+      (format "bad%c.xhtml" character))
+     :type 'epub-reader-unsafe-archive)))
 
 (ert-deftest epub-reader-container-counts-directory-members ()
   (epub-reader-container-test--for-each-adapter _adapter

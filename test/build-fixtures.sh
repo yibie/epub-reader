@@ -85,6 +85,45 @@ rm -f "$output_dir/case-collision.epub"
 (cd "$collision_dir" &&
   zip -X9qj "$output_dir/case-collision.epub" one/A.xhtml two/a.xhtml)
 
+full_fold_dir="$work_dir/full-fold-collision"
+mkdir -p "$full_fold_dir"
+printf '%s' 'application/epub+zip' >"$full_fold_dir/mimetype"
+printf '%s' 'long-s' >"$full_fold_dir/ſ.xhtml"
+printf '%s' 'ascii-s' >"$full_fold_dir/s.xhtml"
+find "$full_fold_dir" -exec touch -t 202001010000 {} +
+rm -f "$output_dir/full-fold-collision.epub"
+python3 -c '
+import sys, zipfile
+archive, names = sys.argv[1], sys.argv[2:]
+with zipfile.ZipFile(archive, "w") as output:
+    mimetype = zipfile.ZipInfo("mimetype", (2020, 1, 1, 0, 0, 0))
+    mimetype.compress_type = zipfile.ZIP_STORED
+    output.writestr(mimetype, b"application/epub+zip")
+    for name in names:
+        member = zipfile.ZipInfo(name, (2020, 1, 1, 0, 0, 0))
+        member.compress_type = zipfile.ZIP_DEFLATED
+        output.writestr(member, name.encode("utf-8"))
+' "$output_dir/full-fold-collision.epub" ſ.xhtml s.xhtml
+
+forbidden_dir="$work_dir/ocf-forbidden"
+mkdir -p "$forbidden_dir"
+pua_name=$(printf 'private-\356\200\200.xhtml')
+printf '%s' 'application/epub+zip' >"$forbidden_dir/mimetype"
+printf '%s' 'forbidden' >"$forbidden_dir/$pua_name"
+find "$forbidden_dir" -exec touch -t 202001010000 {} +
+rm -f "$output_dir/ocf-forbidden.epub"
+python3 -c '
+import sys, zipfile
+archive, name = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(archive, "w") as output:
+    mimetype = zipfile.ZipInfo("mimetype", (2020, 1, 1, 0, 0, 0))
+    mimetype.compress_type = zipfile.ZIP_STORED
+    output.writestr(mimetype, b"application/epub+zip")
+    member = zipfile.ZipInfo(name, (2020, 1, 1, 0, 0, 0))
+    member.compress_type = zipfile.ZIP_DEFLATED
+    output.writestr(member, b"forbidden")
+' "$output_dir/ocf-forbidden.epub" "$pua_name"
+
 directory_dir="$work_dir/directories"
 mkdir -p "$directory_dir/one" "$directory_dir/two"
 printf '%s' 'application/epub+zip' >"$directory_dir/mimetype"
