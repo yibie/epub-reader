@@ -1,24 +1,56 @@
+[English](README.md) | [中文](README_cn.md)
+
 # epub-reader
 
-`epub-reader` 是一个基于 TextUI 布局层的原生 Emacs EPUB
-阅读器。它直接解析 EPUB 的 OCF、OPF、spine 与目录文档，把 XHTML 转成语义块，再由
-TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重型依赖。
+`epub-reader` is a native Emacs reader for DRM-free, reflowable EPUB 2 and
+EPUB 3 books. It parses the EPUB container, package, reading order, and table
+of contents directly, converts XHTML into semantic blocks, and asks TextUI to
+lay those blocks out for the current window.
 
-与 nov.el 的差异可以概括为一句话：nov.el 以 `shr` 显示整章 HTML，而本项目以自有 EPUB
-模型、稳定 locator 和 TextUI 的宽度感知 frame/分块 viewport 组织阅读体验。逐项对比见
-[与 nov.el 的比较](#与-novel-的比较)。
+The result is deliberately more reader-like than a buffer containing rendered
+HTML: a centered reading column, automatic reflow, CJK-aware line breaking,
+incremental rendering for long chapters, a hierarchical table of contents,
+and reading positions that survive changes in window width and text scale.
 
-当前版本为 0.1.0，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
+Version 0.1.0 requires Emacs 29.1 or later. It does not support DRM or
+fixed-layout EPUBs.
 
-## 安装
+## How it differs from nov.el
 
-要求：
+`nov.el` is established, widely packaged, and tested against a much larger
+variety of books. It renders one XHTML document at a time with `shr`.
+`epub-reader` uses its own publication and position models, then lays out a
+small viewport through TextUI. That architectural difference matters most for
+reflow, long chapters, and reliable reading positions.
 
-- Emacs 29.1 或更高版本；
-- TextUI 0.5.1，当前以本地 checkout 加入 `load-path`；
-- `unzip` 或 `bsdtar`，安装任意一个即可。两者都存在时默认先尝试 `unzip`。
+| Area | nov.el 0.5 | epub-reader 0.1.0 |
+|---|---|---|
+| Rendering | Sends a complete spine document through `shr` | Converts XHTML to semantic blocks and renders a bounded chapter viewport |
+| Resizing and text scale | Usually requires another render; buffer positions may move | Reflows automatically and restores the semantic reading position |
+| CJK prose | Usable with a carefully assembled `nov-text-width`/visual-line/kinsoku setup | Common line-start and line-end restrictions, language-aware whitespace handling, and non-final-line justification are built in |
+| Long or image-heavy chapters | Whole-chapter work can block the UI | Small first paint, on-demand resources, deferred images, and next-chapter prefetch |
+| Saved position | Spine index plus a buffer position | Versioned locator with block, source offset, and quote-based fallback |
+| Overall progress | Saves the last place, but has no dependable whole-book percentage | Shows a weighted whole-book estimate and reaches 100% at the end |
+| Table of contents | Separate TOC view | Hierarchical, collapsible TOC with a current-chapter marker and remembered row |
+| Archive handling | Relies on the external extractor | Checks paths, collisions, entry counts, sizes, and compression ratios before extracting members on demand |
+| Annotations | No core annotation model; mature third-party workflows such as `org-remark` exist | Not available in the current UI yet |
+| Maturity | Mature package with broad real-world coverage and package-archive installation | Young project with extensive ERT and adversarial tests, but a smaller real-book corpus |
 
-把 TextUI 与本项目目录加入 `load-path`：
+Choose `nov.el` when package-archive installation, its surrounding ecosystem,
+or years of format-compatibility fixes matter most. Choose `epub-reader` when
+you want its reflow, CJK defaults, responsive chapter loading, and stable
+locators. Keeping both installed is reasonable.
+
+## Installation
+
+Requirements:
+
+- Emacs 29.1 or later, built with libxml2 support;
+- TextUI 0.5.1;
+- either `unzip` or `bsdtar` on `exec-path`.
+
+At this stage, install both TextUI and `epub-reader` from local checkouts and
+add them to `load-path`:
 
 ```elisp
 (add-to-list 'load-path "/path/to/textui")
@@ -26,114 +58,132 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 (require 'epub-reader)
 ```
 
-例如本仓库开发环境使用：
+If opening a book reports that no archive program is available, check one of
+these expressions:
 
 ```elisp
-(add-to-list 'load-path "/Users/chenyibin/Documents/emacs/package/textui")
-(add-to-list 'load-path "/Users/chenyibin/Documents/emacs/package/epub-reader")
-(require 'epub-reader)
+(executable-find "unzip")
+(executable-find "bsdtar")
 ```
 
-如果 Emacs 找不到归档命令，请先确认 `(executable-find "unzip")` 或
-`(executable-find "bsdtar")` 返回非 `nil`。
+At least one should return a path rather than `nil`.
 
-## 快速上手
+## Quick start
 
-运行：
+Open a book with:
 
 ```text
 M-x epub-reader-open RET /path/to/book.epub RET
 ```
 
-阅读 buffer 会显示居中的正文栏；调整窗口宽度时，TextUI 会重新排版并尽量保持当前语义位置。
-默认启用进度保存，sidecar 写在 EPUB 旁边的 `BOOK.epub.epub-reader`。可通过
-`epub-reader-store-directory` 改到集中目录。
+The reader opens in a centered column. Resizing the window or changing text
+scale reflows the visible content while keeping the same semantic position.
 
-### 阅读键位
+Progress saving is enabled by default. Unless
+`epub-reader-store-directory` is set, the sidecar is stored beside the book as
+`BOOK.epub.epub-reader`.
 
-| 键        | 动作                                  |
-|-----------|---------------------------------------|
-| n / ] | 下一 spine 章节                       |
-| p /  | 上一 spine 章节                       |
-| SPC     | 向后翻页；到章尾时自动进入下一章      |
-| S-SPC   | 向前翻页；到章首时进入上一章末尾      |
-| b / f | locator 导航历史后退 / 前进           |
-| t       | 打开层级目录 buffer                   |
-| g       | 用 completing-read 按目录标题跳转   |
-| RET     | 打开 point 所在的内部或允许的外部链接 |
-| q       | 保存进度并关闭阅读 buffer             |
+## Key bindings
 
-目录 buffer 中，`RET` 跳转（无目标的分组则折叠/展开），`TAB` 折叠/展开当前分组，`q`
-隐藏目录。目录重开后会恢复先前选中的行。
+### Reader
 
-## Customize
+| Key | Action |
+|---|---|
+| `n`, `]` | Next spine chapter |
+| `p`, `[` | Previous spine chapter |
+| `SPC` | Scroll forward; continue into the next chapter at the end |
+| `S-SPC` | Scroll backward; continue at the end of the previous chapter |
+| `b`, `f` | Move backward or forward through navigation history |
+| `t` | Open the table of contents |
+| `g` | Jump to a TOC entry by title |
+| `RET` | Follow the internal link at point, or an allowed external link |
+| `q` | Save progress and close the reader |
 
-运行 `M-x customize-group RET epub-reader RET` 查看全部选项和 faces。常用项如下：
+### Table of contents
 
-| 用途             | 变量                                                                                                                                                                                                                                                                                                                                                                |
-|------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 正文与图片       | epub-reader-reading-width、epub-reader-image-rows、epub-reader-text-wrap-strategy                                                                                                                                                                                                                                                                                   |
-| 交互首绘         | epub-reader-first-paint-max-blocks、epub-reader-first-paint-max-characters                                                                                                                                                                                                                                                                                          |
-| 冷滚动 chunk     | epub-reader-scroll-chunk-max-blocks、epub-reader-scroll-chunk-max-characters                                                                                                                                                                                                                                                                                        |
-| 后台预取         | epub-reader-background-idle-delay                                                                                                                                                                                                                                                                                                                                   |
-| 长章 viewport    | epub-reader-chunk-max-blocks、epub-reader-chunk-max-characters、epub-reader-chunk-guard-blocks、epub-reader-chunk-overscan-screens                                                                                                                                                                                                                                  |
-| 进度保存         | epub-reader-enable-progress、epub-reader-save-idle-delay、epub-reader-store-directory                                                                                                                                                                                                                                                                               |
-| store 锁         | epub-reader-store-lock-timeout、epub-reader-store-ownerless-lock-grace                                                                                                                                                                                                                                                                                              |
-| 链接策略         | epub-reader-external-link-schemes，默认只允许 http、https、mailto                                                                                                                                                                                                                                                                                                   |
-| locator 降级范围 | epub-reader-locator-max-synthetic-distance、epub-reader-locator-max-synthetic-rows                                                                                                                                                                                                                                                                                  |
-| 归档 adapter     | epub-reader-container-adapters                                                                                                                                                                                                                                                                                                                                      |
-| 归档安全上限     | epub-reader-container-max-entries、epub-reader-container-max-files、epub-reader-container-max-directories、epub-reader-container-max-central-directory-bytes、epub-reader-container-max-path-bytes、epub-reader-container-max-entry-bytes、epub-reader-container-max-total-bytes、epub-reader-container-max-compression-ratio、epub-reader-container-member-timeout |
+| Key | Action |
+|---|---|
+| `RET` | Visit the current entry; toggle a group that has no destination |
+| `TAB` | Collapse or expand the current group |
+| `q` | Hide the TOC buffer |
 
-正文、标题、强调、引用、代码、链接、图片提示、header/footer 和目录状态均有
-`epub-reader-*` face，可通过 `M-x customize-face` 调整。
+Reopening the TOC restores its selected row.
 
-## 功能矩阵
+## Customization
 
-| 状态   | 能力                  | 0.1.0 行为                                                                                                                                                                                                                 |
-|--------|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；中央目录安全 preflight 后按需解压 metadata、当前 spine 与当前 chunk 图片；解析 EPUB 2 NCX 与 EPUB 3 nav                                                                                 |
-| 已支持 | 常见 XHTML 语义       | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、异步后到图片与可见错误提示                                                                                                                          |
-| 已支持 | CJK 与宽度重排        | TextUI 宽度感知折行、common kinsoku 与非末行两端对齐；默认 greedy 线性选断点，亦可选 balanced KP；窗口宽度、主题、字体或 text scale 变化时失效旧布局，并通过 focus/source anchor 保持位置；图片行预算跟随 remap 后字体高度 |
-| 已支持 | 长章节                | 首绘/冷滚动小 chunk、block 数与字符数双软预算、guard/overscan、章节 region refresh；idle 扩展 viewport 并预取下一章，不会为整章预先生成 TextUI leaf/source property                                                        |
-| 已支持 | 导航                  | 前后章、章尾自动前进、内部 fragment、外部链接 allowlist、history back/forward、层级/可折叠 TOC、标题补全跳转                                                                                                               |
-| 已支持 | 进度                  | 基于书籍 fingerprint 的版本化 locator；位置变化后 idle debounce、换章与关闭保存；原子 merge/write；exact/degraded 恢复提示；全书加权百分比                                                                                 |
-| 已支持 | 输入安全              | OCF 路径规范化与冲突检查、归档成员/大小/压缩比限制、逐成员流式提取、远程资源隔离、外链 scheme allowlist                                                                                                                    |
-| 不支持 | 标注                  | 高亮、笔记、annotation UI、org-remark 集成                                                                                                                                                                                 |
-| 不支持 | 受限或固定版式出版物  | DRM、fixed-layout、竖排与精确分页                                                                                                                                                                                          |
-| 不支持 | 富媒体与复杂排版      | 复杂 ruby、MathML、SVG、音视频、JavaScript、通用 CSS、publisher font、float/grid fidelity                                                                                                                                  |
-| 不支持 | 全书服务              | 索引式全文搜索、跨设备同步、EPUB CFI 或 Web Annotation 互操作                                                                                                                                                              |
-| 不支持 | 纯 Elisp ZIP          | 0.1.0 仍通过 unzip/bsdtar adapter 流式读取归档                                                                                                                                                                             |
+Run `M-x customize-group RET epub-reader RET` to browse all options and faces.
+The settings most readers are likely to change are:
 
-## 已知限制
+| Purpose | Options |
+|---|---|
+| Reading column and images | `epub-reader-reading-width`, `epub-reader-image-rows`, `epub-reader-text-wrap-strategy` |
+| Initial chapter paint | `epub-reader-first-paint-max-blocks`, `epub-reader-first-paint-max-characters` |
+| Cold scrolling | `epub-reader-scroll-chunk-max-blocks`, `epub-reader-scroll-chunk-max-characters` |
+| Background work | `epub-reader-background-idle-delay` |
+| Long-chapter viewport | `epub-reader-chunk-max-blocks`, `epub-reader-chunk-max-characters`, `epub-reader-chunk-guard-blocks`, `epub-reader-chunk-overscan-screens` |
+| Progress saving | `epub-reader-enable-progress`, `epub-reader-save-idle-delay`, `epub-reader-store-directory` |
+| Sidecar locking | `epub-reader-store-lock-timeout`, `epub-reader-store-ownerless-lock-grace` |
+| External links | `epub-reader-external-link-schemes` (defaults to `http`, `https`, and `mailto`) |
+| Locator fallback | `epub-reader-locator-max-synthetic-distance`, `epub-reader-locator-max-synthetic-rows` |
+| Archive program | `epub-reader-container-adapters` |
+| Archive safety limits | `epub-reader-container-max-entries`, `epub-reader-container-max-files`, `epub-reader-container-max-directories`, `epub-reader-container-max-central-directory-bytes`, `epub-reader-container-max-path-bytes`, `epub-reader-container-max-entry-bytes`, `epub-reader-container-max-total-bytes`, `epub-reader-container-max-compression-ratio`, `epub-reader-container-member-timeout` |
 
-- 极长的单个段落（几万字不分段的那种）会一次性载入渲染，翻到这种段落时可能出现一次
-  明显的停顿。
-- 极端内容可能出现行尾被截断而不是换行：比如一条特别长且中间没有任何可断点的
-  URL，或个别特别宽的字形。正常文字不受影响。
-- header 里的全书百分比是按各章文件大小估算的近似值，不是精确的字数比例；读到书末
-  会到 100%，但中途的数值只当参考。
-- 阅读进度文件（sidecar）的多开保护只在本地磁盘上可靠。如果把书和进度文件放在网盘
-  或同步盘上、并且多台机器同时读同一本书，进度可能互相覆盖，保存也可能要等几秒锁
-  超时。单机使用不受影响。
-- Emacs 崩溃或被强杀后，进度目录里可能留下残余的锁文件或临时目录。目前不会自动清
-  理，后续保存会自动等待并重试；如果发现保存一直变慢，手动删掉进度目录里陈旧的
-  `*.lock` 类残留即可。
+Body text, headings, emphasis, quotations, code, links, image messages, reader
+chrome, and TOC state all have `epub-reader-*` faces. Use
+`M-x customize-face` to adjust them.
 
-## 开发
+## Feature matrix
 
-测试脚本会重建最小 EPUB2/3、CJK、长章和 adversarial fixtures，然后用 `emacs -Q --batch`
-运行全部 ERT：
+| Status | Area | Behavior in 0.1.0 |
+|---|---|---|
+| Supported | EPUB container and publication model | Opens DRM-free, reflowable EPUB 2/3; validates the central directory; extracts metadata, spine documents, and visible images on demand; reads EPUB 2 NCX and EPUB 3 navigation documents |
+| Supported | Common XHTML semantics | Paragraphs, headings, emphasis, links, quotations, code, ordered and unordered lists, a text fallback for simple tables, and visible image errors |
+| Supported | CJK and reflow | Width-aware layout, common kinsoku rules, non-final-line justification, greedy or balanced break selection, and reflow after width/font/theme/text-scale changes |
+| Supported | Long chapters | Small initial and cold-scroll chunks, block and character budgets, viewport overscan, idle expansion, and next-chapter prefetch |
+| Supported | Navigation | Previous/next chapter, automatic chapter crossing while scrolling, internal fragments, allowed external links, history, collapsible TOC, and title completion |
+| Supported | Progress | Book-fingerprint identity, versioned locators, debounced saves, atomic sidecar merge/write, exact or degraded restoration, and weighted whole-book progress |
+| Supported | Input safety | OCF path normalization, collision checks, archive count/size/ratio limits, streaming member extraction, remote-resource isolation, and an external-link scheme allowlist |
+| Not supported | Restricted and fixed-layout books | DRM, fixed-layout EPUB, vertical writing, and exact pagination |
+| Not supported | Rich media and high-fidelity publisher layout | Complex ruby, MathML, general SVG, audio/video, JavaScript, general CSS, embedded publisher fonts, floats, or grid fidelity |
+| Not supported | Whole-library services | Indexed full-text search, cross-device sync, EPUB CFI, or Web Annotation interoperability |
+| Not supported | Pure-Elisp ZIP | Archive members are still read through `unzip` or `bsdtar` |
+| Planned | Bookmarks and annotations | The locator and storage groundwork exists, but the reader UI is not available yet |
+
+## Known limitations
+
+- A chapter containing one enormous paragraph—tens of thousands of characters
+  without a paragraph break—has to load that paragraph as one unit. Entering it
+  may cause a noticeable pause.
+- A very long URL with no legal break point, or an unusually wide glyph, can be
+  clipped at the right edge instead of wrapping. Ordinary prose is unaffected.
+- The percentage in the header is an estimate based on chapter weights. It
+  reaches 100% at the end of the book, but the number between chapters should
+  be treated as a guide rather than an exact word-count percentage.
+- Progress-file coordination is designed for a local disk. If the book and its
+  sidecar live in a cloud-synced folder and the same book is open on two
+  computers, their progress can overwrite each other and a save may wait for a
+  lock timeout. Opening the same book in multiple buffers on one machine is
+  handled.
+- If Emacs crashes or is killed, stale lock or temporary entries may remain in
+  the progress directory. A later save waits and retries. If every save becomes
+  consistently slow, remove old `*.lock`-style leftovers from that directory.
+
+## Development
+
+The test runner rebuilds the minimal EPUB 2/3, CJK, long-chapter, and
+adversarial fixtures before running the complete ERT suite in `emacs -Q`:
 
 ```sh
 ./test/run-tests.sh
 ```
 
-TextUI 不在默认开发路径时：
+If TextUI is not at the default development path, provide it explicitly:
 
 ```sh
 TEXTUI_DIR=/path/to/textui ./test/run-tests.sh
 ```
 
-也可以用 `EMACS=/path/to/emacs` 指定 Emacs。生产模块应保持只调用 TextUI 公开 API；修改后至少
-运行全量 ERT、byte-compile，并用一本文本型 EPUB 做只读 smoke test。
-
+Use another Emacs executable with `EMACS=/path/to/emacs`. Production modules
+must use only TextUI's public API. Before submitting a change, run the full ERT
+suite, byte-compile the package, and open at least one text-heavy EPUB for a
+read-only smoke test.
