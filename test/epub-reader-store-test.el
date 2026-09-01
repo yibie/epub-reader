@@ -674,5 +674,33 @@
       (delete-directory directory t)
       (delete-file source))))
 
+(ert-deftest epub-reader-store-loads-marks-only-book-without-progress ()
+  "A valid schema-2 book may contain marks without a progress locator."
+  (let ((directory (make-temp-file "epub-reader-store-marks-only-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (store (epub-reader-store-open source "book")))
+          (epub-reader-store-stage-bookmark
+           store '(:id "bookmark-only" :name "Only mark"))
+          (epub-reader-store-stage-annotation
+           store '(:id "annotation-only" :quote "Only quote"))
+          (epub-reader-store-flush store)
+          (epub-reader-store-close store)
+          (setq store (epub-reader-store-open source "book"))
+          (should-not (epub-reader-store-load-locator store))
+          (should-not (epub-reader-store-warning store))
+          (should (equal
+                   (mapcar (lambda (value) (plist-get value :id))
+                           (epub-reader-store-load-bookmarks store))
+                   '("bookmark-only")))
+          (should (equal
+                   (mapcar (lambda (value) (plist-get value :id))
+                           (epub-reader-store-load-annotations store))
+                   '("annotation-only")))
+          (epub-reader-store-close store))
+      (delete-directory directory t)
+      (delete-file source))))
+
 (provide 'epub-reader-store-test)
 ;;; epub-reader-store-test.el ends here

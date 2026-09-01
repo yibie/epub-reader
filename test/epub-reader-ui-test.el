@@ -52,6 +52,32 @@
                      (= (aref source 2) offset))
            return position))
 
+(defun epub-reader-ui-test--property-count (property)
+  "Return the number of distinct non-nil PROPERTY values in this buffer."
+  (length
+   (delete-dups
+    (cl-loop for position from (point-min) below (point-max)
+             for value = (get-text-property position property)
+             when value collect value))))
+
+(defun epub-reader-ui-test--source-lines (block-key)
+  "Return canonical offsets painted on each physical line for BLOCK-KEY."
+  (save-excursion
+    (goto-char (point-min))
+    (let (lines)
+      (while (not (eobp))
+        (let ((offsets
+               (cl-loop for position from (line-beginning-position)
+                        below (line-end-position)
+                        for source = (get-text-property
+                                      position 'epub-reader-source)
+                        when (and (epub-reader-locator-source-p source)
+                                  (equal (aref source 1) block-key))
+                        collect (aref source 2))))
+          (when offsets (push offsets lines)))
+        (forward-line 1))
+      (nreverse lines))))
+
 (defun epub-reader-ui-test--visual-row (window)
   "Return WINDOW point's visual row relative to its start."
   (count-screen-lines (window-start window) (window-point window)
@@ -1121,6 +1147,60 @@
       (delete-directory directory t)
       (delete-file source))))
 
+(ert-deftest epub-reader-ui-english-cross-line-highlight-keeps-source-space ()
+  (let ((directory (make-temp-file "epub-reader-english-range-" t))
+        (source (make-temp-file "epub-reader-language-" nil ".epub"))
+        (epub-reader-enable-progress nil)
+        (epub-reader-reading-width 18)
+        (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
+        reader)
+    (copy-file (epub-reader-test-fixture "language-mix.epub") source t)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          (setq reader (epub-reader-open source))
+          (with-current-buffer reader
+            (let* ((block
+                    (cl-find "english" (epub-reader-ui--current-blocks)
+                             :key #'epub-reader-block-element-id :test #'equal))
+                   (key (epub-reader-block-key block))
+                   (text (substring-no-properties
+                          (epub-reader-block-text block)))
+                   (lines (epub-reader-ui-test--source-lines key))
+                   (pair
+                    (cl-loop for left in lines for right in (cdr lines)
+                             for left-last = (car (last left))
+                             for right-first = (car right)
+                             when (> right-first (1+ left-last))
+                             return (cons left-last right-first)))
+                   (from (max 0 (- (car pair) 3)))
+                   (to (min (length text) (+ (cdr pair) 4)))
+                   (start (epub-reader-ui-test--source-position key from))
+                   (end (1+ (epub-reader-ui-test--source-position
+                             key (1- to)))))
+              (should pair)
+              (goto-char end)
+              (set-mark start)
+              (setq mark-active t transient-mark-mode t)
+              (let ((annotation (epub-reader-add-highlight start end)))
+                (should
+                 (equal
+                  (epub-reader-locator-range-exact
+                   (epub-reader-annotation-range annotation))
+                  (substring text from to)))
+                (should (string-match-p
+                         " " (epub-reader-locator-range-exact
+                              (epub-reader-annotation-range annotation))))
+                (goto-char (epub-reader-ui-test--source-position key from))
+                (should
+                 (member (epub-reader-annotation-id annotation)
+                         (get-text-property
+                          (point) 'epub-reader-annotation-ids)))))))
+      (when (buffer-live-p reader) (kill-buffer reader))
+      (delete-directory directory t)
+      (delete-file source))))
+
 (ert-deftest epub-reader-ui-two-readers-merge-independent-highlights ()
   (let ((directory (make-temp-file "epub-reader-concurrent-highlights-" t))
         (source (make-temp-file "epub-reader-language-" nil ".epub"))
@@ -1161,6 +1241,142 @@
       (when (buffer-live-p reopened) (kill-buffer reopened))
       (delete-directory directory t)
       (delete-file source))))
+
+(ert-deftest epub-reader-ui-marks-only-sidecar-reopens-with-progress-enabled ()
+  (let ((directory (make-temp-file "epub-reader-ui-marks-only-" t))
+        (source (make-temp-file "epub-reader-language-" nil ".epub"))
+        (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
+        reader)
+    (copy-file (epub-reader-test-fixture "language-mix.epub") source t)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory)
+              (epub-reader-enable-progress nil))
+          (setq reader (epub-reader-open source))
+          (with-current-buffer reader
+            (goto-char (epub-reader-ui-test--source-position "id:english" 0))
+            (epub-reader-add-bookmark "English"))
+          (kill-buffer reader)
+          (setq reader nil)
+          (let ((epub-reader-enable-progress t))
+            (setq reader (epub-reader-open source)))
+          (with-current-buffer reader
+            (should (= (length (epub-reader-session-bookmarks
+                                epub-reader-ui--session))
+                       1))))
+      (when (buffer-live-p reader) (kill-buffer reader))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-ui-live-mark-lists-refresh-when-reopened ()
+  (let ((directory (make-temp-file "epub-reader-ui-live-lists-" t))
+        (source (make-temp-file "epub-reader-language-" nil ".epub"))
+        (epub-reader-enable-progress nil)
+        (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
+        reader bookmark-list annotation-list)
+    (copy-file (epub-reader-test-fixture "language-mix.epub") source t)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          (setq reader (epub-reader-open source))
+          (with-current-buffer reader
+            (goto-char (epub-reader-ui-test--source-position "id:english" 0))
+            (epub-reader-add-bookmark "First")
+            (setq bookmark-list (epub-reader-bookmarks))
+            (goto-char (epub-reader-ui-test--source-position "id:mixed" 0))
+            (epub-reader-add-bookmark "Second")
+            (cl-letf (((symbol-function 'display-buffer) #'identity))
+              (epub-reader-bookmarks)))
+          (with-current-buffer bookmark-list
+            (should (= (epub-reader-ui-test--property-count
+                        'epub-reader-bookmark)
+                       2)))
+          (with-current-buffer reader
+            (cl-labels ((add-highlight
+                         (key from to)
+                         (let ((start (epub-reader-ui-test--source-position
+                                       key from))
+                               (end (1+ (epub-reader-ui-test--source-position
+                                        key (1- to)))))
+                           (goto-char end)
+                           (set-mark start)
+                           (setq mark-active t transient-mark-mode t)
+                           (epub-reader-add-highlight start end))))
+              (add-highlight "id:english" 0 5)
+              (setq annotation-list (epub-reader-annotations))
+              (add-highlight "id:mixed" 3 8)
+              (cl-letf (((symbol-function 'display-buffer) #'identity))
+                (epub-reader-annotations))))
+          (with-current-buffer annotation-list
+            (should (= (epub-reader-ui-test--property-count
+                        'epub-reader-annotation)
+                       2))))
+      (when (buffer-live-p bookmark-list) (kill-buffer bookmark-list))
+      (when (buffer-live-p annotation-list) (kill-buffer annotation-list))
+      (when (buffer-live-p reader) (kill-buffer reader))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-ui-unvisited-degraded-annotation-is-visible-in-list ()
+  (let ((directory (make-temp-file "epub-reader-ui-degraded-list-" t))
+        (epub-reader-enable-progress nil)
+        (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
+        reader list-buffer)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          (setq reader (epub-reader-open
+                        (epub-reader-test-fixture "epub2.epub")))
+          (with-current-buffer reader
+            (let* ((session epub-reader-ui--session)
+                   (chapter (epub-reader-ui--chapter-data session 1))
+                   (block
+                    (cl-find-if
+                     (lambda (candidate)
+                       (> (length (epub-reader-block-text candidate)) 6))
+                     (append (epub-reader-chapter-data-blocks chapter) nil)))
+                   (text (substring-no-properties
+                          (epub-reader-block-text block)))
+                   (exact (substring text 0 (min 6 (length text))))
+                   (start (epub-reader-locator--create
+                           :schema 3
+                           :book-key (epub-reader-block-book-key block)
+                           :spine-index 1
+                           :path (epub-reader-block-document-path block)
+                           :block "missing-block" :offset 0
+                           :prefix "" :suffix (substring text (length exact)
+                                                          (min (length text)
+                                                               (+ (length exact)
+                                                                  12)))
+                           :context exact))
+                   (end (copy-epub-reader-locator start))
+                   (range (epub-reader-locator-range--create
+                           :schema 1 :start start :end end :exact exact
+                           :prefix "" :suffix
+                           (epub-reader-locator-suffix start)))
+                   (annotation
+                    (epub-reader-annotation--create
+                     :id "degraded-unvisited" :range range :note ""
+                     :created 1.0)))
+              (setf (epub-reader-locator-offset end) (1- (length exact)))
+              (push annotation (epub-reader-session-annotations session))
+              (setq list-buffer (epub-reader-annotations))
+              (should (eq (epub-reader-annotation-quality annotation) 'quote))))
+          (with-current-buffer list-buffer
+            (should (string-match-p "⚠" (buffer-string)))
+            (goto-char
+             (cl-loop for cursor from (point-min) below (point-max)
+                      when (get-text-property cursor 'epub-reader-annotation)
+                      return cursor))
+            (cl-letf (((symbol-function 'pop-to-buffer) #'identity))
+              (epub-reader-annotation-list-activate))
+            (should (string-match-p "⚠" (buffer-string)))))
+      (when (buffer-live-p list-buffer) (kill-buffer list-buffer))
+      (when (buffer-live-p reader) (kill-buffer reader))
+      (delete-directory directory t))))
 
 (provide 'epub-reader-ui-test)
 ;;; epub-reader-ui-test.el ends here

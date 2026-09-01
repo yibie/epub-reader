@@ -84,6 +84,25 @@
                          (substring-no-properties
                           (epub-reader-block-text block)))))
 
+(defun epub-reader-annotation-test--locator
+    (block offset &optional schema path book-key)
+  "Return a test locator for BLOCK and OFFSET."
+  (epub-reader-locator--create
+   :schema (or schema 3) :book-key (or book-key "book") :spine-index 0
+   :path (or path "chapter.xhtml") :block block :offset offset
+   :prefix "" :suffix "" :context ""))
+
+(defun epub-reader-annotation-test--range
+    (block offset exact prefix suffix &optional end-block end-offset)
+  "Return a test range starting at BLOCK and OFFSET over EXACT."
+  (epub-reader-locator-range--create
+   :schema 1
+   :start (epub-reader-annotation-test--locator block offset)
+   :end (epub-reader-annotation-test--locator
+         (or end-block block)
+         (or end-offset (+ offset (1- (length exact)))))
+   :exact exact :prefix prefix :suffix suffix))
+
 (ert-deftest epub-reader-english-wraps-at-spaces-and-justifies-lines ()
   (epub-reader-annotation-test--with-language-buffer
       (_buffer _publication blocks)
@@ -165,6 +184,79 @@
                     'exact))
         (should (equal (epub-reader-locator-range-resolution-spans resolution)
                        (list (list key start-offset end-offset))))))))
+
+(ert-deftest epub-reader-locator-range-captures-hidden-english-wrap-space ()
+  "A visual-line selection must quote canonical source, including its space."
+  (epub-reader-annotation-test--with-language-buffer
+      (buffer _publication blocks)
+    (let* ((block (epub-reader-annotation-test--block blocks "english"))
+           (key (epub-reader-block-key block))
+           (text (substring-no-properties (epub-reader-block-text block)))
+           (lines (epub-reader-annotation-test--source-lines key))
+           (pair
+            (cl-loop for left in lines
+                     for right in (cdr lines)
+                     for left-last = (car (last (nth 2 left)))
+                     for right-first = (car (nth 2 right))
+                     when (> right-first (1+ left-last))
+                     return (list left right left-last right-first)))
+           (start-offset (max 0 (- (nth 2 pair) 3)))
+           (end-offset (min (length text) (+ (nth 3 pair) 4)))
+           (start (epub-reader-annotation-test--position key start-offset))
+           (end (1+ (epub-reader-annotation-test--position
+                     key (1- end-offset))))
+           (range
+            (epub-reader-locator-range-capture
+             start end 0 buffer
+             (epub-reader-annotation-test--records blocks))))
+      (should pair)
+      (should (string-match-p " " (substring text start-offset end-offset)))
+      (should (equal (epub-reader-locator-range-exact range)
+                     (substring text start-offset end-offset)))
+      (let ((resolution
+             (epub-reader-locator-range-resolve
+              range (epub-reader-annotation-test--records blocks))))
+        (should (eq (epub-reader-locator-range-resolution-quality resolution)
+                    'exact))))))
+
+(ert-deftest epub-reader-locator-range-quote-tie-prefers-original-block ()
+  (let* ((records '(("book" 0 "chapter.xhtml" "b1" "xx target yy")
+                    ("book" 0 "chapter.xhtml" "b2" "xxx target yy")))
+         (range (epub-reader-annotation-test--range
+                 "b2" 3 "target" "missing" "context"))
+         (resolution (epub-reader-locator-range-resolve range records)))
+    (should (eq (epub-reader-locator-range-resolution-quality resolution)
+                'quote))
+    (should (equal (epub-reader-locator-range-resolution-spans resolution)
+                   '(("b2" 4 10))))))
+
+(ert-deftest epub-reader-locator-range-quote-tie-can-be-ambiguous ()
+  (let* ((records '(("book" 0 "chapter.xhtml" "b1" "xx target yy")
+                    ("book" 0 "chapter.xhtml" "b2" "xx target yy")))
+         (range (epub-reader-annotation-test--range
+                 "missing" 3 "target" "missing" "context"))
+         (resolution (epub-reader-locator-range-resolve range records)))
+    (should (eq (epub-reader-locator-range-resolution-quality resolution)
+                'ambiguous))
+    (should-not (epub-reader-locator-range-resolution-spans resolution))))
+
+(ert-deftest epub-reader-locator-range-rejects-unsupported-endpoint-schema ()
+  (let* ((start (epub-reader-annotation-test--locator "b1" 0 999))
+         (end (epub-reader-annotation-test--locator "b1" 5 999))
+         (persisted
+          (list :schema 1
+                :start (epub-reader-locator-to-plist start)
+                :end (epub-reader-locator-to-plist end)
+                :exact "target" :prefix "" :suffix "")))
+    (should-error (epub-reader-locator-range-from-plist persisted))
+    (let* ((range (epub-reader-locator-range--create
+                   :schema 1 :start start :end end :exact "target"
+                   :prefix "" :suffix ""))
+           (resolution
+            (epub-reader-locator-range-resolve
+             range '(("book" 0 "chapter.xhtml" "b1" "target")))))
+      (should (eq (epub-reader-locator-range-resolution-quality resolution)
+                  'unsupported-schema)))))
 
 (ert-deftest epub-reader-locator-range-relocates-mixed-quote ()
   (epub-reader-annotation-test--with-language-buffer
