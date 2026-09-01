@@ -130,7 +130,7 @@ A single larger block is still materialized by itself."
   :doc "Keymap active in EPUB TOC TextUI buffers."
   "RET" #'epub-reader-toc-activate
   "TAB" #'epub-reader-toc-toggle
-  "q" #'quit-window)
+  "q" #'epub-reader-toc-quit)
 
 (defvar epub-reader-ui-link-map
   (let ((map (make-sparse-keymap)))
@@ -1045,14 +1045,57 @@ A single larger block is still materialized by itself."
            when (equal (get-text-property position 'epub-reader-toc-key) key)
            return position))
 
+(defun epub-reader-toc--fallback-position (key)
+  "Return visible position for KEY, an ancestor, current row, or first row."
+  (let ((candidate key)
+        position)
+    (while (and candidate (not position))
+      (setq position (epub-reader-toc--key-position candidate))
+      (unless position
+        (setq candidate
+              (and (string-match "\\`\\(.*\\)/[^/]+\\'" candidate)
+                   (match-string 1 candidate)))))
+    (or position
+        (cl-loop for cursor from (point-min) below (point-max)
+                 for row = (get-text-property cursor 'epub-reader-toc-row)
+                 when (and row (epub-reader-toc-row-current-p row))
+                 return cursor)
+        (epub-reader-toc--key-position "0"))))
+
+(defun epub-reader-toc--restore-selection (&optional window)
+  "Restore the stable selected row and optional WINDOW point."
+  (let* ((requested (plist-get textui-state :selected-key))
+         (position (epub-reader-toc--fallback-position requested)))
+    (when position
+      (goto-char position)
+      (let ((actual (get-text-property position 'epub-reader-toc-key)))
+        (setq textui-state
+              (plist-put (copy-sequence textui-state)
+                         :selected-key actual)))
+      (when (window-live-p window)
+        (set-window-point window position)))
+    position))
+
 (defun epub-reader-toc--refresh ()
   "Refresh current TOC and preserve point by stable row key."
   (let* ((row (epub-reader-toc--row-at-point))
-         (key (and row (epub-reader-toc-row-key row))))
+         (key (or (and row (epub-reader-toc-row-key row))
+                  (plist-get textui-state :selected-key))))
+    (setq textui-state
+          (plist-put (copy-sequence textui-state) :selected-key key))
     (textui-refresh (current-buffer))
-    (when key
-      (let ((position (epub-reader-toc--key-position key)))
-        (when position (goto-char position))))))
+    (epub-reader-toc--restore-selection
+     (get-buffer-window (current-buffer) t))))
+
+(defun epub-reader-toc-quit ()
+  "Hide the TOC after saving its selected stable row key."
+  (interactive)
+  (let ((row (epub-reader-toc--row-at-point)))
+    (when row
+      (setq textui-state
+            (plist-put (copy-sequence textui-state) :selected-key
+                       (epub-reader-toc-row-key row)))))
+  (delete-windows-on (current-buffer) t))
 
 (defun epub-reader-toc-toggle ()
   "Toggle the TOC subtree at point."
@@ -1091,7 +1134,14 @@ A single larger block is still materialized by itself."
          (session (epub-reader-ui--current-session))
          (existing (epub-reader-session-toc-buffer session)))
     (if (buffer-live-p existing)
-        (progn (display-buffer existing) existing)
+        (let ((_hidden (delete-windows-on existing t))
+              (window
+               (display-buffer existing '(display-buffer-in-side-window
+                                          (side . left)
+                                          (window-width . 34)))))
+          (with-current-buffer existing
+            (epub-reader-toc--restore-selection window))
+          existing)
       (let* ((epub-reader-toc--reader-buffer reader)
             (buffer
              (textui-open
@@ -1099,13 +1149,20 @@ A single larger block is still materialized by itself."
                (format "*EPUB TOC: %s*"
                        (epub-reader-publication-title
                         (epub-reader-session-publication session))))
-              #'epub-reader-toc-frame '(:collapsed nil))))
+              #'epub-reader-toc-frame
+              '(:collapsed nil :selected-key nil))))
         (with-current-buffer buffer
           (setq-local epub-reader-toc--reader-buffer reader)
           (epub-reader-toc-mode 1))
         (setf (epub-reader-session-toc-buffer session) buffer)
-        (display-buffer buffer '(display-buffer-in-side-window
-                                 (side . left) (window-width . 34)))
+        ;; `textui-open' may choose an ordinary display window.  The reader
+        ;; owns the sole TOC presentation and always recreates it at the side.
+        (delete-windows-on buffer t)
+        (let ((window
+               (display-buffer buffer '(display-buffer-in-side-window
+                                        (side . left) (window-width . 34)))))
+          (with-current-buffer buffer
+            (epub-reader-toc--restore-selection window)))
         buffer))))
 
 (defun epub-reader-ui--completion-entries (entries &optional prefix)

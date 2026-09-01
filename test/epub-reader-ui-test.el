@@ -495,6 +495,32 @@
       (with-current-buffer reader
         (should (= (plist-get textui-state :spine-index) 1))))))
 
+(ert-deftest epub-reader-ui-toc-reopen-restores-selected-row ()
+  (let ((reader
+         (epub-reader-open (epub-reader-test-fixture "epub3-edge.epub")))
+        toc)
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer reader)
+          (setq toc (epub-reader-toc))
+          (let ((toc-window (get-buffer-window toc t)))
+            (should (window-live-p toc-window))
+            (select-window toc-window)
+            (with-current-buffer toc
+              (goto-char (epub-reader-toc--key-position "0/0/0"))
+              (epub-reader-toc-quit))
+            (should-not (get-buffer-window toc t)))
+          (with-current-buffer reader
+            (epub-reader-toc))
+          (let ((toc-window (get-buffer-window toc t)))
+            (should (window-live-p toc-window))
+            (should
+             (equal (with-current-buffer toc
+                      (get-text-property (window-point toc-window)
+                                         'epub-reader-toc-key))
+                    "0/0/0"))))
+      (when (buffer-live-p reader) (kill-buffer reader)))))
+
 (ert-deftest epub-reader-ui-completion-and-header-show-weighted-progress ()
   (epub-reader-ui-test--with-reader _buffer
     (let ((initial (epub-reader-ui--progress-percent))
