@@ -196,13 +196,35 @@
                          :key #'epub-reader-block-element-id :test #'equal))
                (latin
                 (cl-find "latin-break" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+               (japanese
+                (cl-find "ja-break" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+               (korean
+                (cl-find "ko-break" blocks
                          :key #'epub-reader-block-element-id :test #'equal)))
           (should (equal (substring-no-properties
                           (epub-reader-block-text cjk))
                          "中文，继续 甲（乙） 中 文"))
           (should (equal (substring-no-properties
                           (epub-reader-block-text latin))
-                         "Hello world")))
+                         "Hello world"))
+          (should (equal (substring-no-properties
+                          (epub-reader-block-text japanese))
+                         "日本語"))
+          (should (equal (substring-no-properties
+                          (epub-reader-block-text korean))
+                         "한국어 문장"))
+          (should (equal
+                   (get-text-property
+                    0 'epub-reader-language
+                    (epub-reader-block-text japanese))
+                   "ja"))
+          (should (equal
+                   (get-text-property
+                    0 'epub-reader-language
+                    (epub-reader-block-text korean))
+                   "ko")))
       (epub-reader-publication-close publication))))
 
 (ert-deftest epub-reader-render-preserves-br-as-attributed-hard-break ()
