@@ -2006,14 +2006,28 @@ window rows; TextUI's internal focus identity is not an EPUB position."
              (gethash (car span) (epub-reader-ui--current-block-index session))))
         (unless block-index (user-error "Annotation block could not be found"))
         (epub-reader-ui--ensure-block-visible block-index))
-      (let ((position
-             (cl-loop for cursor from (point-min) below (point-max)
-                      for source = (get-text-property
-                                    cursor 'epub-reader-source)
-                      when (and (epub-reader-locator-source-p source)
-                                (equal (aref source 1) (car span))
-                                (= (aref source 2) (nth 1 span)))
-                      return cursor)))
+      (let* ((id (epub-reader-annotation-id annotation))
+             (matching-source-p
+              (lambda (cursor)
+                (let ((source (get-text-property
+                               cursor 'epub-reader-source)))
+                  (and (epub-reader-locator-source-p source)
+                       (equal (aref source 1) (car span))
+                       (= (aref source 2) (nth 1 span))))))
+             ;; Image leaves and their visible alt caption share a source
+             ;; anchor.  Prefer the painted text run; fall back to the source
+             ;; position for ordinary exact ranges.
+             (position
+              (or
+               (cl-loop for cursor from (point-min) below (point-max)
+                        when (and (funcall matching-source-p cursor)
+                                  (member id (get-text-property
+                                              cursor
+                                              'epub-reader-annotation-ids)))
+                        return cursor)
+               (cl-loop for cursor from (point-min) below (point-max)
+                        when (funcall matching-source-p cursor)
+                        return cursor))))
         (unless position (user-error "Annotation is outside the rendered chunk"))
         (goto-char position)
         (epub-reader-ui--recenter-visible-windows)

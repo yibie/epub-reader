@@ -358,7 +358,9 @@ Each record is (POSITION SOURCE BOOK-KEY SPINE-INDEX CHARACTER)."
   (with-current-buffer (or buffer (current-buffer))
     (cl-loop for position from (point-min) below (point-max)
              for source = (get-text-property position 'epub-reader-source)
-             when (epub-reader-locator-source-p source)
+             when (and (epub-reader-locator-source-p source)
+                       (not (get-text-property
+                             position 'epub-reader-image-slice)))
              collect (list position source
                            (get-text-property position 'epub-reader-book-key)
                            (get-text-property position

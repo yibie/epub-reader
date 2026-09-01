@@ -195,6 +195,19 @@
          (member (epub-reader-locator-block locator)
                  (mapcar #'epub-reader-block-key image-blocks)))))))
 
+(ert-deftest epub-reader-ui-image-slices-cannot-be-captured-as-text-highlight ()
+  (epub-reader-ui-test--with-reader _buffer
+    (epub-reader-next-chapter)
+    (epub-reader-ui-test--materialize-current-images)
+    (let ((position
+           (cl-loop for cursor from (point-min) below (point-max)
+                    when (get-text-property cursor 'epub-reader-image-slice)
+                    return cursor)))
+      (should position)
+      (should-error
+       (epub-reader-locator-range-capture position (1+ position) 1)
+       :type 'user-error))))
+
 (ert-deftest epub-reader-ui-image-slices-disable-line-spacing ()
   (let ((saved-default (default-value 'line-spacing))
         (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
