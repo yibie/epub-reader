@@ -74,13 +74,19 @@
   "Face for image alternative text."
   :group 'epub-reader)
 
+(defface epub-reader-image-error-face
+  '((t (:inherit error :slant italic)))
+  "Face for visible image resource diagnostics."
+  :group 'epub-reader)
+
 (defconst epub-reader-render--xml-namespace
   "http://www.w3.org/XML/1998/namespace")
 
 (cl-defstruct (epub-reader-block
                (:constructor epub-reader-block--create))
   "One semantic block extracted from a spine document."
-  key kind text document-path element-id level image-file image-alt)
+  key kind text document-path element-id level image-file image-alt image-error
+  list-marker)
 
 (defun epub-reader-render--local-name (node)
   "Return namespace-independent local tag name of XML NODE."
@@ -174,60 +180,75 @@
       (add-face-text-property 0 (length result) face t result))
     result))
 
-(defun epub-reader-render--inline (node &optional inherited-language)
-  "Return attributed inline text represented by NODE.
-INHERITED-LANGUAGE is overridden by `xml:lang' or `lang' on descendants."
+(defun epub-reader-render--inline-runs (node &optional inherited-language)
+  "Return attributed strings and image tokens represented by NODE.
+INHERITED-LANGUAGE is overridden by `xml:lang' or `lang' on descendants.
+Image tokens are vectors whose second item is the source XML element."
   (let ((language
          (epub-reader-render--language node inherited-language)))
-    (mapconcat
+    (cl-mapcan
      (lambda (child)
        (cond
-      ((stringp child)
-       (let ((result (copy-sequence child)))
-         (when language
-           (put-text-property 0 (length result)
-                              'epub-reader-language language result))
-         result))
-      ((not (epub-reader-render--element-p child)) "")
-      (t
-       (let* ((tag (epub-reader-render--local-name child))
-              (child-language
-               (epub-reader-render--language child language))
-              (text (epub-reader-render--inline child language))
-              (rendered
-               (pcase tag
-                 ((or "em" "i")
-                  (epub-reader-render--add-face
-                   text 'epub-reader-emphasis-face))
-                 ((or "strong" "b")
-                  (epub-reader-render--add-face
-                   text 'epub-reader-strong-face))
-                 ("code"
-                  (epub-reader-render--add-face text 'epub-reader-code-face))
-                 ("a"
-                  (let ((href (epub-reader-render--attribute child "href"))
-                        (result (epub-reader-render--add-face
-                                 text 'epub-reader-link-face)))
-                    (when (and href (> (length result) 0))
-                      (add-text-properties
-                       0 (length result)
-                       (list 'epub-reader-href href)
-                       result))
-                    result))
-                 ("br" (propertize "\n" 'epub-reader-hard-break t))
-                 ((or "img" "image") "")
-                 ((or "ul" "ol" "table") "")
-                 (_ text)))
-              (id (epub-reader-render--attribute child "id")))
-         (when id
-           (if (string-empty-p rendered)
-               (setq rendered
-                     (propertize "\u2060" 'display ""
-                                 'epub-reader-language child-language))
-             (setq rendered (copy-sequence rendered)))
-           (put-text-property 0 1 'epub-reader-anchor-id id rendered))
-         rendered))))
-     (cddr node) "")))
+         ((stringp child)
+          (let ((result (copy-sequence child)))
+            (when language
+              (put-text-property 0 (length result)
+                                 'epub-reader-language language result))
+            (list result)))
+         ((not (epub-reader-render--element-p child)) nil)
+         (t
+          (let* ((tag (epub-reader-render--local-name child))
+                 (child-language
+                  (epub-reader-render--language child language))
+                 (runs
+                  (pcase tag
+                    ((or "img" "image") (list (vector 'image child)))
+                    ("br"
+                     (list (propertize "\n" 'epub-reader-hard-break t)))
+                    ((or "ul" "ol" "table") nil)
+                    (_ (epub-reader-render--inline-runs child language))))
+                 (face
+                  (pcase tag
+                    ((or "em" "i") 'epub-reader-emphasis-face)
+                    ((or "strong" "b") 'epub-reader-strong-face)
+                    ("code" 'epub-reader-code-face)
+                    ("a" 'epub-reader-link-face)))
+                 (href (and (equal tag "a")
+                            (epub-reader-render--attribute child "href")))
+                 (rendered
+                  (mapcar
+                   (lambda (run)
+                     (if (not (stringp run))
+                         run
+                       (let ((result (if face
+                                         (epub-reader-render--add-face run face)
+                                       (copy-sequence run))))
+                         (when (and href (> (length result) 0))
+                           (add-text-properties
+                            0 (length result)
+                            (list 'epub-reader-href href) result))
+                         result)))
+                   runs))
+                 (id (epub-reader-render--attribute child "id")))
+            (when id
+              (let ((first-text
+                     (cl-find-if (lambda (run)
+                                   (and (stringp run) (> (length run) 0)))
+                                 rendered)))
+                (if first-text
+                    (put-text-property
+                     0 1 'epub-reader-anchor-id id first-text)
+                  (push (propertize "\u2060" 'display ""
+                                    'epub-reader-language child-language
+                                    'epub-reader-anchor-id id)
+                        rendered))))
+            rendered))))
+     (cddr node))))
+
+(defun epub-reader-render--inline (node &optional inherited-language)
+  "Return attributed inline text represented by NODE, excluding images."
+  (mapconcat (lambda (run) (if (stringp run) run ""))
+             (epub-reader-render--inline-runs node inherited-language) ""))
 
 (defun epub-reader-render--xml-whitespace-p (character)
   "Return non-nil when CHARACTER is collapsible XML whitespace."
@@ -342,21 +363,26 @@ and other languages it becomes one space.  Newlines carrying the
         (t 'epub-reader-heading-3-face)))
 
 (defun epub-reader-render--image-data (publication section node)
-  "Return (FILE ALT) for image NODE in SECTION of PUBLICATION."
+  "Return (FILE ALT ERROR) for image NODE in SECTION of PUBLICATION."
   (let ((source (or (epub-reader-render--attribute node "src")
                     (epub-reader-render--attribute node "href")))
         (alt (or (epub-reader-render--attribute node "alt") "Image")))
     (if (not source)
-        (list nil alt)
-      (condition-case nil
+        (list nil alt "Image has no source URL")
+      (condition-case error-data
           (let ((target
                  (epub-reader-publication-resolve-resource
                   publication section source)))
-            (list (and (not (epub-reader-link-target-external-p target))
-                       (file-readable-p (epub-reader-link-target-file target))
-                       (epub-reader-link-target-file target))
-                  alt))
-        (error (list nil alt))))))
+            (cond
+             ((epub-reader-link-target-external-p target)
+              (list nil alt (format "Remote image is unsupported: %s" source)))
+             ((not (file-readable-p (epub-reader-link-target-file target)))
+              (list nil alt (format "Image resource is unreadable: %s" source)))
+             (t (list (epub-reader-link-target-file target) alt nil))))
+        (error
+         (list nil alt
+               (format "Image error for %s: %s" source
+                       (error-message-string error-data))))))))
 
 (defun epub-reader-render--table-text (node language)
   "Return a readable plain-text representation of table NODE in LANGUAGE."
@@ -387,7 +413,8 @@ and other languages it becomes one space.  Newlines carrying the
             (epub-reader-render--language body root-language))
            blocks)
       (cl-labels
-          ((emit (kind node text path &optional level image-file image-alt)
+          ((emit (kind node text path &optional level image-file image-alt
+                       image-error list-marker)
              (let* ((id (epub-reader-render--attribute node "id"))
                     (anchor-text
                      (if (string-empty-p text)
@@ -403,7 +430,9 @@ and other languages it becomes one space.  Newlines carrying the
                          ('heading (epub-reader-render--heading-face level))
                          ('quote 'epub-reader-quote-face)
                          ('code 'epub-reader-code-face)
-                         ('image 'epub-reader-image-alt-face)
+                         ('image (if image-error
+                                     'epub-reader-image-error-face
+                                   'epub-reader-image-alt-face))
                          (_ 'epub-reader-prose-face)))
                       (attributed
                        (epub-reader-locator-attach-source
@@ -415,13 +444,85 @@ and other languages it becomes one space.  Newlines carrying the
                 (epub-reader-block--create
                  :key key :kind kind :text attributed
                  :document-path document-path :element-id id :level level
-                 :image-file image-file :image-alt image-alt)
+                 :image-file image-file :image-alt image-alt
+                 :image-error image-error :list-marker list-marker)
                 blocks)))
            (emit-image (node path)
-             (pcase-let ((`(,file ,alt)
+             (pcase-let ((`(,file ,alt ,image-error)
                            (epub-reader-render--image-data
                             publication section node)))
-               (emit 'image node (format "[%s]" alt) path nil file alt)))
+               (emit 'image node
+                     (if image-error
+                         (format "[%s — %s]" alt image-error)
+                       (format "[%s]" alt))
+                     path nil file alt image-error)))
+           (node-without-id (node)
+             (cons (car node)
+                   (cons
+                    (cl-remove-if
+                     (lambda (attribute)
+                       (equal
+                        (if (consp (car attribute))
+                            (cdr (car attribute))
+                          (symbol-name (car attribute)))
+                        "id"))
+                     (copy-tree (cadr node)))
+                    (cddr node))))
+           (emit-inline-runs (kind node path language)
+             (let* ((runs (epub-reader-render--inline-runs node language))
+                    (has-image
+                     (cl-some (lambda (run)
+                                (and (vectorp run) (eq (aref run 0) 'image)))
+                              runs)))
+               (if (not has-image)
+                   (emit kind node
+                         (epub-reader-render--normalize-inline
+                          (epub-reader-render--inline node language) language)
+                         path)
+                 (when (epub-reader-render--attribute node "id")
+                   (emit 'anchor node "" path))
+                 (let ((text "")
+                       (part 0)
+                       (image-index 0)
+                       (anonymous-node (node-without-id node)))
+                   (cl-labels
+                       ((flush-text ()
+                          (let ((normalized
+                                 (epub-reader-render--normalize-inline
+                                  text language)))
+                            (unless (string-empty-p normalized)
+                              (emit kind anonymous-node normalized
+                                    (format "%s/text:%d" path part))
+                              (setq part (1+ part))))
+                          (setq text "")))
+                     (dolist (run runs)
+                       (if (stringp run)
+                           (setq text (concat text run))
+                         (flush-text)
+                         (emit-image (aref run 1)
+                                     (format "%s/image:%d"
+                                             path image-index))
+                         (setq image-index (1+ image-index))))
+                     (flush-text))))))
+           (walk-list (node ordered-p path language)
+             (let ((number
+                    (if ordered-p
+                        (let ((start
+                               (epub-reader-render--attribute node "start")))
+                          (if (and start
+                                   (string-match-p "\\`-?[0-9]+\\'" start))
+                              (string-to-number start)
+                            1))
+                      0)))
+               (cl-loop
+                for child in (epub-reader-render--children node)
+                for index from 0
+                when (equal (epub-reader-render--local-name child) "li")
+                do (progn
+                     (walk child
+                           (if ordered-p (format "%d. " number) "• ")
+                           (format "%s/%d:li" path index) language)
+                     (setq number (1+ number))))))
            (walk-children (node context path language)
              (cl-loop
               for child in (epub-reader-render--children node)
@@ -443,15 +544,9 @@ and other languages it becomes one space.  Newlines carrying the
                           node-language)
                          path level)))
                 ((equal tag "p")
-                 (emit (or context 'paragraph) node
-                       (epub-reader-render--normalize-inline
-                        (epub-reader-render--inline node node-language)
-                        node-language) path)
-                 (cl-loop
-                  for image in (epub-reader-render--descendants node "img")
-                  for image-index from 0
-                  do (emit-image image
-                                 (format "%s/image:%d" path image-index))))
+                 (emit-inline-runs (or (and (symbolp context) context)
+                                       'paragraph)
+                                   node path node-language))
                 ((equal tag "blockquote")
                  (when (epub-reader-render--attribute node "id")
                    (emit 'anchor node "" path))
@@ -461,12 +556,14 @@ and other languages it becomes one space.  Newlines carrying the
                        (string-trim-right
                         (epub-reader-render--raw-text node)) path))
                 ((member tag '("ul" "ol"))
-                 (walk-children node 'list-item path node-language))
+                 (walk-list node (equal tag "ol") path node-language))
                 ((equal tag "li")
-                 (emit (or context 'list-item) node
+                 (emit 'list-item node
                        (epub-reader-render--normalize-inline
                         (epub-reader-render--inline node node-language)
-                        node-language) path)
+                        node-language)
+                       path nil nil nil nil
+                       (if (stringp context) context "• "))
                  (cl-loop
                   for child in (epub-reader-render--children node)
                   for index from 0
@@ -499,7 +596,16 @@ and other languages it becomes one space.  Newlines carrying the
                 (t
                  (when (epub-reader-render--attribute node "id")
                    (emit 'anchor node "" path))
-                 (walk-children node context path node-language))))))
+                 (if (cl-some
+                      (lambda (child)
+                        (and (stringp child)
+                             (string-match-p "[^[:space:]]" child)))
+                      (cddr node))
+                     (emit-inline-runs (or (and (symbolp context) context)
+                                           'paragraph)
+                                       (node-without-id node) path
+                                       node-language)
+                   (walk-children node context path node-language)))))))
         (walk-children body nil "body" body-language))
     (nreverse blocks)))
 
@@ -528,7 +634,8 @@ and other languages it becomes one space.  Newlines carrying the
                   (epub-reader-block-text block)))))
     ('list-item
      (epub-reader-render--text-element
-      (concat "• " (epub-reader-block-text block))))
+      (concat (or (epub-reader-block-list-marker block) "• ")
+              (epub-reader-block-text block))))
     ('image
      (let* ((source
              (get-text-property 0 'epub-reader-source

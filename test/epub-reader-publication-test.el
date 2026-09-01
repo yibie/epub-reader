@@ -81,6 +81,43 @@
       (epub-reader-publication-close second)
       (epub-reader-publication-close first))))
 
+(ert-deftest epub-reader-publication-cleanup-retries-and-preserves-open-error ()
+  (let* ((publication
+          (epub-reader-publication-open
+           (epub-reader-test-fixture "epub2.epub")))
+         (real-close (symbol-function 'epub-reader-container-close))
+         failed-once)
+    (cl-letf (((symbol-function 'epub-reader-container-close)
+               (lambda (container)
+                 (if failed-once
+                     (funcall real-close container)
+                   (setq failed-once t)
+                   (error "injected cleanup failure")))))
+      (should-error (epub-reader-publication-close publication))
+      (should-not (epub-reader-publication-closed-p publication))
+      (should-not (epub-reader-publication-close publication)))
+    (should (epub-reader-publication-closed-p publication)))
+  (let ((real-open (symbol-function 'epub-reader-container-open))
+        captured-container
+        primary-error)
+    (unwind-protect
+        (cl-letf (((symbol-function 'epub-reader-container-open)
+                   (lambda (file)
+                     (setq captured-container (funcall real-open file))))
+                  ((symbol-function 'epub-reader-publication--from-container)
+                   (lambda (_container) (error "primary publication error")))
+                  ((symbol-function 'epub-reader-container-close)
+                   (lambda (_container) (error "secondary cleanup error"))))
+          (setq primary-error
+                (should-error
+                 (epub-reader-publication-open
+                  (epub-reader-test-fixture "epub2.epub")))))
+      (when captured-container
+        (funcall (symbol-function 'epub-reader-container-close)
+                 captured-container)))
+    (should (string-match-p "primary publication error"
+                            (error-message-string primary-error)))))
+
 (ert-deftest epub-reader-publication-resolves-local-and-external-hrefs ()
   (epub-reader-publication-test--with "epub2.epub" publication
     (let ((target
@@ -102,6 +139,23 @@
      (epub-reader-publication-resolve-href
       publication "OEBPS/chapter1.xhtml" "../../../escape.xhtml")
      :type 'epub-reader-publication-error)))
+
+(ert-deftest epub-reader-publication-allows-only-safe-external-schemes ()
+  (epub-reader-publication-test--with "epub2.epub" publication
+    (dolist (href '("https://example.com/book"
+                    "http://example.com/book"
+                    "mailto:reader@example.com"))
+      (should
+       (epub-reader-link-target-external-p
+        (epub-reader-publication-resolve-href
+         publication "OEBPS/chapter1.xhtml" href))))
+    (dolist (href '("file:///etc/passwd" "data:text/plain,bad"
+                    "javascript:alert(1)" "custom-handler:payload"
+                    "//example.com/ambiguous"))
+      (should-error
+       (epub-reader-publication-resolve-href
+        publication "OEBPS/chapter1.xhtml" href)
+       :type 'epub-reader-publication-error))))
 
 (ert-deftest epub-reader-publication-url-resolver-preserves-segment-semantics ()
   (epub-reader-publication-test--with "epub3-edge.epub" publication

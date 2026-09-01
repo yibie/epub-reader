@@ -518,7 +518,8 @@ The caller must eventually call `epub-reader-container-close'."
    (epub-reader-container-root container) relative-path))
 
 (defun epub-reader-container-close (container)
-  "Release extracted files owned by CONTAINER; this is idempotent."
+  "Release extracted files owned by CONTAINER; this is idempotent.
+If deletion fails, leave CONTAINER open so cleanup can be retried."
   (unless (epub-reader-container-closed-p container)
     (let ((root (epub-reader-container-root container)))
       (when (file-directory-p root)

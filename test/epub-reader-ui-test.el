@@ -32,7 +32,8 @@
       (should epub-reader-ui-mode)
       (should (eq (lookup-key epub-reader-ui-mode-map (kbd "n"))
                   #'epub-reader-next-chapter))
-      (let* ((publication (plist-get textui-state :publication))
+      (let* ((publication
+              (epub-reader-session-publication epub-reader-ui--session))
              (container (epub-reader-publication-container publication))
              (source-position (epub-reader-ui--first-source-position)))
         (setq root (epub-reader-container-root container))
@@ -70,6 +71,28 @@
         (should (equal (aref source 0) "OEBPS/chapter2.xhtml"))
         (should (string-suffix-p ":second" (aref source 1)))))))
 
+(ert-deftest epub-reader-ui-opens-only-allowlisted-external-links ()
+  (epub-reader-ui-test--with-reader _buffer
+    (let ((position (epub-reader-ui--first-source-position))
+          opened)
+      (let ((inhibit-read-only t))
+        (put-text-property position (1+ position) 'epub-reader-href
+                           "https://example.com/reader"))
+      (goto-char position)
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (url &rest _arguments) (setq opened url))))
+        (epub-reader-follow-link))
+      (should (equal opened "https://example.com/reader"))
+      (let ((inhibit-read-only t))
+        (put-text-property position (1+ position) 'epub-reader-href
+                           "javascript:alert(1)"))
+      (setq opened nil)
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (url &rest _arguments) (setq opened url))))
+        (should-error (epub-reader-follow-link)
+                      :type 'epub-reader-publication-error))
+      (should-not opened))))
+
 (ert-deftest epub-reader-ui-tags-every-rendered-image-row-with-source ()
   (epub-reader-ui-test--with-reader _buffer
     (epub-reader-next-chapter)
@@ -79,9 +102,11 @@
                                             'epub-reader-image-slice)
                     collect position))
           (image-blocks
-           (cl-remove-if-not
-            (lambda (block) (eq (epub-reader-block-kind block) 'image))
-            (plist-get textui-state :blocks))))
+          (cl-remove-if-not
+            (lambda (block)
+              (and (eq (epub-reader-block-kind block) 'image)
+                   (epub-reader-block-image-file block)))
+            (epub-reader-session-blocks epub-reader-ui--session))))
       (should positions)
       (should
        (equal
@@ -99,7 +124,8 @@
         (should locator)
         (should (equal (epub-reader-locator-book-key locator)
                        (epub-reader-publication-book-key
-                        (plist-get textui-state :publication))))
+                        (epub-reader-session-publication
+                         epub-reader-ui--session))))
         (should (= (epub-reader-locator-spine-index locator) 1))
         (should
          (member (epub-reader-locator-block locator)
@@ -163,6 +189,23 @@
               (should (equal (get-text-property
                               position 'epub-reader-anchor-id)
                              fragment)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-keeps-domain-objects-out-of-textui-state ()
+  (let ((buffer
+         (epub-reader-open (epub-reader-test-fixture "epub2.epub"))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (should (epub-reader-session-p epub-reader-ui--session))
+          (should (epub-reader-publication-p
+                   (epub-reader-session-publication
+                    epub-reader-ui--session)))
+          (should (hash-table-p
+                   (epub-reader-session-dom-cache epub-reader-ui--session)))
+          (dolist (key '(:publication :section :blocks :store :file))
+            (should-not (plist-member textui-state key)))
+          (should (equal (plist-get textui-state :spine-index) 0)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 

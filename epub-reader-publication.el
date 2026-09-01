@@ -22,6 +22,11 @@
 (define-error 'epub-reader-publication-error
   "Invalid EPUB publication" 'epub-reader-error)
 
+(defcustom epub-reader-external-link-schemes '("http" "https" "mailto")
+  "External URI schemes that publication links may activate."
+  :type '(repeat string)
+  :group 'epub-reader)
+
 (cl-defstruct (epub-reader-resource
                (:constructor epub-reader-resource--create))
   "One OPF manifest resource."
@@ -381,6 +386,12 @@ key, but is not interpreted as a path."
              (signal 'epub-reader-publication-error
                      (list (format "Invalid external URL %S: %s" href
                                    (error-message-string error-data)))))))
+         (scheme (and (url-type parsed) (downcase (url-type parsed))))
+         (_scheme-check
+          (unless (member scheme epub-reader-external-link-schemes)
+            (signal 'epub-reader-publication-error
+                    (list (format "External URL scheme is not allowed: %S"
+                                  (or scheme href))))))
          (canonical (epub-reader-publication--normalize-external-url parsed))
          (fragment
           (and raw-fragment
@@ -837,14 +848,17 @@ key, but is not interpreted as a path."
         (prog1 (epub-reader-publication--from-container container)
           (setq succeeded t))
       (unless succeeded
-        (epub-reader-container-close container)))))
+        ;; Preserve the parsing/opening error; no publication handle exists
+        ;; through which the caller could retry this best-effort cleanup.
+        (ignore-errors (epub-reader-container-close container))))))
 
 (defun epub-reader-publication-close (publication)
-  "Close PUBLICATION and release its extracted container; idempotent."
+  "Close PUBLICATION and release its extracted container; idempotent.
+If container cleanup fails, leave PUBLICATION open so it can be retried."
   (unless (epub-reader-publication-closed-p publication)
-    (setf (epub-reader-publication-closed-p publication) t)
     (epub-reader-container-close
-     (epub-reader-publication-container publication)))
+     (epub-reader-publication-container publication))
+    (setf (epub-reader-publication-closed-p publication) t))
   nil)
 
 (defun epub-reader-publication-spine-resource (publication index)

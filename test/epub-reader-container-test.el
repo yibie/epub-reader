@@ -29,6 +29,26 @@
     (should-not (file-exists-p root))
     (should-not (epub-reader-container-close container))))
 
+(ert-deftest epub-reader-container-cleanup-can-be-retried ()
+  (let* ((container
+          (epub-reader-container-open
+           (epub-reader-test-fixture "epub2.epub")))
+         (root (epub-reader-container-root container))
+         (real-delete (symbol-function 'delete-directory))
+         (failed-once nil))
+    (cl-letf (((symbol-function 'delete-directory)
+               (lambda (directory &optional recursive trash)
+                 (if failed-once
+                     (funcall real-delete directory recursive trash)
+                   (setq failed-once t)
+                   (error "injected cleanup failure")))))
+      (should-error (epub-reader-container-close container))
+      (should-not (epub-reader-container-closed-p container))
+      (should (file-directory-p root))
+      (should-not (epub-reader-container-close container)))
+    (should (epub-reader-container-closed-p container))
+    (should-not (file-exists-p root))))
+
 (ert-deftest epub-reader-container-each-adapter-can-open-fixture ()
   (dolist (adapter '(unzip bsdtar))
     (when (epub-reader-container--program adapter)

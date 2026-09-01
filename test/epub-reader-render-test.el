@@ -5,6 +5,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'seq)
 (require 'textui)
 (require 'epub-reader-render)
 (require 'epub-reader-test-helper)
@@ -75,12 +76,12 @@
            (image (car images))
            (element (epub-reader-render-block-element image)))
       (should image)
-      (should (= (length images) 3))
+      (should (= (length images) 4))
       (should (= (length (delete-dups
                           (mapcar #'epub-reader-block-key images)))
-                 3))
+                 4))
       (should
-       (equal (mapcar #'epub-reader-block-key (cdr images))
+       (equal (mapcar #'epub-reader-block-key (seq-take (cdr images) 2))
               '("path:body/3:p/image:0" "path:body/3:p/image:1")))
       (should (file-readable-p (epub-reader-block-image-file image)))
       (should (eq (plist-get element :type) :flex))
@@ -90,6 +91,54 @@
        (epub-reader-locator-source-p
         (get-text-property 0 'epub-reader-source
                            (epub-reader-block-text image)))))))
+
+(ert-deftest epub-reader-render-preserves-list-container-and-inline-order ()
+  (epub-reader-render-test--with-publication publication
+    (let* ((blocks (epub-reader-render-chapter publication 1))
+           (anchor-position
+            (cl-position "two-images" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+           (ordered
+            (cl-remove-if-not
+             (lambda (block)
+               (and (eq (epub-reader-block-kind block) 'list-item)
+                    (string-suffix-p ". "
+                                     (epub-reader-block-list-marker block))))
+             blocks))
+           (unknown
+            (cl-find-if
+             (lambda (block)
+               (string-match-p
+                "未知容器前中后"
+                (substring-no-properties (epub-reader-block-text block))))
+             blocks))
+           (broken
+            (cl-find-if #'epub-reader-block-image-error blocks)))
+      (should anchor-position)
+      (should
+       (equal
+        (mapcar #'epub-reader-block-kind
+                (seq-subseq blocks anchor-position (+ anchor-position 6)))
+        '(anchor paragraph image paragraph image paragraph)))
+      (should
+       (equal
+        (mapcar (lambda (block)
+                  (substring-no-properties (epub-reader-block-text block)))
+                (seq-subseq blocks (1+ anchor-position)
+                            (+ anchor-position 6)))
+        '("前" "[图一]" "中" "[图二]" "后")))
+      (should (equal (mapcar #'epub-reader-block-list-marker ordered)
+                     '("3. " "4. ")))
+      (should
+       (string-prefix-p
+        "3. "
+        (plist-get (epub-reader-render-block-element (car ordered)) :value)))
+      (should unknown)
+      (should broken)
+      (should (string-match-p "missing.png"
+                              (epub-reader-block-image-error broken)))
+      (should (string-match-p "missing.png"
+                              (epub-reader-block-text broken))))))
 
 (ert-deftest epub-reader-locator-round-trips-across-textui-reflow ()
   (epub-reader-render-test--with-publication publication

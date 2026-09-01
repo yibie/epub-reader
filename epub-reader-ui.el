@@ -36,6 +36,14 @@
   "Face for the reader key-hint footer."
   :group 'epub-reader)
 
+(cl-defstruct (epub-reader-session
+               (:constructor epub-reader-session--create))
+  "Non-UI state owned by one reader buffer."
+  publication section blocks dom-cache store)
+
+(defvar-local epub-reader-ui--session nil
+  "Domain session owned by the current EPUB reader buffer.")
+
 (defvar-keymap epub-reader-ui-mode-map
   :doc "Keymap active in EPUB reader TextUI buffers."
   "n" #'epub-reader-next-chapter
@@ -63,6 +71,12 @@
   (unless (and (derived-mode-p 'textui-mode) epub-reader-ui-mode)
     (user-error "Not in an EPUB reader buffer"))
   (plist-get textui-state key))
+
+(defun epub-reader-ui--current-session ()
+  "Return the current reader session or signal a user-facing error."
+  (unless (epub-reader-session-p epub-reader-ui--session)
+    (user-error "EPUB reader session is unavailable"))
+  epub-reader-ui--session)
 
 (defun epub-reader-ui--spacer (width)
   "Return a fixed native spacer element of WIDTH cells."
@@ -150,9 +164,10 @@
 
 (defun epub-reader-ui-frame (available-width)
   "Return the complete reader frame for AVAILABLE-WIDTH."
-  (let* ((publication (plist-get textui-state :publication))
+  (let* ((session (epub-reader-ui--current-session))
+         (publication (epub-reader-session-publication session))
          (index (plist-get textui-state :spine-index))
-         (blocks (plist-get textui-state :blocks))
+         (blocks (epub-reader-session-blocks session))
          (column-width
           (max 1 (min available-width
                       (max 1 epub-reader-reading-width))))
@@ -227,7 +242,8 @@
 
 (defun epub-reader-ui--goto-start (&optional fragment)
   "Move to current chapter's FRAGMENT or first source position."
-  (let* ((section (epub-reader-ui--state-value :section))
+  (let* ((section
+          (epub-reader-session-section (epub-reader-ui--current-session)))
          (position
           (or (epub-reader-ui--fragment-position
                (epub-reader-section-path section) fragment)
@@ -239,20 +255,21 @@
 (defun epub-reader-ui--switch-chapter (index &optional fragment)
   "Synchronously switch the current reader to spine INDEX and FRAGMENT."
   (let* ((buffer (current-buffer))
-         (publication (epub-reader-ui--state-value :publication))
+         (session (epub-reader-ui--current-session))
+         (publication (epub-reader-session-publication session))
          (count (length (epub-reader-publication-spine publication))))
     (unless (and (>= index 0) (< index count))
       (user-error "No chapter in that direction"))
     (let* ((section
             (epub-reader-publication-load-section publication index))
            (blocks (epub-reader-render-section publication section)))
+      (setf (epub-reader-session-section session) section
+            (epub-reader-session-blocks session) blocks)
       (textui-update
        buffer
        (lambda (state)
          (let ((next (copy-sequence state)))
-           (setq next (plist-put next :spine-index index))
-           (setq next (plist-put next :section section))
-           (plist-put next :blocks blocks))))
+           (plist-put next :spine-index index))))
       (textui-refresh buffer)
       (epub-reader-ui--goto-start fragment)
       buffer)))
@@ -291,9 +308,10 @@
   (let ((href (epub-reader-ui--href-at-point)))
     (unless href
       (user-error "No EPUB link at point"))
-    (let* ((publication (epub-reader-ui--state-value :publication))
+    (let* ((session (epub-reader-ui--current-session))
+           (publication (epub-reader-session-publication session))
            (current-index (epub-reader-ui--state-value :spine-index))
-           (section (epub-reader-ui--state-value :section))
+           (section (epub-reader-session-section session))
            (target
             (epub-reader-publication-resolve-resource
              publication section href)))
@@ -331,6 +349,7 @@
 (defun epub-reader-ui-open (file)
   "Open EPUB FILE in a new TextUI reader buffer and return that buffer."
   (let ((publication nil)
+        (session nil)
         (buffer nil)
         succeeded)
     (unwind-protect
@@ -340,19 +359,29 @@
                   (epub-reader-publication-load-section publication 0))
                  (blocks
                   (epub-reader-render-section publication section))
+                 (_session
+                  (setq session
+                        (epub-reader-session--create
+                         :publication publication :section section
+                         :blocks blocks
+                         :dom-cache (make-hash-table :test #'equal)
+                         :store nil)))
                  (name
                   (generate-new-buffer-name
                    (format "*EPUB: %s*"
                            (epub-reader-publication-title publication)))))
-            (setq buffer
-                  (textui-open
-                   name #'epub-reader-ui-frame
-                   (list :publication publication
-                         :spine-index 0
-                         :section section
-                         :blocks blocks
-                         :file (expand-file-name file)))))
+            ;; Supply the session to the initial render, then install the same
+            ;; object as the buffer-local owner immediately after `textui-open'.
+            (let ((epub-reader-ui--session session))
+              (setq buffer
+                    (textui-open
+                     name #'epub-reader-ui-frame
+                     (list :spine-index 0 :chunk-start 0
+                           :chunk-end (length blocks)
+                           :loading nil :error nil
+                           :pending-locator nil)))))
           (with-current-buffer buffer
+            (setq-local epub-reader-ui--session session)
             (epub-reader-ui-mode 1)
             (setq-local buffer-file-name nil)
             (setq-local default-directory
@@ -368,7 +397,7 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))
         (when publication
-          (epub-reader-publication-close publication))))))
+          (ignore-errors (epub-reader-publication-close publication)))))))
 
 (provide 'epub-reader-ui)
 ;;; epub-reader-ui.el ends here
