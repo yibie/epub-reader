@@ -33,7 +33,7 @@ reflow, long chapters, and reliable reading positions.
 | Overall progress | Saves the last place, but has no dependable whole-book percentage | Shows a weighted whole-book estimate and reaches 100% at the end |
 | Table of contents | Separate TOC view | Hierarchical, collapsible TOC with a current-chapter marker and remembered row |
 | Archive handling | Relies on the external extractor | Checks paths, collisions, entry counts, sizes, and compression ratios before extracting members on demand |
-| Annotations | No core annotation model; mature third-party workflows such as `org-remark` exist | Not available in the current UI yet |
+| Annotations | No core annotation model; mature third-party workflows such as `org-remark` exist | Built-in bookmarks, highlights, plain-text notes, and chapter-grouped lists |
 | Maturity | Mature package with broad real-world coverage and package-archive installation | Young project with extensive ERT and adversarial tests, but a smaller real-book corpus |
 
 Choose `nov.el` when package-archive installation, its surrounding ecosystem,
@@ -80,8 +80,9 @@ The reader opens in a centered column. Resizing the window or changing text
 scale reflows the visible content while keeping the same semantic position.
 
 Progress saving is enabled by default. Unless
-`epub-reader-store-directory` is set, the sidecar is stored beside the book as
-`BOOK.epub.epub-reader`.
+`epub-reader-store-directory` is set, reading progress, bookmarks, highlights,
+and notes are stored beside the book as `BOOK.epub.epub-reader`. The EPUB file
+itself is never modified.
 
 ## Key bindings
 
@@ -96,6 +97,11 @@ Progress saving is enabled by default. Unless
 | `b`, `f` | Move backward or forward through navigation history |
 | `t` | Open the table of contents |
 | `g` | Jump to a TOC entry by title |
+| `m` | Add a named bookmark at point |
+| `M` | Open the bookmark list |
+| `h` | Highlight the selected text |
+| `e` | View or edit the note on the highlight at point |
+| `a` | Open the highlights and notes list |
 | `RET` | Follow the internal link at point, or an allowed external link |
 | `q` | Save progress and close the reader |
 
@@ -108,6 +114,21 @@ Progress saving is enabled by default. Unless
 | `q` | Hide the TOC buffer |
 
 Reopening the TOC restores its selected row.
+
+### Bookmarks and highlights
+
+Select text within one chapter and press `h` to highlight it. Press `e` while
+point is on a highlight to add, read, or edit its plain-text note. The `M` and
+`a` list buffers use these keys:
+
+| List | `RET` | `d` | `e` | `q` |
+|---|---|---|---|---|
+| Bookmarks | Jump to the bookmark | Delete it | — | Hide the list |
+| Highlights | Jump to the quoted text | Delete it | Edit its note | Hide the list |
+
+Highlights are restored from the saved quote when an exact source position is
+no longer available. Such a match is shown with a wavy underline and a warning
+in the highlights list so that you can review it.
 
 ## Customization
 
@@ -128,8 +149,8 @@ The settings most readers are likely to change are:
 | Archive program | `epub-reader-container-adapters` |
 | Archive safety limits | `epub-reader-container-max-entries`, `epub-reader-container-max-files`, `epub-reader-container-max-directories`, `epub-reader-container-max-central-directory-bytes`, `epub-reader-container-max-path-bytes`, `epub-reader-container-max-entry-bytes`, `epub-reader-container-max-total-bytes`, `epub-reader-container-max-compression-ratio`, `epub-reader-container-member-timeout` |
 
-Body text, headings, emphasis, quotations, code, links, image messages, reader
-chrome, and TOC state all have `epub-reader-*` faces. Use
+Body text, headings, emphasis, quotations, code, links, highlights, image
+messages, reader chrome, and TOC state all have `epub-reader-*` faces. Use
 `M-x customize-face` to adjust them.
 
 ## Feature matrix
@@ -142,15 +163,17 @@ chrome, and TOC state all have `epub-reader-*` faces. Use
 | Supported | Long chapters | Small initial and cold-scroll chunks, block and character budgets, viewport overscan, idle expansion, and next-chapter prefetch |
 | Supported | Navigation | Previous/next chapter, automatic chapter crossing while scrolling, internal fragments, allowed external links, history, collapsible TOC, and title completion |
 | Supported | Progress | Book-fingerprint identity, versioned locators, debounced saves, atomic sidecar merge/write, exact or degraded restoration, and weighted whole-book progress |
+| Supported | Bookmarks and annotations | Named bookmarks; continuous highlights within one chapter; plain-text notes; lists for jumping, editing, and deleting; quote-based recovery after reflow or source-map changes |
 | Supported | Input safety | OCF path normalization, collision checks, archive count/size/ratio limits, streaming member extraction, remote-resource isolation, and an external-link scheme allowlist |
 | Not supported | Restricted and fixed-layout books | DRM, fixed-layout EPUB, vertical writing, and exact pagination |
 | Not supported | Rich media and high-fidelity publisher layout | Complex ruby, MathML, general SVG, audio/video, JavaScript, general CSS, embedded publisher fonts, floats, or grid fidelity |
 | Not supported | Whole-library services | Indexed full-text search, cross-device sync, EPUB CFI, or Web Annotation interoperability |
 | Not supported | Pure-Elisp ZIP | Archive members are still read through `unzip` or `bsdtar` |
-| Planned | Bookmarks and annotations | The locator and storage groundwork exists, but the reader UI is not available yet |
 
 ## Known limitations
 
+- A highlight cannot cross from one chapter file into another. If a selection
+  reaches across that boundary, create a separate highlight in each chapter.
 - A chapter containing one enormous paragraph—tens of thousands of characters
   without a paragraph break—has to load that paragraph as one unit. Entering it
   may cause a noticeable pause.
@@ -170,8 +193,9 @@ chrome, and TOC state all have `epub-reader-*` faces. Use
 
 ## Development
 
-The test runner rebuilds the minimal EPUB 2/3, CJK, long-chapter, and
-adversarial fixtures before running the complete ERT suite in `emacs -Q`:
+The test runner rebuilds the minimal EPUB 2/3, CJK, English, mixed-language,
+long-chapter, and adversarial fixtures before running the complete ERT suite
+in `emacs -Q`:
 
 ```sh
 ./test/run-tests.sh
