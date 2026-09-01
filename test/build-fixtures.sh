@@ -35,8 +35,52 @@ build_epub epub3 "$source_dir/epub3"
 
 malicious_dir="$work_dir/malicious"
 mkdir -p "$malicious_dir/nested"
+printf '%s' 'application/epub+zip' >"$malicious_dir/mimetype"
 printf '%s' 'escape' >"$malicious_dir/escape.txt"
-touch -t 202001010000 "$malicious_dir/escape.txt"
+find "$malicious_dir" -exec touch -t 202001010000 {} +
 rm -f "$output_dir/malicious-path.epub"
+(cd "$malicious_dir" &&
+  zip -X0q "$output_dir/malicious-path.epub" mimetype)
 (cd "$malicious_dir/nested" &&
   zip -Xq "$output_dir/malicious-path.epub" ../escape.txt)
+
+glob_dir="$work_dir/glob"
+mkdir -p "$glob_dir"
+printf '%s' 'application/epub+zip' >"$glob_dir/mimetype"
+printf '%s' 'a' >"$glob_dir/a*"
+printf '%s' 'bc' >"$glob_dir/abc"
+find "$glob_dir" -exec touch -t 202001010000 {} +
+rm -f "$output_dir/glob-member.epub"
+(cd "$glob_dir" && zip -X0q "$output_dir/glob-member.epub" mimetype)
+(cd "$glob_dir" && zip -X9q -nw "$output_dir/glob-member.epub" 'a*' abc)
+
+collision_dir="$work_dir/collision"
+mkdir -p "$collision_dir/one" "$collision_dir/two"
+printf '%s' 'application/epub+zip' >"$collision_dir/mimetype"
+printf '%s' 'upper' >"$collision_dir/one/A.xhtml"
+printf '%s' 'lower' >"$collision_dir/two/a.xhtml"
+find "$collision_dir" -exec touch -t 202001010000 {} +
+rm -f "$output_dir/case-collision.epub"
+(cd "$collision_dir" &&
+  zip -X0q "$output_dir/case-collision.epub" mimetype)
+(cd "$collision_dir" &&
+  zip -X9qj "$output_dir/case-collision.epub" one/A.xhtml two/a.xhtml)
+
+directory_dir="$work_dir/directories"
+mkdir -p "$directory_dir/one" "$directory_dir/two"
+printf '%s' 'application/epub+zip' >"$directory_dir/mimetype"
+find "$directory_dir" -exec touch -t 202001010000 {} +
+rm -f "$output_dir/directory-entries.epub"
+(cd "$directory_dir" &&
+  zip -X0q "$output_dir/directory-entries.epub" mimetype)
+(cd "$directory_dir" &&
+  zip -X0q "$output_dir/directory-entries.epub" one/ two/)
+
+ratio_dir="$work_dir/ratio"
+mkdir -p "$ratio_dir"
+printf '%s' 'application/epub+zip' >"$ratio_dir/mimetype"
+printf '%04096d' 0 >"$ratio_dir/payload.txt"
+find "$ratio_dir" -exec touch -t 202001010000 {} +
+rm -f "$output_dir/high-ratio.epub"
+(cd "$ratio_dir" && zip -X0q "$output_dir/high-ratio.epub" mimetype)
+(cd "$ratio_dir" && zip -X9q "$output_dir/high-ratio.epub" payload.txt)
