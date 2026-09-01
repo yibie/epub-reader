@@ -25,6 +25,14 @@
   :type 'integer
   :group 'epub-reader)
 
+(defcustom epub-reader-text-wrap-strategy 'greedy
+  "TextUI wrapping strategy used for EPUB prose.
+`greedy' is kinsoku-aware and optimized for interactive reading latency.
+`balanced' retains full Knuth--Plass justification at a higher CPU cost."
+  :type '(choice (const :tag "Low-latency greedy" greedy)
+                 (const :tag "Balanced Knuth--Plass" balanced))
+  :group 'epub-reader)
+
 (defface epub-reader-heading-1-face
   '((t (:inherit variable-pitch :weight bold :height 1.45)))
   "Face for top-level EPUB headings."
@@ -82,6 +90,10 @@
 
 (defconst epub-reader-render--xml-namespace
   "http://www.w3.org/XML/1998/namespace")
+
+(defconst epub-reader-render--pending-image-file
+  (expand-file-name ".epub-reader-pending-image" temporary-file-directory)
+  "Unreadable sentinel used for fixed-row asynchronous image placeholders.")
 
 (cl-defstruct (epub-reader-block
                (:constructor epub-reader-block--create))
@@ -630,7 +642,8 @@ This validates URL resolution without materializing the image member."
 
 (defun epub-reader-render--text-element (value)
   "Return a width-aware TextUI prose element for VALUE."
-  (list :type :text :value value :layout '(:min-width 20 :grow 1)))
+  (list :type :text :value value :wrap epub-reader-text-wrap-strategy
+        :layout '(:min-width 20 :grow 1)))
 
 (defun epub-reader-render--materialized-text (block)
   "Return a source-attributed copy of canonical BLOCK text."
@@ -641,7 +654,7 @@ This validates URL resolution without materializing the image member."
    (epub-reader-block-book-key block)
    (epub-reader-block-spine-index block)))
 
-(defun epub-reader-render--materialize-image (block publication section)
+(defun epub-reader-render-materialize-image (block publication section)
   "Materialize BLOCK's image from PUBLICATION relative to SECTION.
 Cache either the local file or a visible diagnostic on BLOCK."
   (when (and (eq (epub-reader-block-kind block) 'image)
@@ -677,13 +690,13 @@ Cache either the local file or a visible diagnostic on BLOCK."
   block)
 
 (defun epub-reader-render-block-element
-    (block &optional publication section image-rows)
+    (block &optional publication section image-rows defer-image)
   "Convert semantic BLOCK to one public TextUI element.
 When PUBLICATION and SECTION are supplied, materialize an image block just
-before producing its leaf.  IMAGE-ROWS overrides the configured image row
-budget when the UI has a buffer-specific font metric."
-  (when (and publication section)
-    (epub-reader-render--materialize-image block publication section))
+before producing its leaf unless DEFER-IMAGE is non-nil.  IMAGE-ROWS overrides
+the configured image row budget when the UI has a buffer-specific font metric."
+  (when (and publication section (not defer-image))
+    (epub-reader-render-materialize-image block publication section))
   (let ((text (epub-reader-render--materialized-text block)))
     (pcase (epub-reader-block-kind block)
     ('quote
@@ -735,6 +748,16 @@ budget when the UI has a buffer-specific font metric."
         (diagnostic
          (list :type :flex :direction :column :gap 0
                :children (list caption diagnostic)))
+        ((epub-reader-block-image-href block)
+         ;; Keep final image geometry while lifecycle-bound idle work extracts
+         ;; the member.  TextUI renders an unreadable file as a fixed-row alt.
+         (list :type :flex :direction :column :gap 0
+               :children
+               (list
+                (list :type :image :file epub-reader-render--pending-image-file
+                      :rows rows :alt image-alt
+                      :layout '(:min-width 12 :grow 1))
+                caption)))
         (t caption))))
     (_ (epub-reader-render--text-element text)))))
 

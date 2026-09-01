@@ -575,10 +575,11 @@
         (let ((epub-reader-store-directory directory)
               reader book-key store idle-callback idle-repeat)
           (cl-letf (((symbol-function 'run-with-idle-timer)
-                     (lambda (_seconds repeat function &rest arguments)
-                       (setq idle-repeat repeat)
-                       (setq idle-callback
-                             (lambda () (apply function arguments)))
+                     (lambda (seconds repeat function &rest arguments)
+                       (when (= seconds epub-reader-save-idle-delay)
+                         (setq idle-repeat repeat)
+                         (setq idle-callback
+                               (lambda () (apply function arguments))))
                        nil)))
             (setq reader (epub-reader-open source))
             (should-not idle-callback)

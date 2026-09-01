@@ -41,6 +41,12 @@ PATH is the durable normalized spine href; SPINE-INDEX is a session hint."
   "Resolved buffer position and its degradation QUALITY."
   position quality)
 
+(defvar-local epub-reader-locator--source-block-cache nil
+  "Cached source block records for the current rendered buffer.")
+
+(defvar-local epub-reader-locator--source-block-cache-tick nil
+  "`buffer-modified-tick' matching the cached source block records.")
+
 (defun epub-reader-locator-to-plist (locator)
   "Return a plain, versioned plist representation of LOCATOR."
   (unless (epub-reader-locator-p locator)
@@ -178,7 +184,16 @@ never attaches to chapter content."
          (previous-distance previous)
          (next-distance next)))))))
 
-(defun epub-reader-locator--source-blocks ()
+(defun epub-reader-locator-source-at-point (&optional position buffer)
+  "Return the nearest source vector at POSITION in BUFFER without quotes.
+Unlike `epub-reader-locator-at-point', this lightweight query does not build
+paragraph quote context and is suitable for per-command viewport checks."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((found (epub-reader-locator--source-at-or-near
+                  (or position (point)))))
+      (and found (cdr found)))))
+
+(defun epub-reader-locator--build-source-blocks ()
   "Return source blocks as (PATH BLOCK TEXT POSITIONS BOOK-KEY SPINE-INDEX)."
   (let ((position (point-min))
         (table (make-hash-table :test #'equal))
@@ -228,6 +243,17 @@ never attaches to chapter content."
                    offsets))
           (nth 3 record) (nth 4 record))))
      (nreverse order))))
+
+(defun epub-reader-locator--source-blocks ()
+  "Return source block records, reusing them until the buffer changes."
+  (let ((tick (buffer-modified-tick)))
+    (if (and epub-reader-locator--source-block-cache
+             (equal tick epub-reader-locator--source-block-cache-tick))
+        epub-reader-locator--source-block-cache
+      (setq epub-reader-locator--source-block-cache
+            (epub-reader-locator--build-source-blocks)
+            epub-reader-locator--source-block-cache-tick tick)
+      epub-reader-locator--source-block-cache)))
 
 (defun epub-reader-locator--capture-quotes (source book-key)
   "Return (PREFIX SUFFIX) around SOURCE offset from current buffer."

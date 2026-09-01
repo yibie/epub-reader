@@ -479,5 +479,28 @@
       (epub-reader-publication-close second)
       (epub-reader-publication-close first))))
 
+(ert-deftest epub-reader-locator-caches-source-records-until-buffer-change ()
+  (with-temp-buffer
+    (insert
+     (epub-reader-locator-attach-source
+      "缓存定位" "chapter.xhtml" "p1" "book" 0))
+    (let ((builds 0)
+          (real-build
+           (symbol-function 'epub-reader-locator--build-source-blocks)))
+      (cl-letf (((symbol-function 'epub-reader-locator--build-source-blocks)
+                 (lambda ()
+                   (setq builds (1+ builds))
+                   (funcall real-build))))
+        (goto-char (point-min))
+        (should (epub-reader-locator-at-point 0))
+        (should (epub-reader-locator-at-point 0))
+        (should (= builds 1))
+        (goto-char (point-max))
+        (insert
+         (epub-reader-locator-attach-source
+          "新增" "chapter.xhtml" "p2" "book" 0))
+        (should (epub-reader-locator-at-point 0))
+        (should (= builds 2))))))
+
 (provide 'epub-reader-render-test)
 ;;; epub-reader-render-test.el ends here

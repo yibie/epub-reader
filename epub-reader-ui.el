@@ -49,6 +49,31 @@ A single larger block is still materialized by itself."
   :type 'integer
   :group 'epub-reader)
 
+(defcustom epub-reader-first-paint-max-blocks 2
+  "Maximum semantic blocks rendered synchronously on chapter entry."
+  :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-first-paint-max-characters 4000
+  "Maximum source characters rendered synchronously on chapter entry."
+  :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-scroll-chunk-max-blocks 1
+  "Maximum new semantic blocks rendered in a cold interactive chunk shift."
+  :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-scroll-chunk-max-characters 3000
+  "Maximum source characters rendered in a cold interactive chunk shift."
+  :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-background-idle-delay 0.15
+  "Idle seconds between reader background jobs."
+  :type 'number
+  :group 'epub-reader)
+
 (defcustom epub-reader-enable-progress t
   "Whether reader buffers restore and persist versioned progress sidecars."
   :type 'boolean
@@ -85,7 +110,8 @@ A single larger block is still materialized by itself."
   publication current-chapter dom-cache store
   refreshing-p producer-block-count history-back history-forward toc-buffer
   spine-weights total-weight
-  progress-key progress-dirty-p progress-timer progress-callback)
+  progress-key progress-dirty-p progress-timer progress-callback
+  background-generation background-jobs background-timer background-callback)
 
 (cl-defstruct (epub-reader-chapter-data
                (:constructor epub-reader-chapter-data--create))
@@ -273,8 +299,8 @@ A single larger block is still materialized by itself."
              do (aset prefixes (1+ index) characters))
     (list block-index anchor-index characters prefixes)))
 
-(defun epub-reader-ui--load-chapter (session index)
-  "Load spine INDEX into SESSION, reusing its normalized chapter cache."
+(defun epub-reader-ui--chapter-data (session index)
+  "Return cached chapter data for SESSION spine INDEX, loading if needed."
   (let* ((publication (epub-reader-session-publication session))
          (key (epub-reader-ui--chapter-cache-key publication index))
          (cache (epub-reader-session-dom-cache session))
@@ -292,8 +318,17 @@ A single larger block is still materialized by itself."
                :character-count (nth 2 indices)
                :character-prefixes (nth 3 indices)))
         (puthash key chapter cache)))
+    chapter))
+
+(defun epub-reader-ui--load-chapter (session index)
+  "Activate spine INDEX in SESSION, reusing its normalized chapter cache."
+  (let ((chapter (epub-reader-ui--chapter-data session index)))
     (setf (epub-reader-session-current-chapter session) chapter)
     chapter))
+
+(defun epub-reader-ui--prefetch-chapter (session index)
+  "Load SESSION spine INDEX without changing the active chapter."
+  (epub-reader-ui--chapter-data session index))
 
 (defun epub-reader-ui--minimum-window-height ()
   "Return the smallest live body height displaying the current buffer."
@@ -309,32 +344,52 @@ A single larger block is still materialized by itself."
             (* epub-reader-chunk-overscan-screens
                (epub-reader-ui--minimum-window-height)))))
 
-(defun epub-reader-ui--chunk-end (blocks start)
+(defun epub-reader-ui--chunk-end
+    (blocks start &optional max-blocks max-characters)
   "Return exclusive chunk end in BLOCKS from START under both budgets."
   (let ((end start)
         (characters 0)
+        (block-limit (or max-blocks epub-reader-chunk-max-blocks))
+        (character-limit
+         (or max-characters epub-reader-chunk-max-characters))
         (length (length blocks)))
     (while (and (< end length)
-                (< (- end start) epub-reader-chunk-max-blocks)
+                (< (- end start) block-limit)
                 (or (= end start)
                     (<= (+ characters
                            (length (epub-reader-block-text (aref blocks end))))
-                        epub-reader-chunk-max-characters)))
+                        character-limit)))
       (setq characters
             (+ characters
                (length (epub-reader-block-text (aref blocks end))))
             end (1+ end)))
     end))
 
-(defun epub-reader-ui--chunk-range (blocks target-index)
-  "Return a budgeted (START END) range in BLOCKS containing TARGET-INDEX."
+(defun epub-reader-ui--chunk-range (blocks target-index &optional small-budget)
+  "Return a budgeted range containing TARGET-INDEX.
+SMALL-BUDGET may be `first' for chapter entry or `scroll' for a cold shift."
   (let* ((length (length blocks))
          (target (max 0 (min target-index (max 0 (1- length)))))
-         (start (max 0 (- target (epub-reader-ui--overscan-blocks))))
-         (end (epub-reader-ui--chunk-end blocks start)))
+         (max-blocks
+          (pcase small-budget
+            ('scroll epub-reader-scroll-chunk-max-blocks)
+            ((pred identity) epub-reader-first-paint-max-blocks)))
+         (max-characters
+          (pcase small-budget
+            ('scroll epub-reader-scroll-chunk-max-characters)
+            ((pred identity) epub-reader-first-paint-max-characters)))
+         (start
+          (max 0
+               (- target
+                  (if small-budget
+                      (/ (max 1 max-blocks) 2)
+                    (epub-reader-ui--overscan-blocks)))))
+         (end (epub-reader-ui--chunk-end
+               blocks start max-blocks max-characters)))
     (when (>= target end)
       (setq start target
-            end (epub-reader-ui--chunk-end blocks start)))
+            end (epub-reader-ui--chunk-end
+                 blocks start max-blocks max-characters)))
     (list start end)))
 
 (defun epub-reader-ui--state-with-chunk (state start end)
@@ -342,6 +397,128 @@ A single larger block is still materialized by itself."
   (let ((next (copy-sequence state)))
     (setq next (plist-put next :chunk-start start))
     (plist-put next :chunk-end end)))
+
+(defun epub-reader-ui--cancel-background-work (session)
+  "Cancel pending lifecycle-bound background work for SESSION."
+  (when (timerp (epub-reader-session-background-timer session))
+    (cancel-timer (epub-reader-session-background-timer session)))
+  (setf (epub-reader-session-background-timer session) nil
+        (epub-reader-session-background-jobs session) nil))
+
+(defun epub-reader-ui--arm-background-work (session generation)
+  "Arm SESSION's next idle job for GENERATION."
+  (let ((callback (epub-reader-session-background-callback session)))
+    (when (and callback
+               (epub-reader-session-background-jobs session)
+               (= generation
+                  (or (epub-reader-session-background-generation session) 0)))
+      (setf (epub-reader-session-background-timer session)
+            (run-with-idle-timer
+             epub-reader-background-idle-delay nil callback generation)))))
+
+(defun epub-reader-ui--queue-image-job (session index start end)
+  "Queue an idle image job for SESSION chapter INDEX and block range.
+An already queued dynamic image job for the chapter covers whatever chunk is
+current when it runs, so it also covers this request."
+  (unless (cl-some
+           (lambda (job)
+             (and (eq (car job) 'images)
+                  (= (cadr job) index)
+                  (or (null (nth 2 job))
+                      (equal job (list 'images index start end)))))
+           (epub-reader-session-background-jobs session))
+    (setf (epub-reader-session-background-jobs session)
+          (append (epub-reader-session-background-jobs session)
+                  (list (list 'images index start end)))))
+  (unless (timerp (epub-reader-session-background-timer session))
+    (epub-reader-ui--arm-background-work
+     session (or (epub-reader-session-background-generation session) 0))))
+
+(defun epub-reader-ui--background-image-job
+    (session index start end)
+  "Materialize SESSION images in INDEX block range START to END."
+  (when (= index (epub-reader-ui--state-value :spine-index))
+    (let* ((start (or start (plist-get textui-state :chunk-start)))
+           (end (or end (plist-get textui-state :chunk-end)))
+           (chapter (epub-reader-session-current-chapter session))
+           (blocks (epub-reader-chapter-data-blocks chapter))
+           (publication (epub-reader-session-publication session))
+           (section (epub-reader-chapter-data-section chapter))
+           changed)
+      (cl-loop for block-index from start below (min end (length blocks))
+               for block = (aref blocks block-index)
+               when (and (eq (epub-reader-block-kind block) 'image)
+                         (epub-reader-block-image-href block)
+                         (not (epub-reader-block-image-file block))
+                         (not (epub-reader-block-image-error block)))
+               do (condition-case error-data
+                      (progn
+                        (epub-reader-render-materialize-image
+                         block publication section)
+                        (setq changed t))
+                    (epub-reader-publication-resource-busy
+                     ;; A competing reader owns extraction.  Keep the block
+                     ;; retryable and let the next scheduled chapter visit try.
+                     (message "%s" (error-message-string error-data)))))
+      (when changed
+        (textui-refresh-region
+         (current-buffer) 'chapter #'epub-reader-ui--chapter-elements)
+        (epub-reader-ui--post-render (current-buffer))))))
+
+(defun epub-reader-ui--background-expand-job (session index)
+  "Expand SESSION's first-paint chunk for spine INDEX to its full budget."
+  (when (= index (epub-reader-ui--state-value :spine-index))
+    (let* ((blocks (epub-reader-ui--current-blocks session))
+           (locator (epub-reader-locator-at-point index))
+           (target
+            (or (and locator
+                     (gethash (epub-reader-locator-block locator)
+                              (epub-reader-ui--current-block-index session)))
+                (plist-get textui-state :chunk-start)
+                0))
+           (range (epub-reader-ui--chunk-range blocks target)))
+      (unless (and (= (car range) (plist-get textui-state :chunk-start))
+                   (= (cadr range) (plist-get textui-state :chunk-end)))
+        (epub-reader-ui--refresh-chunk (car range) (cadr range))))))
+
+(defun epub-reader-ui--run-background-job (session generation)
+  "Run one SESSION idle job for GENERATION, then arm the next one."
+  (setf (epub-reader-session-background-timer session) nil)
+  (when (= generation
+           (or (epub-reader-session-background-generation session) 0))
+    (let ((job (pop (epub-reader-session-background-jobs session))))
+      (when job
+        (condition-case error-data
+            (pcase (car job)
+              ('prefetch
+               (epub-reader-ui--prefetch-chapter session (cadr job)))
+              ('images
+               (epub-reader-ui--background-image-job
+                session (nth 1 job) (nth 2 job) (nth 3 job)))
+              ('expand
+               (epub-reader-ui--background-expand-job session (cadr job))))
+          (error
+           (message "EPUB background job failed: %s"
+                    (error-message-string error-data))))))
+    (epub-reader-ui--arm-background-work session generation)))
+
+(defun epub-reader-ui--schedule-background-work (session index)
+  "Schedule prefetch, image loading, and chunk expansion for SESSION INDEX."
+  (epub-reader-ui--cancel-background-work session)
+  (let* ((generation
+          (1+ (or (epub-reader-session-background-generation session) 0)))
+         (publication (epub-reader-session-publication session))
+         (count (length (epub-reader-publication-spine publication)))
+         jobs)
+    ;; The next chapter is more valuable than current images: the reading
+    ;; budget explicitly permits images to arrive after readable text.
+    (when (< (1+ index) count)
+      (push (list 'prefetch (1+ index)) jobs))
+    (push (list 'expand index) jobs)
+    (push (list 'images index nil nil) jobs)
+    (setf (epub-reader-session-background-generation session) generation
+          (epub-reader-session-background-jobs session) (nreverse jobs))
+    (epub-reader-ui--arm-background-work session generation)))
 
 (defun epub-reader-ui--spine-weights (publication)
   "Return central-directory size weights for PUBLICATION's reading spine."
@@ -630,7 +807,7 @@ remap does not leave image slices measured in unscaled frame rows."
                        (epub-reader-session-publication session)
                        (epub-reader-chapter-data-section
                         (epub-reader-ui--current-chapter session))
-                       image-rows)
+                       image-rows t)
                       elements))
     (setf (epub-reader-session-producer-block-count session)
           (length elements))
@@ -750,6 +927,17 @@ can make the final slices appear to overlap following content."
      'epub-reader-post-render (list index available-width)
      (lambda ()
        (epub-reader-ui--post-render (current-buffer))))
+    (textui-effect
+     'epub-reader-background
+     (list (epub-reader-publication-book-key publication))
+     (lambda ()
+       (setf (epub-reader-session-background-callback session)
+             (textui-async-callback
+              (lambda (generation)
+                (epub-reader-ui--run-background-job session generation))))
+       (lambda ()
+         (epub-reader-ui--cancel-background-work session)
+         (setf (epub-reader-session-background-callback session) nil))))
     (when (epub-reader-session-store session)
       (textui-effect
        'epub-reader-progress-save
@@ -921,10 +1109,15 @@ change both paragraph wrapping and the number of physical image slice rows."
             (force-mode-line-update t))
         (setf (epub-reader-session-refreshing-p session) nil)))))
 
-(defun epub-reader-ui--refresh-chunk (start end)
-  "Synchronously replace the chapter region with block range START to END."
+(defun epub-reader-ui--refresh-chunk (start end &optional interaction-fast-path)
+  "Synchronously replace the chapter region with block range START to END.
+INTERACTION-FAST-PATH relies on TextUI's focus anchor because the overlapping
+small chunk still contains point; semantic window restoration remains the
+default for arbitrary jumps and idle expansion."
   (let* ((session (epub-reader-ui--current-session))
-         (view-state (epub-reader-ui--capture-view-state))
+         (view-state
+          (and (not interaction-fast-path)
+               (epub-reader-ui--capture-view-state)))
          (buffer (current-buffer)))
     (unless (epub-reader-session-refreshing-p session)
       (setf (epub-reader-session-refreshing-p session) t)
@@ -937,7 +1130,10 @@ change both paragraph wrapping and the number of physical image slice rows."
             (textui-refresh-region
              buffer 'chapter #'epub-reader-ui--chapter-elements)
             (epub-reader-ui--post-render buffer)
-            (epub-reader-ui--restore-view-state view-state))
+            (epub-reader-ui--queue-image-job
+             session (epub-reader-ui--state-value :spine-index) start end)
+            (when view-state
+              (epub-reader-ui--restore-view-state view-state)))
         (setf (epub-reader-session-refreshing-p session) nil)))
     buffer))
 
@@ -949,8 +1145,9 @@ change both paragraph wrapping and the number of physical image slice rows."
          (end (plist-get textui-state :chunk-end)))
     (unless (and (<= start block-index) (< block-index end))
       (pcase-let ((`(,next-start ,next-end)
-                   (epub-reader-ui--chunk-range blocks block-index)))
-        (epub-reader-ui--refresh-chunk next-start next-end)))))
+                   (epub-reader-ui--chunk-range
+                    blocks block-index 'scroll)))
+        (epub-reader-ui--refresh-chunk next-start next-end t)))))
 
 (defun epub-reader-ui--inside-chunk-guard-p
     (block-index start end block-count)
@@ -965,12 +1162,11 @@ change both paragraph wrapping and the number of physical image slice rows."
   (when (and epub-reader-ui-mode
              (epub-reader-session-p epub-reader-ui--session)
              (not (epub-reader-session-refreshing-p epub-reader-ui--session)))
-    (let* ((index (epub-reader-ui--state-value :spine-index))
-           (locator (epub-reader-locator-at-point index))
+    (let* ((source (epub-reader-locator-source-at-point))
            (block-index
-            (and locator
+            (and source
                  (gethash
-                  (epub-reader-locator-block locator)
+                  (aref source 1)
                   (epub-reader-ui--current-block-index))))
            (start (plist-get textui-state :chunk-start))
            (end (plist-get textui-state :chunk-end))
@@ -982,9 +1178,9 @@ change both paragraph wrapping and the number of physical image slice rows."
         (pcase-let ((`(,next-start ,next-end)
                      (epub-reader-ui--chunk-range
                       (epub-reader-ui--current-blocks)
-                      block-index)))
+                      block-index 'scroll)))
           (unless (and (= start next-start) (= end next-end))
-            (epub-reader-ui--refresh-chunk next-start next-end)))))))
+            (epub-reader-ui--refresh-chunk next-start next-end t)))))))
 
 (defun epub-reader-ui--goto-start (&optional fragment)
   "Move to current chapter's FRAGMENT or first source position."
@@ -1049,6 +1245,7 @@ change both paragraph wrapping and the number of physical image slice rows."
          (count (length (epub-reader-publication-spine publication))))
     (unless (and (>= index 0) (< index count))
       (user-error "No chapter in that direction"))
+    (epub-reader-ui--cancel-background-work session)
     (epub-reader-ui--save-progress-safely t)
     (unless no-history
       (epub-reader-ui--record-history))
@@ -1060,7 +1257,7 @@ change both paragraph wrapping and the number of physical image slice rows."
                        0))
            (range
             (epub-reader-ui--chunk-range
-             (epub-reader-ui--current-blocks session) target)))
+             (epub-reader-ui--current-blocks session) target 'first)))
       (textui-update
        buffer
        (lambda (state)
@@ -1075,6 +1272,7 @@ change both paragraph wrapping and the number of physical image slice rows."
         (epub-reader-ui--goto-start fragment))
       (epub-reader-ui--observe-progress t)
       (epub-reader-ui--refresh-toc-buffer)
+      (epub-reader-ui--schedule-background-work session index)
       (force-mode-line-update t)
       buffer)))
 
@@ -1533,7 +1731,7 @@ change both paragraph wrapping and the number of physical image slice rows."
                     0))
                  (range
                   (epub-reader-ui--chunk-range
-                   (epub-reader-ui--current-blocks session) target))
+                   (epub-reader-ui--current-blocks session) target 'first))
                  (name
                   (generate-new-buffer-name
                    (format "*EPUB: %s*"
@@ -1585,7 +1783,9 @@ change both paragraph wrapping and the number of physical image slice rows."
             (if (plist-get textui-state :pending-locator)
                 (epub-reader-ui--restore-progress)
               (epub-reader-ui--goto-start))
-            (epub-reader-ui--initialize-progress-position))
+            (epub-reader-ui--initialize-progress-position)
+            (epub-reader-ui--schedule-background-work
+             session (plist-get textui-state :spine-index)))
           (setq succeeded t)
           buffer)
       (unless succeeded

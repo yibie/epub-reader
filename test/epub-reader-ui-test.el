@@ -11,12 +11,23 @@
 (defmacro epub-reader-ui-test--with-reader (binding &rest body)
   "Open the EPUB 2 fixture as buffer BINDING, run BODY, then kill it."
   (declare (indent 1) (debug (symbolp body)))
-  `(let ((,binding
-          (epub-reader-open (epub-reader-test-fixture "epub2.epub"))))
+  `(let ((epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+         (epub-reader-first-paint-max-characters
+          epub-reader-chunk-max-characters)
+         ,binding)
+     (setq ,binding
+           (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
      (unwind-protect
          (with-current-buffer ,binding ,@body)
        (when (buffer-live-p ,binding)
          (kill-buffer ,binding)))))
+
+(defun epub-reader-ui-test--materialize-current-images ()
+  "Run the deferred image job for the active test chapter."
+  (epub-reader-ui--background-image-job
+   epub-reader-ui--session (plist-get textui-state :spine-index)
+   (plist-get textui-state :chunk-start)
+   (plist-get textui-state :chunk-end)))
 
 (defun epub-reader-ui-test--href-position (href)
   "Return first buffer position carrying HREF."
@@ -139,6 +150,7 @@
 (ert-deftest epub-reader-ui-tags-every-rendered-image-row-with-source ()
   (epub-reader-ui-test--with-reader _buffer
     (epub-reader-next-chapter)
+    (epub-reader-ui-test--materialize-current-images)
     (let ((positions
            (cl-loop for position from (point-min) below (point-max)
                     when (get-text-property position
@@ -176,6 +188,9 @@
 
 (ert-deftest epub-reader-ui-image-slices-disable-line-spacing ()
   (let ((saved-default (default-value 'line-spacing))
+        (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
         buffer)
     (unwind-protect
         (progn
@@ -187,6 +202,7 @@
             (should (local-variable-p 'line-spacing))
             (should (= epub-reader-ui--prose-line-spacing 0.25))
             (epub-reader-next-chapter)
+            (epub-reader-ui-test--materialize-current-images)
             (let ((positions
                    (cl-loop for position from (point-min) below (point-max)
                             when (get-text-property
@@ -232,6 +248,9 @@
   (unless (display-graphic-p)
     (ert-skip "Requires a graphical frame for pixel row measurement"))
   (let ((saved-default (default-value 'line-spacing))
+        (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
         buffer)
     (unwind-protect
         (progn
@@ -240,6 +259,7 @@
                 (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
           (with-current-buffer buffer
             (epub-reader-next-chapter)
+            (epub-reader-ui-test--materialize-current-images)
             (redisplay t)
             (let* ((window (get-buffer-window buffer t))
                    (image
@@ -281,6 +301,7 @@
     (ert-skip "Requires native SVG rendering in a graphical frame"))
   (epub-reader-ui-test--with-reader _buffer
     (epub-reader-next-chapter)
+    (epub-reader-ui-test--materialize-current-images)
     (redisplay t)
     (goto-char (point-min))
     (let (caption-start)
@@ -299,6 +320,7 @@
 (ert-deftest epub-reader-ui-text-scale-reflows-and-remeasures-image-rows ()
   (epub-reader-ui-test--with-reader _buffer
     (epub-reader-next-chapter)
+    (epub-reader-ui-test--materialize-current-images)
     (let* ((real-refresh (symbol-function 'textui-refresh))
            (before-position (epub-reader-ui--first-source-position))
            (refreshes 0))
@@ -342,7 +364,8 @@
                    '(continuation nil nil)))))
 
 (ert-deftest epub-reader-ui-materializes-images-only-in-current-chunk ()
-  (let ((epub-reader-chunk-max-blocks 3))
+  (let ((epub-reader-first-paint-max-blocks 3)
+        (epub-reader-chunk-max-blocks 3))
     (epub-reader-ui-test--with-reader _buffer
       (let* ((publication
               (epub-reader-session-publication epub-reader-ui--session))
@@ -352,6 +375,11 @@
              (image (expand-file-name "OEBPS/cover.svg" root)))
         (should-not (file-exists-p image))
         (epub-reader-next-chapter)
+        (should-not (file-exists-p image))
+        (epub-reader-ui--background-image-job
+         epub-reader-ui--session 1
+         (plist-get textui-state :chunk-start)
+         (plist-get textui-state :chunk-end))
         (should (file-readable-p image))
         (should (= (plist-get textui-state :chunk-end) 3))
         (cl-loop for block across (epub-reader-ui--current-blocks)
@@ -415,8 +443,12 @@
                        (epub-reader-locator-at-point 0 position))))))))
 
 (ert-deftest epub-reader-ui-resolves-empty-container-and-inline-fragments ()
-  (let ((buffer
-         (epub-reader-open (epub-reader-test-fixture "epub3-edge.epub"))))
+  (let ((epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
+        buffer)
+    (setq buffer
+          (epub-reader-open (epub-reader-test-fixture "epub3-edge.epub")))
     (unwind-protect
         (with-current-buffer buffer
           (dolist (fragment '("empty-block" "container-target"
@@ -457,7 +489,9 @@
         (kill-buffer buffer)))))
 
 (ert-deftest epub-reader-ui-long-chapter-materializes-only-budgeted-chunk ()
-  (let ((epub-reader-chunk-max-blocks 32)
+  (let ((epub-reader-first-paint-max-blocks 32)
+        (epub-reader-first-paint-max-characters 2000)
+        (epub-reader-chunk-max-blocks 32)
         (epub-reader-chunk-max-characters 2000)
         (rendered-leaves 0)
         buffer)
@@ -519,6 +553,93 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest epub-reader-ui-first-paint-uses-the-interactive-budget ()
+  (let ((epub-reader-enable-progress nil)
+        (epub-reader-first-paint-max-blocks 4)
+        (epub-reader-first-paint-max-characters 1200)
+        (epub-reader-chunk-max-blocks 32)
+        (epub-reader-chunk-max-characters 4000)
+        buffer)
+    (setq buffer
+          (epub-reader-open (epub-reader-test-fixture "long-chapter.epub")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (should (<= (epub-reader-session-producer-block-count
+                       epub-reader-ui--session)
+                      4))
+          (should (<= (- (plist-get textui-state :chunk-end)
+                         (plist-get textui-state :chunk-start))
+                      4))
+          (let ((range
+                 (epub-reader-ui--chunk-range
+                  (epub-reader-ui--current-blocks) 20 'scroll)))
+            (should (<= (- (cadr range) (car range))
+                        epub-reader-scroll-chunk-max-blocks))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-chapter-switch-defers-image-materialization ()
+  (let ((epub-reader-enable-progress nil)
+        (resolutions 0)
+        (real-resolve
+         (symbol-function 'epub-reader-publication-resolve-resource))
+        buffer)
+    (setq buffer (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cl-letf (((symbol-function
+                      'epub-reader-publication-resolve-resource)
+                     (lambda (&rest arguments)
+                       (setq resolutions (1+ resolutions))
+                       (apply real-resolve arguments))))
+            (epub-reader-next-chapter))
+          (should (= resolutions 0))
+          (should
+           (cl-some (lambda (block)
+                      (and (eq (epub-reader-block-kind block) 'image)
+                           (null (epub-reader-block-image-file block))))
+                    (append (epub-reader-ui--current-blocks) nil))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-chunk-refresh-requeues-deferred-images ()
+  "A later viewport shift must not strand its image placeholders."
+  (let ((epub-reader-enable-progress nil)
+        (epub-reader-background-idle-delay 3600)
+        buffer)
+    (setq buffer (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (let ((session epub-reader-ui--session))
+            (epub-reader-ui--cancel-background-work session)
+            (epub-reader-ui--refresh-chunk 0 1 t)
+            (should
+             (equal (epub-reader-session-background-jobs session)
+                    '((images 0 0 1))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-prefetch-caches-without-changing-current-chapter ()
+  (let ((epub-reader-enable-progress nil)
+        (buffer (epub-reader-open (epub-reader-test-fixture "epub2.epub"))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (let* ((session epub-reader-ui--session)
+                 (current (epub-reader-session-current-chapter session)))
+            (should-not
+             (gethash (epub-reader-ui--chapter-cache-key
+                       (epub-reader-session-publication session) 1)
+                      (epub-reader-session-dom-cache session)))
+            (epub-reader-ui--prefetch-chapter session 1)
+            (should (eq current
+                        (epub-reader-session-current-chapter session)))
+            (should
+             (gethash (epub-reader-ui--chapter-cache-key
+                       (epub-reader-session-publication session) 1)
+                      (epub-reader-session-dom-cache session)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest epub-reader-ui-chunk-effects-ignore-chunk-range ()
   (epub-reader-ui-test--with-reader _buffer
     (let (effects)
@@ -528,7 +649,11 @@
         (epub-reader-ui-frame 71))
       (should
        (equal (cadr (assq 'epub-reader-post-render effects))
-              '(0 71))))))
+              '(0 71)))
+      (let ((dependencies
+             (cadr (assq 'epub-reader-background effects))))
+        (should (= (length dependencies) 1))
+        (should (stringp (car dependencies)))))))
 
 (ert-deftest epub-reader-ui-chunk-guards-are-inclusive-and-symmetric ()
   (let ((epub-reader-chunk-guard-blocks 8))
@@ -600,10 +725,13 @@
         (kill-buffer buffer)))))
 
 (ert-deftest epub-reader-ui-chunk-shift-restores-locator-and-window-row ()
-  (let ((epub-reader-chunk-max-blocks 32)
+  (let ((epub-reader-first-paint-max-blocks 32)
+        (epub-reader-first-paint-max-characters 4000)
+        (epub-reader-chunk-max-blocks 32)
         (epub-reader-chunk-max-characters 4000)
-        (buffer
-         (epub-reader-open (epub-reader-test-fixture "long-chapter.epub"))))
+        buffer)
+    (setq buffer
+          (epub-reader-open (epub-reader-test-fixture "long-chapter.epub")))
     (unwind-protect
         (save-window-excursion
           (switch-to-buffer buffer)
