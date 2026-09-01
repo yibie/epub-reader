@@ -51,17 +51,17 @@ M-x epub-reader-open RET /path/to/book.epub RET
 
 ### 阅读键位
 
-| 键 | 动作 |
-|---|---|
-| `n` / `]` | 下一 spine 章节 |
-| `p` / `[` | 上一 spine 章节 |
-| `SPC` | 向后翻页；到章尾时自动进入下一章 |
-| `S-SPC` | 向前翻页；到章首时进入上一章末尾 |
-| `b` / `f` | locator 导航历史后退 / 前进 |
-| `t` | 打开层级目录 buffer |
-| `g` | 用 `completing-read` 按目录标题跳转 |
-| `RET` | 打开 point 所在的内部或允许的外部链接 |
-| `q` | 保存进度并关闭阅读 buffer |
+| 键        | 动作                                  |
+|-----------|---------------------------------------|
+| n / ] | 下一 spine 章节                       |
+| p /  | 上一 spine 章节                       |
+| SPC     | 向后翻页；到章尾时自动进入下一章      |
+| S-SPC   | 向前翻页；到章首时进入上一章末尾      |
+| b / f | locator 导航历史后退 / 前进           |
+| t       | 打开层级目录 buffer                   |
+| g       | 用 completing-read 按目录标题跳转   |
+| RET     | 打开 point 所在的内部或允许的外部链接 |
+| q       | 保存进度并关闭阅读 buffer             |
 
 目录 buffer 中，`RET` 跳转（无目标的分组则折叠/展开），`TAB` 折叠/展开当前分组，`q`
 隐藏目录。目录重开后会恢复先前选中的行。
@@ -70,81 +70,54 @@ M-x epub-reader-open RET /path/to/book.epub RET
 
 运行 `M-x customize-group RET epub-reader RET` 查看全部选项和 faces。常用项如下：
 
-| 用途 | 变量 |
-|---|---|
-| 正文与图片 | `epub-reader-reading-width`、`epub-reader-image-rows`、`epub-reader-text-wrap-strategy` |
-| 交互首绘 | `epub-reader-first-paint-max-blocks`、`epub-reader-first-paint-max-characters` |
-| 冷滚动 chunk | `epub-reader-scroll-chunk-max-blocks`、`epub-reader-scroll-chunk-max-characters` |
-| 后台预取 | `epub-reader-background-idle-delay` |
-| 长章 viewport | `epub-reader-chunk-max-blocks`、`epub-reader-chunk-max-characters`、`epub-reader-chunk-guard-blocks`、`epub-reader-chunk-overscan-screens` |
-| 进度保存 | `epub-reader-enable-progress`、`epub-reader-save-idle-delay`、`epub-reader-store-directory` |
-| store 锁 | `epub-reader-store-lock-timeout`、`epub-reader-store-ownerless-lock-grace` |
-| 链接策略 | `epub-reader-external-link-schemes`，默认只允许 `http`、`https`、`mailto` |
-| locator 降级范围 | `epub-reader-locator-max-synthetic-distance`、`epub-reader-locator-max-synthetic-rows` |
-| 归档 adapter | `epub-reader-container-adapters` |
-| 归档安全上限 | `epub-reader-container-max-entries`、`epub-reader-container-max-files`、`epub-reader-container-max-directories`、`epub-reader-container-max-central-directory-bytes`、`epub-reader-container-max-path-bytes`、`epub-reader-container-max-entry-bytes`、`epub-reader-container-max-total-bytes`、`epub-reader-container-max-compression-ratio`、`epub-reader-container-member-timeout` |
+| 用途             | 变量                                                                                                                                                                                                                                                                                                                                                                |
+|------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 正文与图片       | epub-reader-reading-width、epub-reader-image-rows、epub-reader-text-wrap-strategy                                                                                                                                                                                                                                                                                   |
+| 交互首绘         | epub-reader-first-paint-max-blocks、epub-reader-first-paint-max-characters                                                                                                                                                                                                                                                                                          |
+| 冷滚动 chunk     | epub-reader-scroll-chunk-max-blocks、epub-reader-scroll-chunk-max-characters                                                                                                                                                                                                                                                                                        |
+| 后台预取         | epub-reader-background-idle-delay                                                                                                                                                                                                                                                                                                                                   |
+| 长章 viewport    | epub-reader-chunk-max-blocks、epub-reader-chunk-max-characters、epub-reader-chunk-guard-blocks、epub-reader-chunk-overscan-screens                                                                                                                                                                                                                                  |
+| 进度保存         | epub-reader-enable-progress、epub-reader-save-idle-delay、epub-reader-store-directory                                                                                                                                                                                                                                                                               |
+| store 锁         | epub-reader-store-lock-timeout、epub-reader-store-ownerless-lock-grace                                                                                                                                                                                                                                                                                              |
+| 链接策略         | epub-reader-external-link-schemes，默认只允许 http、https、mailto                                                                                                                                                                                                                                                                                                   |
+| locator 降级范围 | epub-reader-locator-max-synthetic-distance、epub-reader-locator-max-synthetic-rows                                                                                                                                                                                                                                                                                  |
+| 归档 adapter     | epub-reader-container-adapters                                                                                                                                                                                                                                                                                                                                      |
+| 归档安全上限     | epub-reader-container-max-entries、epub-reader-container-max-files、epub-reader-container-max-directories、epub-reader-container-max-central-directory-bytes、epub-reader-container-max-path-bytes、epub-reader-container-max-entry-bytes、epub-reader-container-max-total-bytes、epub-reader-container-max-compression-ratio、epub-reader-container-member-timeout |
 
 正文、标题、强调、引用、代码、链接、图片提示、header/footer 和目录状态均有
 `epub-reader-*` face，可通过 `M-x customize-face` 调整。
 
 ## 功能矩阵
 
-| 状态 | 能力 | 0.1.0 行为 |
-|---|---|---|
-| 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；中央目录安全 preflight 后按需解压 metadata、当前 spine 与当前 chunk 图片；解析 EPUB 2 NCX 与 EPUB 3 nav |
-| 已支持 | 常见 XHTML 语义 | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、异步后到图片与可见错误提示 |
-| 已支持 | CJK 与宽度重排 | TextUI 宽度感知折行、common kinsoku 与非末行两端对齐；默认 greedy 线性选断点，亦可选 balanced KP；窗口宽度、主题、字体或 text scale 变化时失效旧布局，并通过 focus/source anchor 保持位置；图片行预算跟随 remap 后字体高度 |
-| 已支持 | 长章节 | 首绘/冷滚动小 chunk、block 数与字符数双软预算、guard/overscan、章节 region refresh；idle 扩展 viewport 并预取下一章，不会为整章预先生成 TextUI leaf/source property |
-| 已支持 | 导航 | 前后章、章尾自动前进、内部 fragment、外部链接 allowlist、history back/forward、层级/可折叠 TOC、标题补全跳转 |
-| 已支持 | 进度 | 基于书籍 fingerprint 的版本化 locator；位置变化后 idle debounce、换章与关闭保存；原子 merge/write；exact/degraded 恢复提示；全书加权百分比 |
-| 已支持 | 输入安全 | OCF 路径规范化与冲突检查、归档成员/大小/压缩比限制、逐成员流式提取、远程资源隔离、外链 scheme allowlist |
-| 不支持 | 标注 | 高亮、笔记、annotation UI、org-remark 集成 |
-| 不支持 | 受限或固定版式出版物 | DRM、fixed-layout、竖排与精确分页 |
-| 不支持 | 富媒体与复杂排版 | 复杂 ruby、MathML、SVG、音视频、JavaScript、通用 CSS、publisher font、float/grid fidelity |
-| 不支持 | 全书服务 | 索引式全文搜索、跨设备同步、EPUB CFI 或 Web Annotation 互操作 |
-| 不支持 | 纯 Elisp ZIP | 0.1.0 仍通过 `unzip`/`bsdtar` adapter 流式读取归档 |
-
-## 与 nov.el 的比较
-
-本项目的起点正是 nov.el 的三类结构性痛点：`shr` 的渲染时硬填充排版、`(章节序号 . point)`
-的脆弱位置模型、以及整章同步渲染的性能。这些差异来自架构而非配置，nov.el 无法靠调整变量补齐。
-
-| 维度 | nov.el 0.5.0 | epub-reader 0.1.0 |
-|---|---|---|
-| 渲染引擎 | `shr`：HTML 转 buffer，渲染时按窗宽把换行固化进文本 | 语义白名单 + TextUI：宽度驱动布局，窗口变化自动重排 |
-| 中文排版 | 默认断行别扭；需自行组合 `nov-text-width t`、visual-line、`kinsoku` 才可用 | 开箱即用：折行内置 CJK 禁则，`lang` 感知的空白归一化不在全角标点旁制造空格 |
-| 两端对齐 | 无（`shr` 不支持） | 非末行像素级两端对齐（`balanced`/`greedy` 可选） |
-| 窗口/字号变化 | 旧换行不随新布局重排；重渲染后 point 漂移 | 自动重排且语义位置保持 |
-| 阅读位置 | `(spine 序号 . buffer point)`；改字号、窗宽或版本后 point 指向错误文字 | 版本化 locator（spine + block + offset + quote 回退），跨重排/重开精确恢复并报告降级 |
-| 全书进度 | 无可靠百分比（上游 issue #30 长期悬置） | 按可读字符加权的全书百分比，书末收敛 100% |
-| 打开与换章 | 整章交给 `shr` 同步渲染，图多的书秒级等待 | 中央目录预检 + 按需解压 + 首绘小 chunk + 下一章预取；32 MB 图文杂志实测打开约 0.3s、换章约 0.03–0.07s（发布机数据，见 [perf-notes.md](docs/perf-notes.md)） |
-| 图片 | 可显示；缩放依赖 `shr` 与图像栈，resize 不重算 | fit-width、行切片、异步后到、resize/text-scale 重算，CJK 图注正常 |
-| 目录 | 目录渲染成普通章节页，返回时丢失位置（上游 issue #19） | 独立层级目录 buffer：折叠、当前章节标识、重开保位置 |
-| 输入安全 | 直接交给 `unzip`，无预检 | zip bomb、路径穿越、glob、大小写碰撞等全套预检与流式限额 |
-| 依赖与版本 | libxml + `unzip`，兼容较老的 Emacs | TextUI + `unzip`/`bsdtar`，要求 Emacs 29.1+ |
-| 标注 | 核心无，但 org-remark 有成熟集成 | 尚未实现（locator 已为标注预留 range 语义） |
-| 成熟度与生态 | 多年真实世界长尾锤炼；NonGNU ELPA 直装；shrface/org-remark/paw/calibredb/nov-xwidget 等周边 | 新项目：ERT + 多轮对抗审计（见 docs/audit-\*.md），但接触过的真实书目有限 |
-
-结论：在排版、性能与位置可靠性上，本项目已系统性超过 nov.el；nov.el 仍在标注生态与
-长尾成熟度上占优。如果一本书 epub-reader 打不开，或者你现在就需要高亮笔记，
-nov.el + org-remark 仍是可靠的替代方案。
+| 状态   | 能力                  | 0.1.0 行为                                                                                                                                                                                                                 |
+|--------|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；中央目录安全 preflight 后按需解压 metadata、当前 spine 与当前 chunk 图片；解析 EPUB 2 NCX 与 EPUB 3 nav                                                                                 |
+| 已支持 | 常见 XHTML 语义       | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、异步后到图片与可见错误提示                                                                                                                          |
+| 已支持 | CJK 与宽度重排        | TextUI 宽度感知折行、common kinsoku 与非末行两端对齐；默认 greedy 线性选断点，亦可选 balanced KP；窗口宽度、主题、字体或 text scale 变化时失效旧布局，并通过 focus/source anchor 保持位置；图片行预算跟随 remap 后字体高度 |
+| 已支持 | 长章节                | 首绘/冷滚动小 chunk、block 数与字符数双软预算、guard/overscan、章节 region refresh；idle 扩展 viewport 并预取下一章，不会为整章预先生成 TextUI leaf/source property                                                        |
+| 已支持 | 导航                  | 前后章、章尾自动前进、内部 fragment、外部链接 allowlist、history back/forward、层级/可折叠 TOC、标题补全跳转                                                                                                               |
+| 已支持 | 进度                  | 基于书籍 fingerprint 的版本化 locator；位置变化后 idle debounce、换章与关闭保存；原子 merge/write；exact/degraded 恢复提示；全书加权百分比                                                                                 |
+| 已支持 | 输入安全              | OCF 路径规范化与冲突检查、归档成员/大小/压缩比限制、逐成员流式提取、远程资源隔离、外链 scheme allowlist                                                                                                                    |
+| 不支持 | 标注                  | 高亮、笔记、annotation UI、org-remark 集成                                                                                                                                                                                 |
+| 不支持 | 受限或固定版式出版物  | DRM、fixed-layout、竖排与精确分页                                                                                                                                                                                          |
+| 不支持 | 富媒体与复杂排版      | 复杂 ruby、MathML、SVG、音视频、JavaScript、通用 CSS、publisher font、float/grid fidelity                                                                                                                                  |
+| 不支持 | 全书服务              | 索引式全文搜索、跨设备同步、EPUB CFI 或 Web Annotation 互操作                                                                                                                                                              |
+| 不支持 | 纯 Elisp ZIP          | 0.1.0 仍通过 unzip/bsdtar adapter 流式读取归档                                                                                                                                                                             |
 
 ## 已知限制
 
-- `epub-reader-chunk-max-characters` 是 viewport 软预算。为保证阅读可继续，单个超长语义块会被
-  整块载入；一个 50,000 字符的单段可以超过 2,000 字符预算。
-- viewport 的尾端使用 exclusive range；guard 恰好落在边界时，前后两端仍有一个 block 的
-  触发差异（V-03），不影响 locator 正确性，但可能带来轻微迟滞差。
-- TextUI 按字符 cell 生成物理行；reader 的 `truncate-lines` 可阻止二次折行，却不能修正
-  variable-pitch glyph 或不可分长 token 的像素溢出，极端情况下尾部会被截断。图片 row budget
-  已按 `window-font-height` 调整，但 TextUI slice 内部仍以 frame 默认 char height 度量。
-- 章内百分比计入 block 内 offset，书末收敛到 100%；章节之间的权重目前仍取各 XHTML 资源的
-  byte size，不等同于严格的字数或实际阅读时长。
-- sidecar 事务假设本地文件系统提供同目录 directory rename 的原子且不覆盖语义。非常规或网络
-  文件系统未验证；异主机 lock owner 会被保守地视作仍存活，因此远端主机崩溃后不会自动接管。
-- 崩溃可能留下私有候选目录、quarantine 或 dead takeover intent，目前没有后台垃圾回收；并发
-  stale reclaim 可能退化为 timeout 后重试。锁协议已有确定性交错 ERT，但尚无长期真实多进程
-  压力与特殊文件系统矩阵。
+- 极长的单个段落（几万字不分段的那种）会一次性载入渲染，翻到这种段落时可能出现一次
+  明显的停顿。
+- 极端内容可能出现行尾被截断而不是换行：比如一条特别长且中间没有任何可断点的
+  URL，或个别特别宽的字形。正常文字不受影响。
+- header 里的全书百分比是按各章文件大小估算的近似值，不是精确的字数比例；读到书末
+  会到 100%，但中途的数值只当参考。
+- 阅读进度文件（sidecar）的多开保护只在本地磁盘上可靠。如果把书和进度文件放在网盘
+  或同步盘上、并且多台机器同时读同一本书，进度可能互相覆盖，保存也可能要等几秒锁
+  超时。单机使用不受影响。
+- Emacs 崩溃或被强杀后，进度目录里可能留下残余的锁文件或临时目录。目前不会自动清
+  理，后续保存会自动等待并重试；如果发现保存一直变慢，手动删掉进度目录里陈旧的
+  `*.lock` 类残留即可。
 
 ## 开发
 
@@ -164,16 +137,3 @@ TEXTUI_DIR=/path/to/textui ./test/run-tests.sh
 也可以用 `EMACS=/path/to/emacs` 指定 Emacs。生产模块应保持只调用 TextUI 公开 API；修改后至少
 运行全量 ERT、byte-compile，并用一本文本型 EPUB 做只读 smoke test。
 
-### 文档索引
-
-- [architecture.md](docs/architecture.md)：模块边界、TextUI 映射、viewport、locator/store 与 MVP。
-- [design-options.md](docs/design-options.md)：从 nov.el 痛点出发的三条候选路线（历史决策材料）。
-- [research-ecosystem.md](docs/research-ecosystem.md)：Emacs EPUB 生态与 nov.el 上游状态调研。
-- [discussion-design.md](docs/discussion-design.md) 与
-  [discussion-research.md](docs/discussion-research.md)：路线讨论及交叉结论；最终选择以 architecture 为准。
-- [audit-phase1.md](docs/audit-phase1.md)：容器、publication、renderer、locator 第一阶段审计。
-- [audit-phase2.md](docs/audit-phase2.md) 与
-  [audit-phase2-response.md](docs/audit-phase2-response.md)：viewport、TOC、store 第二阶段审计与响应。
-- [benchmark-10k.md](docs/benchmark-10k.md)：10k 段长章节基准。
-- [perf-notes.md](docs/perf-notes.md)：杂志样书惰性容器、换章与连续滚动的画像及前后基准。
-- [textui-issues.md](docs/textui-issues.md)：图片切片行距与二次折行的 TextUI 最小复现及 reader 规避。

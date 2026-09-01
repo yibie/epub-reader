@@ -1,0 +1,5 @@
+# Development-process documents (research, discussions, audits, perf profiles)
+# stay on disk but out of the published repository.
+docs/
+
+*.elc
