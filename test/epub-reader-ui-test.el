@@ -144,6 +144,39 @@
          (member (epub-reader-locator-block locator)
                  (mapcar #'epub-reader-block-key image-blocks)))))))
 
+(ert-deftest epub-reader-ui-image-slices-disable-line-spacing ()
+  (let ((saved-default (default-value 'line-spacing))
+        buffer)
+    (unwind-protect
+        (progn
+          (set-default 'line-spacing 0.25)
+          (setq buffer
+                (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
+          (with-current-buffer buffer
+            (should-not line-spacing)
+            (epub-reader-next-chapter)
+            (let ((positions
+                   (cl-loop for position from (point-min) below (point-max)
+                            when (get-text-property
+                                  position 'epub-reader-image-slice)
+                            collect position)))
+              (should positions)
+              (dolist (position positions)
+                (should (equal (get-text-property
+                                position 'line-spacing)
+                               0))))))
+      (set-default 'line-spacing saved-default)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-does-not-soft-wrap-textui-physical-lines ()
+  (epub-reader-ui-test--with-reader _buffer
+    (should truncate-lines)
+    (should (equal (assq 'truncation fringe-indicator-alist)
+                   '(truncation nil nil)))
+    (should (equal (assq 'continuation fringe-indicator-alist)
+                   '(continuation nil nil)))))
+
 (ert-deftest epub-reader-ui-materializes-images-only-in-current-chunk ()
   (let ((epub-reader-chunk-max-blocks 3))
     (epub-reader-ui-test--with-reader _buffer
@@ -419,19 +452,20 @@
               (should position)
               (goto-char position)
               (recenter 3)
+              (redisplay t)
               (let* ((before (epub-reader-locator-at-point 0))
                      (before-row
-                      (- (line-number-at-pos (window-point))
-                         (line-number-at-pos (window-start))))
+                      (epub-reader-ui-test--visual-row (selected-window)))
                      (end
                       (epub-reader-ui--chunk-end
                        (epub-reader-ui--current-blocks)
                        10)))
                 (epub-reader-ui--refresh-chunk 10 end)
+                (redisplay t)
                 (let ((after (epub-reader-locator-at-point 0))
                       (after-row
-                       (- (line-number-at-pos (window-point))
-                          (line-number-at-pos (window-start)))))
+                       (epub-reader-ui-test--visual-row
+                        (selected-window))))
                   (should (equal (epub-reader-locator-block before)
                                  (epub-reader-locator-block after)))
                   (should (= (epub-reader-locator-offset before)

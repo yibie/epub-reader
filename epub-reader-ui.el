@@ -147,7 +147,20 @@ A single larger block is still materialized by itself."
   :keymap epub-reader-ui-mode-map
   (if epub-reader-ui-mode
       (progn
-        (setq-local truncate-lines nil)
+        ;; TextUI already emits physical lines at the requested frame width.
+        ;; A second Emacs soft-wrap can expose a lone glyph in the margin.
+        (setq-local truncate-lines t)
+        ;; TextUI image slices assume ordinary frame rows.  Inherited positive
+        ;; spacing opens visible seams between slices, so paragraph separation
+        ;; is owned by the frame's explicit gaps instead.
+        (setq-local line-spacing nil)
+        ;; Fixed-width TextUI rows need neither Emacs continuation nor
+        ;; truncation fringe glyphs; those form a distracting vertical rail
+        ;; beside centered CJK prose.
+        (setq-local fringe-indicator-alist
+                    (copy-tree fringe-indicator-alist))
+        (setcdr (assq 'truncation fringe-indicator-alist) '(nil nil))
+        (setcdr (assq 'continuation fringe-indicator-alist) '(nil nil))
         (add-hook 'post-command-hook
                   #'epub-reader-ui--maybe-shift-chunk nil t)
         (add-hook 'post-command-hook
@@ -599,8 +612,36 @@ A single larger block is still materialized by itself."
   "Install EPUB interaction and source metadata after rendering BUFFER."
   (with-current-buffer (or buffer (current-buffer))
     (epub-reader-locator-tag-image-runs (current-buffer))
+    (epub-reader-ui--disable-image-line-spacing (current-buffer))
     (epub-reader-ui--attach-link-actions (current-buffer))
     (epub-reader-ui--mark-chrome-regions (current-buffer)))
+  nil)
+
+(defun epub-reader-ui--disable-image-line-spacing (&optional buffer)
+  "Set image-slice line spacing to zero in BUFFER.
+TextUI image leaves divide an image into fixed-height character rows.  Positive
+buffer or inherited line spacing would otherwise introduce visible seams and
+can make the final slices appear to overlap following content."
+  (with-current-buffer (or buffer (current-buffer))
+    (save-excursion
+      (let ((position (point-min))
+            (inhibit-read-only t))
+        (while (< position (point-max))
+          (if (get-text-property position 'epub-reader-image-slice)
+              (let* ((line-start
+                      (save-excursion
+                        (goto-char position)
+                        (line-beginning-position)))
+                     (line-end
+                      (save-excursion
+                        (goto-char position)
+                        (min (point-max) (1+ (line-end-position))))))
+                (add-text-properties line-start line-end '(line-spacing 0))
+                (setq position line-end))
+            (setq position
+                  (or (next-single-property-change
+                       position 'epub-reader-image-slice nil (point-max))
+                      (point-max))))))))
   nil)
 
 (defun epub-reader-ui--mark-chrome-regions (&optional buffer)
@@ -741,6 +782,29 @@ A single larger block is still materialized by itself."
      :point-locator (epub-reader-locator-at-point index)
      :viewports (nreverse viewports))))
 
+(defun epub-reader-ui--restore-window-visual-row (window position desired-row)
+  "Keep POSITION at DESIRED-ROW in WINDOW after a region refresh."
+  (set-window-point window position)
+  (let ((attempts 0)
+        actual-row moved)
+    (while (and (< attempts 100)
+                (progn
+                  (setq actual-row
+                        (count-screen-lines
+                         (window-start window) position nil window))
+                  (/= actual-row desired-row)))
+      (with-selected-window window
+        (goto-char (window-start window))
+        (setq moved
+              (vertical-motion
+               (if (> actual-row desired-row) 1 -1) window))
+        (unless (= moved 0)
+          (set-window-start window (point) t)))
+      (set-window-point window position)
+      (if (= moved 0)
+          (setq attempts 100)
+        (setq attempts (1+ attempts))))))
+
 (defun epub-reader-ui--restore-view-state (view-state)
   "Restore semantic point and each window top from VIEW-STATE."
   (let ((point-locator
@@ -767,7 +831,11 @@ A single larger block is still materialized by itself."
               (set-window-start window (point) t)))
           ;; Selecting a window to run `vertical-motion' moves its point.
           ;; Restore the semantic point only after positioning its top row.
-          (set-window-point window position))))))
+          ;; A resolved top locator or `vertical-motion' can be one display row
+          ;; off when POSITION is inside a physically wrapped line.  Correct
+          ;; from the current start until the captured visual metric matches.
+          (epub-reader-ui--restore-window-visual-row
+           window position (epub-reader-viewport-visual-row viewport)))))))
 
 (defun epub-reader-ui--refresh-chunk (start end)
   "Synchronously replace the chapter region with block range START to END."
