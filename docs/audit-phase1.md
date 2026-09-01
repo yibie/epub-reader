@@ -6,17 +6,33 @@
 `epub-reader-render.el`、`epub-reader-locator.el`、`epub-reader-ui.el`、
 `test/`、`test/fixtures*`，并以 `docs/architecture.md` 为蓝图。
 
-## 结论先行
+## 结论先行（最终复核更新）
 
-**目前不可进入第二阶段。** 16/16 ERT 只证明三个极小 fixture 的 happy path；
-它没有证明 ZIP 资源上限是安全边界。现实现至少有一个可在任何大小检查触发前耗尽
-Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚未成立。
+**Gate 仍未解除，不可进入第二阶段。** 第二轮修复已完整关闭
+A-04、P-01、L-01 和 R-01，也修好了 L-02 的 exact quote 校验与同段多图冲突。
+但 P-02 的远程 URL dot-segment 仍未按 URL parser 规范化，L-02 的生产
+`book-key` 仍只信 publisher identifier；两者都会使持久 locator/清单唯一性失真。
 
-| 严重级别 | 数量 | 含义 |
+最终复核基线为 `91d3bd7...beb1fd8`（五个第二轮修复提交）。执行
+`./test/run-tests.sh`：**42/42 通过，0 unexpected**。
+
+| P0/P1 复核状态 | 数量 | 说明 |
 |---|---:|---|
-| P0 阻断 | 1 | 在处理不可信 EPUB 时可造成检查前资源耗尽 |
-| P1 应修 | 13 | 会打开失败、读错内容、跳错位置或破坏阶段二依赖的不变量 |
-| P2 建议 | 4 | 架构债、清理韧性或较小的语义降级 |
+| 已解决 | 11 | A-01、A-02、A-03、A-04、P-01、P-03、P-04、L-01、R-01、R-02、X-01 |
+| 部分解决 | 3 | P-02、L-02、T-01 |
+| 未解决 | 0 | 无完全未着手项；gate 统计时“部分解决”仍按未解决计 |
+
+### 第二轮指定探针复测
+
+| 探针 | 复测结果 |
+|---|---|
+| root-relative OCF URL | `/EPUB/text/a.xhtml` 与对应 EPUB fixture 均被拒绝 |
+| OCF 禁止字符/full fold | PUA、noncharacter、Specials 的全部边界被拒绝；`ſ/s`、`ς/σ`、`ẞ/ss`、`İ/i̇`、`ﬃ/ffi` 均碰撞 |
+| 真实 TextUI chrome 区域 | 1,318 个 chrome 字符中产生 locator 的数量为 0；章首/章尾无漏标 |
+| exact quote / 同段多图 | 前插 `XX ` 后以 `quote-near-block` 恢复到新 offset 10；3 张图的 3 个 key 全部唯一 |
+| `zh` segment break | `中\n文`/`中文\n，继续` 无空格；`ko/en/nil` 保留分词空格，inline `lang` 可覆写继承语言 |
+| 远程 URL dot-segment（扩展对抗探针） | `https://example.com/a/../b` 与 `https://example.com/b` 的 `resource-key` **不相等** |
+| 生产 book identity（扩展对抗探针） | `book-key` 与 publisher identifier 完全相同；两本共用 identifier 的书会被当成同一身份 |
 
 ## 规范基线与复现方法
 
@@ -35,7 +51,8 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
 - `linear="no"` 在默认遍历中是“可以跳过”，不是“必须跳过”。因此当前保留并经过
   non-linear item 不是本报告的规范 finding。
 
-执行 `./test/run-tests.sh`：16/16 通过，0 unexpected。另做了四组定向探针：
+以下是初审时的历史基线：当时执行 `./test/run-tests.sh` 为 16/16 通过，
+0 unexpected；四组定向探针当时的失败如下，本次复测结果见文首：
 
 | 探针 | 实际结果 |
 |---|---|
@@ -59,6 +76,13 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   `max-entry/max-total` 立即 kill 子进程并删除 partial file；增加 wall-clock timeout。
   回归测试用很小的动态上限验证只多读一个 bounded chunk，而不是先 materialize 全量。
 
+- **复核结果：已解决。** `epub-reader-container.el:361-440` 以
+  `make-process :buffer nil` 输出到 filter，在 `:397-408` 先检查条目/总实际字节，
+  再于 `:409-412` 追加目标文件，超时在 `:413-419` kill 子进程，失败删
+  partial file（`:439-440`）。`test/epub-reader-container-test.el:122-144` 对两
+  adapter 伪造假元数据；独立 64-byte 探针实测两者均在 4096-byte 输出完成前
+  报限额，且无 partial file。内存峰值只受单个 process chunk 影响，不再随 entry 大小增长。
+
 ### A-02 — P1 应修：清单本身无界，目录数和压缩比限制可绕过
 
 - **位置：** `epub-reader-container.el:87-97,120-136`；蓝图
@@ -69,6 +93,13 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   子进程时间限制；也只检查 mimetype 内容，未检查 OCF 要求的首条、stored、无 extra field。
 - **修复建议：** 给中央目录解析设置输出 byte/条目/目录/时间上限，目录也计入总 entry 数；
   校验声明 size 与 ratio 并以 A-01 的实际流量上限兜底；同时验证 OCF `mimetype` ZIP 元数据。
+
+- **复核结果：已解决。** 不再调用 archive tool 生成无界清单；
+  `epub-reader-container.el:222-293` 先从 EOCD 读有界中央目录，`:241-246`
+  在读入前限制 entry 数和 central-directory bytes。`:316-348` 分别限制文件、
+  目录、声明总量和 ratio，`:295-314` 检查 `mimetype` 为首条、stored、无 local
+  extra field。`container-test.el:94-120` 覆盖目录数、central bytes、条目大小与
+  ratio；timeout/坏 mimetype metadata 尚无专门回归，该测试债归入 T-01，不改变本项代码结论。
 
 ### A-03 — P1 应修：成员名被当成 glob，列表条目与读取字节失去一一对应
 
@@ -81,6 +112,12 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   literal member 选择能力；如果工具没有可靠 literal 模式，不要用 member pattern API，
   应改用已验证的中央目录/流式 extractor。两个 adapter 都补 `* ? [ ]` 恶意 fixture。
 
+- **复核结果：已解决。** `epub-reader-container.el:175-203` 在 adapter
+  调用前拒绝 `* ? [ ]`（以及其他已知 adapter metacharacter）。
+  `container-test.el:77-82` 对 `glob-member.epub` 参数化两 adapter；原 `a*`
+  探针现均在 preflight 报 `epub-reader-unsafe-archive`，不再发生 1 byte 声明对应
+  3 bytes 输出的身份混淆。
+
 ### A-04 — P1 应修：raw-string 去重挡不住规范化/大小写路径碰撞
 
 - **位置：** `epub-reader-container.el:103-136,148-178`。
@@ -90,6 +127,20 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   名称在 canonical normalization + full case folding 后唯一，不能把宿主文件系统的行为当保护。
 - **修复建议：** 分目录建立规范化 case-fold key 并拒绝碰撞；实现 OCF 文件名/路径 byte
   长度与字符约束；写入前后都验证目标仍属于专属 root，并测试大小写、NFC/NFD 和尾点碰撞。
+
+- **复核结果：部分解决。** `epub-reader-container.el:165-203,316-348`
+  已做 NFC 与大小写 key、路径/分量 byte 上限和大部分禁止字符，`:442-468`
+  也在 materialize 前后检查 containment。`container-test.el:84-92` 只锁定
+  `A/a` 和 `É/é`。扩展探针显示 U+E000（PUA）、U+FDD0（noncharacter）、
+  U+FFF9 仍被接受；`long s` U+017F 与 `s` 的 canonical key 仍不相等。即 OCF
+  禁止字符集和规范要求的 full case folding 都未完整实现。应以 Unicode
+  Default Caseless Matching/full fold 生成 key，补 PUA/noncharacter 区间及 `ſ/s`、`ς/σ`等回归。
+
+- **最终复核结果：已解决。** `epub-reader-container.el:165-225` 现覆盖
+  BMP/补充平面 PUA、surrogate、U+FDD0–FDEF、Specials 与每个平面的末两个
+  noncharacter，并以 full fold 生成 canonical key。独立探针复测所有禁止区间
+  边界都被拒绝；`ſ/s`、`ς/σ`、`ẞ/ss`、`İ/i̇`、`ﬃ/ffi` 均生成相同 key。
+  `test/epub-reader-container-test.el:84-121` 还用真 ZIP 覆盖 full-fold collision 和 PUA。
 
 ### A-05 — P2 建议：正常 cleanup 可用，但失败后不可重试且少一次 containment 复核
 
@@ -116,6 +167,21 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   URL serialization 与 archive path。测试 `%20/%23/%2F/%5C/%2e/%ZZ/%FF`、Unicode fragment、
   query、空 path、过 root 和 HTML `base`。
 
+- **复核结果：部分解决。** `epub-reader-publication.el:164-315` 已改为
+  strict percent/UTF-8 decoder，按 segment 处理后才规范路径，对 `%2F/%5C` 保留编码分隔符。
+  `publication-test.el:80-121` 与原探针证明 `%2F`、`%ZZ`、`%FF`、Unicode fragment、
+  query、`base` 和过 root 均按预期处理。但 `--normalize-url-path` 在 `:271-281`
+  特意接受以 `/` 开头的 URL；探针 `/%45PUB/text/a%20b.xhtml` 被静默解析成
+  `EPUB/text/a b.xhtml`，而 OCF 文档中的 container URL 不得以 `/` 开头。
+  resolver 因此仍不能作为 OPF/container 边界的完整 URL validator；需区分 OCF URL
+  与正文超链接策略，并补 root-relative 回归。
+
+- **最终复核结果：已解决。** `epub-reader-publication.el:312-367` 在解析
+  local OCF URL 之前拒绝前导 `/`，且保留上轮已通过的 `%2F/%5C`、坏 percent/
+  UTF-8、fragment、query、`base` 和过 root 行为。独立探针与
+  `epub3-root-relative.epub` 均得到 `epub-reader-publication-error`；
+  `test/epub-reader-publication-test.el:80-123,137-145` 已锁定该路径。
+
 ### P-02 — P1 应修：OCF/OPF 结构、namespace 与 required 字段校验不足
 
 - **位置：** `epub-reader-publication.el:51-96,193-248,390-426`。
@@ -129,6 +195,26 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   required 属性/解析后 URL 唯一性、非空 spine；按 `unique-identifier` IDREF 选择标识符。
   对多 rendition 明确 deterministic policy 或报可理解的 unsupported 错误。
 
+- **复核结果：部分解决。** `epub-reader-publication.el:149-162,323-477`
+  已按 namespace 和直接子节点解析，并验证 rootfile media type、local manifest URL
+  唯一、`unique-identifier`、media type 和非空 spine；`publication-test.el:123-146`
+  覆盖其中的主路径。但仍有三个可复现的规范漏洞：`:317-321` 把空字符串
+  required attribute 当作存在；`:646` 的 version regex 接受 `3.bad` 和 `2.`；
+  external URL 在 `:301-302` 不分离 fragment，使 manifest 的
+  `https://example.test/a#frag` 在 `:416-418` 检查中显示 `fragment=nil`而漏过。
+  新测试没有覆盖这三条。修复时还应对远程 manifest URL 做解析后唯一性，
+  而不是当前 `:413-415` 的 raw URI key。
+
+- **最终复核结果：部分解决。** 空 required attribute、非 `2.0/3.0`
+  version 和 remote fragment 已分别在 `epub-reader-publication.el:369-377,700-706,283-310`
+  被拒绝；host 大小写、默认端口和 unreserved percent escape 也进入规范 `resource-key`。
+  但这仍不是完整 URL parsing：`url-generic-parse-url`/`url-recreate-url` 不会移除
+  dot-segment。探针得到 `https://example.com/a/../b` 与 `https://example.com/b`
+  的 key 不等，`%2e%2e` 也只被解码成未归约的 `/../`。
+  `test/epub-reader-publication-test.el:147-161` 只测 host/default-port/`%2E`，使等价
+  remote manifest URL 仍可绕过 `:469-481` 的唯一性检查。应在生成 key 前完成
+  URL path dot-segment normalization，并加真实重复 manifest fixture。
+
 ### P-03 — P1 应修：合法的远程 manifest resource 会使整本 EPUB 打不开
 
 - **位置：** `epub-reader-publication.el:220-247`。
@@ -139,6 +225,12 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   不联网，只有实际渲染需要时才走明确的 capability/fallback/错误路径。测试“远程非 spine
   资源不妨碍本地正文”和 unsupported spine resource 的 fallback/诊断。
 
+- **复核结果：已解决。** resource model 已增加 `uri/remote-p`
+  (`epub-reader-publication.el:25-28,410-435`)；远程非 spine 只记录 URI，不网络请求，
+  远程 spine 在 `:457-460` 返回明确 unsupported 错误。
+  `publication-test.el:135-146` 同时锁定两条路径。远程 URL 的 fragment/唯一性校验债
+  记在 P-02，不再是“合法 remote item 令整书打不开”的本项故障。
+
 ### P-04 — P1 应修：EPUB 3 `span + ol` TOC 分组被整棵丢弃
 
 - **位置：** `epub-reader-publication.el:328-348`。
@@ -146,6 +238,11 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   所以合法的分组节点和所有 nested `li` 一起返回 nil。当前 fixture 只有两条 flat `a`，没有触发。
 - **修复建议：** TOC entry 允许 target=nil 的 group，保留 children；或者显式 flatten children，
   但不能丢树。补 `span -> ol -> a`、多层 `a -> ol`、alt/title label 和 percent fragment fixture。
+
+- **复核结果：已解决。** `epub-reader-publication.el:540-581` 允许
+  `target=nil` 但有 children 的 `span` group，并保留嵌套 `a/span -> ol -> li`；label
+  也会 fallback 到 `title`/图片 `alt`。`publication-test.el:148-159` 在真实 nav
+  fixture 上检查三层树、group 无 target 和 Unicode fragment。
 
 ### P-05 — P2 建议：所有 scheme 都直接交给 `browse-url`
 
@@ -168,6 +265,22 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   chrome 返回 nil，而不是任意吸附。定义 tie-break，并补 newline、U+200B、padding、border、
   章首章尾的表驱动测试。
 
+- **复核结果：部分解决。** `epub-reader-locator.el:62-132` 已同时找
+  前后 source，用 row/character 真实距离比较，设置最大距离并在 tie 时选前块。
+  `render-test.el:115-131` 使原“10 个合成换行”探针通过，并覆盖 U+200B。
+  但 chrome 只在当前字符自身带 `epub-reader-chrome` 时被拒绝（`:113-117`）；
+  TextUI 在 header 周围生成的 row/gap/padding 字符没有该属性。在真实 reader
+  buffer 扫描章首到首个 source 之间，有 **64** 个无 source、无 chrome 属性的合成
+  字符（position 98–161）仍会生成正文 locator。`ui-test.el:92-99` 只选中一个
+  显式带 chrome 属性的字符，没有覆盖这个洞。需以区域/边界标记整段 UI chrome，
+  而不是只查 point property。
+
+- **最终复核结果：已解决。** `epub-reader-ui.el:111-149` 在图片
+  source 标记完成后，把章首/章尾和每个正文行两侧的 TextUI 合成 cells 全部标成
+  chrome。真实 reader buffer 独立扫描了 1,318 个 chrome 字符，产生 locator 的数量为
+  0，且 first/last source 之外无漏标。`test/epub-reader-ui-test.el:109-150` 现在也扫描
+  整个区域，不再只抽一个显式 chrome 字符。
+
 ### L-02 — P1 应修：图片、空块和内联 id 没有可靠坐标，fallback 也未实现
 
 - **位置：** `epub-reader-render.el:271-298,308-340,370-384`；
@@ -184,6 +297,36 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   quote-near-block → quote-in-spine → spine-start 并返回 degraded 状态。测试必须在实际渲染后的
   image slice、空元素、inline id、合成空白上取点，不是只检查 alt string 属性。
 
+- **复核结果：部分解决。** renderer 已为空/容器/inline/pagebreak id
+  生成 U+2060 语义 anchor，block key 优先 `id:` 否则用 DOM `path:`，图片行在
+  `epub-reader-locator.el:281-309` 获得显式 source。`locator.el:178-266` 也增加
+  quote fallback/schema/quality；`render-test.el:133-170,230-254` 和 `ui-test.el:73-90`
+  覆盖空/inline id、degraded quality 与实际图片 slice。然而：
+
+  1. `locator.el:242-244` 只要同 block 的旧 offset 仍在范围内就报 `exact`，不核对
+     prefix/suffix。在同 `id:stable` 块前插 `"XX "` 后，旧 locator 仍返回
+     `quality=exact, position=8`，实际落在错字符 `a`。新测试通过改 block key 绕开了
+     最危险的同-key 内容漂移路径。
+  2. `render.el:391-392,419-420` 对同一段/figure 的每张图都使用同一
+     `path/.../image` key。两图探针得到两个完全相同的
+     `path:body/0:p/image`，第二张图的 locator 可静默恢复到第一张。
+  3. locator 仍没有 book key，`spine-index` 也未参与 resolve 身份校验。
+
+  应先校验 exact 位置的 quote，不一致则进入 quote fallback；为重复图片加 DOM
+  sibling index，并补同-key 前插/删除、同段多图、跨书/跨 spine 负例。
+
+- **最终复核结果：部分解决。** `epub-reader-locator.el:254-326` 现会在
+  exact 前核对 prefix/suffix；前插 `XX ` 的独立探针以 `quote-near-block` 落到新
+  source offset 10。`epub-reader-render.el:450-487` 为每个后代图片加 sibling index，
+  真实章节的 3 张图得到 3 个唯一 key；schema/book/spine 字段和负例也已增加。
+  但生产身份来源还是错的：`epub-reader-publication.el:725-731` 直接令
+  `book-key=identifier`，违反 `docs/architecture.md:243-245` 的“identifier + 规范路径 +
+  size/mtime + content hash，不能只信 publisher identifier”。探针证明两本共用同一
+  identifier/path/block/text 的书仍得到 `quality=exact`。`render-test.el:313-331` 手工注入
+  `book-a/book-b`，没有经过这条生产路径；同时持久模型应以 spine href 找章，不能
+  只依赖易因重排漂移的数值 index。因此 exact/多图子项已关闭，book/spine identity
+  子项仍阻断 gate。
+
 ### R-01 — P1 应修：无条件把 source newline 变 ASCII 空格会破坏 CJK
 
 - **位置：** `epub-reader-render.el:200-207,304-327`；蓝图
@@ -196,6 +339,22 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   独立模块；至少删除 CJK/CJK、CJK/全角标点、全角标点/CJK 周围的 source segment break，
   保留真实 U+0020；混排策略用 fixture 锁定。不要把此职责推给 TextUI。
 
+- **复核结果：部分解决。** `epub-reader-render.el:236-283` 现会区分
+  source segment break 与真实 U+0020；指定探针得到 `中文` 和 `中文，继续`，
+  `render-test.el:173-191` 也从 XHTML 端到端覆盖中文、全角标点、显式空格和
+  Latin。但 `--cjk-context-p` 在 `:204-211` 把 Hangul 和 category `h` 无条件当成
+  无间隔书写，且没有传递 `xml:lang/lang`。探针 `한국어\n문장` 被错误合并为
+  `한국어문장`；韩文通常以空格分词，应保留 segment break 生成的分词空格。
+  因此原 finding 要求的“按 lang 和字符上下文”尚未完成；需增加 `zh/ja/ko`
+  策略与韩文回归。
+
+- **最终复核结果：已解决。** `epub-reader-render.el:138-157,177-230`
+  现按 DOM 继承 `xml:lang/lang`，`:236-330` 仅在 `zh/ja` 且两侧为 CJK 上下文时
+  删除 segment break，韩文与其他语言生成空格。独立探针验证 `zh/zh-Hant/ja`
+  的 `中\n文` 和全角标点无多余空格，`ko/en/nil` 保留分词空格，inline
+  `lang=ko` 也能覆写外层 `zh`。`test/epub-reader-render-test.el:196-232` 从 XHTML
+  端到端覆盖 `zh/ja/ko`。
+
 ### R-02 — P1 应修：`<br>` 先生成换行，随后被归一化成普通空格
 
 - **位置：** `epub-reader-render.el:161-207`。
@@ -205,6 +364,11 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
 - **修复建议：** 为 `<br>` 使用不会参与 collapsible whitespace 的 sentinel/semantic run，
   normalize 后恢复 hard newline；locator 对 hard break 定义前后吸附规则。补连续 br、br 与
   CJK/inline face/link 相邻的测试。
+
+- **复核结果：已解决。** `<br>` 在 `epub-reader-render.el:183` 带
+  `epub-reader-hard-break` 属性，normalizer 在 `:249-251` 优先保留该换行。
+  `render-test.el:193-228` 覆盖连续两个 br、CJK/加粗相邻、每个换行的 source
+  坐标以及实际 TextUI 渲染后的三行布局。原探针不再把 `<br>` 折成空格。
 
 ### R-03 — P2 建议：还有三类静默语义降级
 
@@ -228,6 +392,13 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
 - **修复建议：** publication 暴露窄而深的 `load-section/resolve-resource` 公共接口，renderer 只收
   DOM/section 与 resolver；link map/动作留在 UI，renderer 仅附 href property。加依赖方向 lint，
   禁止跨文件调用其他模块的 `--` symbol。
+
+- **复核结果：已解决。** 全部生产 `.el` 静态搜索仍无
+  `textui--*`/`textui-kp-core--*`；`epub-reader-publication.el:714-773` 已暴露
+  `load-section/resolve-resource`，renderer 只通过两个公开 seam 获取 DOM/资源。
+  link keymap/动作在 `epub-reader-ui.el:92-108`。
+  `test/epub-reader-contract-test.el:84-113` 静态拒绝 TextUI 私有 symbol 和跨文件
+  `epub-reader-...--...` 调用；复审 grep 也只命中测试自身的 regex。
 
 ### X-02 — P2 建议：领域对象和整章 blocks 被放进 `textui-state`
 
@@ -257,19 +428,59 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
   source 经完整 render→TextUI。测试应断言失败阶段、错误类型、partial root 清理和 bounded output，
   不只断言 `should-error`。
 
+- **复核结果：部分解决。** 测试已从 16 增至 36，新增 9 个 ZIP
+  fixture；glob、case/NFC collision、目录数、central bytes、ratio/声明大小、伪元数据的
+  实际流式上限、percent/namespace/required/remote/nav、合成距离、空/inline anchor、
+  CJK/硬换行、degraded locator、实际 image slice 和模块契约都有回归。
+  `./test/run-tests.sh` 的 36/36 确实通过。但测试套仍没有发现本次已复现的
+  A-04 PUA/noncharacter/full-fold、P-01 root-relative OCF URL、P-02 空 required/
+  version/remote fragment、L-01 TextUI 合成 chrome 间隙、L-02 同-key 前插与同段多图、
+  R-01 韩文分词。container 也缺 timeout、坏 mimetype local header、cleanup failure、坏 local
+  entry header 的回归；实际上限测试断言错误与 partial file，但“未先完整
+  materialize”主要仍由 `:buffer nil` 的代码检查证明。所以它们能防止旧问题回归，
+  不能支撑“14 条全部关闭”的声明。
+
+- **最终复核结果：部分解决。** 测试现为 42/42；新增 OCF
+  禁止区间/full fold、root-relative URL、空 required、坏 version、remote fragment/基本规范化、
+  exact quote、cross-book/spine、多图 key、全 chrome 区域与 `zh/ja/ko` 端到端回归。
+  然而 suite 仍未覆盖本次已复现的 remote dot-segment 等价 URL，也未从两个
+  共用 publisher identifier 的真实 publication 验证生产 book fingerprint。因 P-02/L-02
+  仍有漏洞，T-01 也不能标为完全解决。
+
+## 修复期间引入或暴露的新问题
+
+- **P1：同段多图 key 冲突。** stable DOM-path 修复把每张后代图片都写成同一
+  `/image` 路径（`epub-reader-render.el:391-392,419-420`）；这是修复 L-02 时引入的
+  新身份冲突。**最终复核：已解决**，现以 sibling index 保证 key 唯一。
+- **P2：`epub-reader-locator-goto` 返回类型不兼容。** 修复前 docstring/实现返回
+  integer position；现在 `epub-reader-locator.el:273-279` 返回 resolution struct。如果这已是
+  公开 API，应保持旧返回值并另加 `resolve`，或明确做一次版本化 breaking change。
+- **P2：蓝图 X-02 仍未收口。** `epub-reader-ui.el:111-130,198-214,290-313`
+  仍把 publication/section/blocks 放进 `textui-state`，与 `architecture.md:249-260` 的
+  session/state 边界相反。它是初审已记录的 P2，不计入 14 条 gate finding，但会
+  让第二阶段 chunk/cache 状态更难分离。
+- **P2：第二轮新增 positional data clump。** `epub-reader-locator.el:141-190`
+  以 6 元匿名 list 表示 source block，`epub-reader-render.el:543-548` 与
+  `epub-reader-locator.el:348-370` 以 4 元 list 跨模块传 image anchor。这没有引入已复现的
+  功能回归，但应改为 struct/命名 accessor，避免后续字段错位。
+
+Standards 复核未发现第二轮新增的 `architecture.md` 硬违反或 TextUI 私有 API
+调用；除上述 P2 可维护性问题外，未见新的独立 P0/P1 回归。
+
 ## 当前测试覆盖矩阵
 
-| 模块 | 现有 16 测试实际覆盖 | 关键缺口 |
+| 模块 | 现有 42 测试实际覆盖 | 关键缺口 |
 |---|---|---|
-| Container（4） | 正常 open/close；两个 adapter happy path；一个 `../`；正常书触发 file-count | bomb、流式 cap、ratio、目录/清单洪泛、glob、碰撞、坏 ZIP、timeout、cleanup failure |
-| Publication（3） | 最小 EPUB2/NCX；最小 EPUB3/flat nav；一个本地/https/明文越 root href | namespace、required 字段、unique id、解析后 URL 唯一、encoded delimiter、坏 UTF-8、remote、nested span nav、NCX 深层 |
-| Render/locator（3） | 常见 heading/p/quote/link；一张图有 alt anchor；正常正文跨宽度 exact round-trip | CJK source newline、br、inline image、空/id anchor、图片 slice、合成区域、degraded locator、DOM 变化 |
-| UI（3） | 居中/open cleanup；n/p；一个跨章 heading id | 同章/inline/空 fragment、坏链接、外链 policy、resize 后 viewport、错误恢复 |
-| TextUI contract（3） | fixture 是 ZIP；已清洗 CJK kinsoku；property 保留/U+200B 无 source | 没经过本包 renderer；没有中英混排、全角标点 source break、NBSP、emoji/combining、图片 native leaf |
+| Container（12） | open/close、两 adapter、traversal/cleanup、file/directory/entry/central/size/ratio 上限、glob、case/NFC/full-fold collision、OCF 禁止区间、假元数据实际流式 cap | timeout、mimetype/local-header 坏元数据、cleanup failure、实际 total cap |
+| Publication（10） | EPUB2/NCX、EPUB3/nav、local/external href、percent/UTF-8/base/root-relative、namespace/required/unique id/version、local/remote URL 重复、remote fragment、nested span nav、公开 section seam | remote URL dot-segment 解析后唯一；NCX 异常深度 |
+| Render/locator（10） | 常见 block、image leaf/多图 key、TextUI reflow、最近合成距离、空/inline/pagebreak anchor、`zh/ja/ko` whitespace、hard br、exact quote/degraded quality、手工 book/spine 负例 | 生产 book fingerprint/spine-href；重复 quote 歧义；inline image 顺序 |
+| UI（6） | 居中/open cleanup、n/p、跨章 fragment、实际 image slice locator、整个 chrome 区域、空/容器/inline fragment | 坏/受限外链、resize/chunk 恢复、错误恢复 |
+| Contract（4） | fixture 为真 ZIP、TextUI CJK kinsoku/source property、TextUI 与跨模块私有 symbol lint | 没有对 architecture 的 `textui-state` 内容做 contract lint |
 
 ## 已验证通过的点
 
-- 普通 `../`、absolute path、drive prefix、反斜线、NUL/CR/LF 会被拒绝；`process-file` 不经过 shell，
+- 普通 `../`、absolute path、drive prefix、反斜线、NUL/CR/LF 会被拒绝；`make-process`
+  使用命令 argv 不经过 shell，
   没有 shell command injection。
 - 不批量让 archive tool 选择目标路径，而是将 stdout 写入专属 temp root；ZIP symlink 不会直接
   materialize 为宿主 symlink。
@@ -281,13 +492,15 @@ Emacs 内存的 P0，另有 href、TOC、locator 和 CJK 的基础不变量尚�
 
 ## 是否可进入第二阶段
 
-**否。** 阶段二的 block viewport/chunk shift 会把 locator 和模块 seam 的问题放大，而不会修复它们；
-继续叠功能还会让 P0 container 边界进入更多真实书籍路径。进入条件至少是：
+**否，gate 未解除。** 原 14 条 P0/P1 现为 11 条已解决、3 条部分解决。
+进入条件已收窄为：
 
-1. 修复 A-01，并为 A-01～A-04 建立两个 adapter 的恶意回归；
-2. 修复 URL resolver、remote resource、namespace/required 字段和 span nav；
-3. 为合成区域、图片、空/id anchor 定义可测试 locator 行为；
-4. 修复 CJK source segment break 与 `<br>`；
-5. 收回 renderer→publication 私有调用，再跑完整 ERT 与新增 adversarial suite。
+1. P-02 在 remote `resource-key` 生成前完整移除 literal 与 percent-encoded
+   dot-segment，并用真 manifest fixture 锁定 `/a/../b == /b`；
+2. L-02 按 `architecture.md:232-245` 生成 identifier + 规范路径 + size/mtime +
+   content hash 的 book fingerprint，并以 spine href 而非只有数值 index 恢复章节；
+3. T-01 用两本共用 publisher identifier 的真实 EPUB 和 remote dot-segment 重复清单
+   补齐上述回归，再跑完整 ERT。
 
-X-02、R-03、A-05、P-05 可在上述 gate 后排入阶段二最前部，但不应拖到发布加固才处理。
+X-02、R-03、A-05、P-05 仍是 P2；可不阻断本 gate，但 X-02 应在第二阶段
+chunk/cache 开发开始前先收口。
