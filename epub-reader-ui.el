@@ -2024,8 +2024,7 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                range
                (epub-reader-chapter-data-locator-index
                 (epub-reader-ui--chapter-data session index)))
-            (epub-reader-locator-range-resolution--create
-             :spans nil :quality 'identity-mismatch))))
+            (epub-reader-locator-range-unresolved 'identity-mismatch))))
     (setf (epub-reader-annotation-quality annotation)
           (epub-reader-locator-range-resolution-quality resolution))
     resolution))

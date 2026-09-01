@@ -57,6 +57,13 @@ Each span is (BLOCK START END), with END exclusive."
   "Canonical source text and offset mapping for one spine document."
   records text mapping)
 
+(defun epub-reader-locator-range-unresolved (quality)
+  "Return an unresolved range result with diagnostic QUALITY."
+  (unless (symbolp quality)
+    (signal 'wrong-type-argument (list 'symbolp quality)))
+  (epub-reader-locator-range-resolution--create
+   :spans nil :quality quality))
+
 (defvar-local epub-reader-locator--source-block-cache nil
   "Cached source block records for the current rendered buffer.")
 
