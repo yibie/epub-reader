@@ -809,11 +809,13 @@ current when it runs, so it also covers this request."
            'epub-reader-chrome t))))
 
 (defun epub-reader-ui--footer ()
-  "Return the first-release reader key hint."
+  "Return the reader key hint."
   (list :type :text
-        :value (propertize
-                "SPC 翻页  ·  n/p 换章  ·  b/f 历史  ·  t 目录  ·  g 跳转"
-                'face 'epub-reader-footer-face 'epub-reader-chrome t)))
+        :value
+        (propertize
+         (concat "SPC page  ·  n/p chapter  ·  m bookmark  ·  h highlight"
+                 "  ·  t TOC  ·  a highlights")
+         'face 'epub-reader-footer-face 'epub-reader-chrome t)))
 
 (defun epub-reader-ui--centered-column (available-width children &optional gap)
   "Return CHILDREN in a centered reading column within AVAILABLE-WIDTH."
