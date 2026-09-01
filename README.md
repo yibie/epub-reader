@@ -71,7 +71,10 @@ M-x epub-reader-open RET /path/to/book.epub RET
 
 | 用途 | 变量 |
 |---|---|
-| 正文与图片 | `epub-reader-reading-width`、`epub-reader-image-rows` |
+| 正文与图片 | `epub-reader-reading-width`、`epub-reader-image-rows`、`epub-reader-text-wrap-strategy` |
+| 交互首绘 | `epub-reader-first-paint-max-blocks`、`epub-reader-first-paint-max-characters` |
+| 冷滚动 chunk | `epub-reader-scroll-chunk-max-blocks`、`epub-reader-scroll-chunk-max-characters` |
+| 后台预取 | `epub-reader-background-idle-delay` |
 | 长章 viewport | `epub-reader-chunk-max-blocks`、`epub-reader-chunk-max-characters`、`epub-reader-chunk-guard-blocks`、`epub-reader-chunk-overscan-screens` |
 | 进度保存 | `epub-reader-enable-progress`、`epub-reader-save-idle-delay`、`epub-reader-store-directory` |
 | store 锁 | `epub-reader-store-lock-timeout`、`epub-reader-store-ownerless-lock-grace` |
@@ -88,9 +91,9 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | 状态 | 能力 | 0.1.0 行为 |
 |---|---|---|
 | 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；中央目录安全 preflight 后按需解压 metadata、当前 spine 与当前 chunk 图片；解析 EPUB 2 NCX 与 EPUB 3 nav |
-| 已支持 | 常见 XHTML 语义 | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、图片与可见错误提示 |
-| 已支持 | CJK 与宽度重排 | TextUI 宽度感知折行、common kinsoku；窗口宽度或 text scale 变化时全量重排，并通过 focus/source anchor 保持位置；图片行预算跟随 remap 后字体高度 |
-| 已支持 | 长章节 | block 数与字符数双软预算、guard/overscan、章节 region refresh；不会为整章预先生成 TextUI leaf/source property |
+| 已支持 | 常见 XHTML 语义 | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、异步后到图片与可见错误提示 |
+| 已支持 | CJK 与宽度重排 | TextUI 宽度感知折行、common kinsoku；默认低延迟 greedy，亦可选 balanced KP；窗口宽度或 text scale 变化时全量重排，并通过 focus/source anchor 保持位置；图片行预算跟随 remap 后字体高度 |
+| 已支持 | 长章节 | 首绘/冷滚动小 chunk、block 数与字符数双软预算、guard/overscan、章节 region refresh；idle 扩展 viewport 并预取下一章，不会为整章预先生成 TextUI leaf/source property |
 | 已支持 | 导航 | 前后章、章尾自动前进、内部 fragment、外部链接 allowlist、history back/forward、层级/可折叠 TOC、标题补全跳转 |
 | 已支持 | 进度 | 基于书籍 fingerprint 的版本化 locator；位置变化后 idle debounce、换章与关闭保存；原子 merge/write；exact/degraded 恢复提示；全书加权百分比 |
 | 已支持 | 输入安全 | OCF 路径规范化与冲突检查、归档成员/大小/压缩比限制、逐成员流式提取、远程资源隔离、外链 scheme allowlist |
@@ -146,5 +149,5 @@ TEXTUI_DIR=/path/to/textui ./test/run-tests.sh
 - [audit-phase2.md](docs/audit-phase2.md) 与
   [audit-phase2-response.md](docs/audit-phase2-response.md)：viewport、TOC、store 第二阶段审计与响应。
 - [benchmark-10k.md](docs/benchmark-10k.md)：10k 段长章节基准。
-- [perf-notes.md](docs/perf-notes.md)：杂志样书惰性容器改造前后的首屏基准。
+- [perf-notes.md](docs/perf-notes.md)：杂志样书惰性容器、换章与连续滚动的画像及前后基准。
 - [textui-issues.md](docs/textui-issues.md)：图片切片行距与二次折行的 TextUI 最小复现及 reader 规避。

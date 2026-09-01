@@ -24,6 +24,12 @@
 
 - 31.96 MB、164 成员的杂志样书 open→首屏当前中位数为 0.284497 s，其中 archive snapshot
   I/O 中位数为 0.016526 s；整包解压历史基线为 1.154237 s，首屏落盘成员由 164 个降至 6 个。
+- 章节首绘缩到约一屏，完整 viewport 与下一章 DOM/blocks 移到 idle；图片先显示固定尺寸占位，
+  只在 idle 路径 materialize，再以 TextUI region refresh 替换。滚入新 chunk 会继续排队图片。
+- EPUB 正文默认使用 TextUI 的 kinsoku-aware greedy 布局，并复用有界 attributed paragraph
+  cache；balanced Knuth--Plass 保留为可选策略。locator source 扫描也按 buffer generation 缓存。
+- 财新杂志普通章节 batch 换章由 1.067 s 降到 0.125 s；图形帧在下一章预取命中时由
+  3.362 s 降到 0.050 s。连续图形滚动 p95 为 0.039 s，详见 `docs/perf-notes.md`。
 
 ## 0.1.0 - 2026-08-31
 
