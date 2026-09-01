@@ -6,21 +6,21 @@
 `epub-reader-render.el`、`epub-reader-locator.el`、`epub-reader-ui.el`、
 `test/`、`test/fixtures*`，并以 `docs/architecture.md` 为蓝图。
 
-## 结论先行（最终复核更新）
+## 结论先行（收尾复核更新）
 
-**Gate 仍未解除，不可进入第二阶段。** 第二轮修复已完整关闭
-A-04、P-01、L-01 和 R-01，也修好了 L-02 的 exact quote 校验与同段多图冲突。
-但 P-02 的远程 URL dot-segment 仍未按 URL parser 规范化，L-02 的生产
-`book-key` 仍只信 publisher identifier；两者都会使持久 locator/清单唯一性失真。
+**Gate 已解除，可以进入第二阶段。** 最后两项阻断均已关闭：P-02 现在对
+literal 与 percent-encoded dot-segment 生成相同的远程 `resource-key`；L-02 现在由
+identifier、规范路径、size/mtime 和 content hash 生成生产 `book-key`，不再只信
+publisher identifier。
 
-最终复核基线为 `91d3bd7...beb1fd8`（五个第二轮修复提交）。执行
-`./test/run-tests.sh`：**42/42 通过，0 unexpected**。
+收尾复核基线为 `c0627f0...e9441ed`（`1e61cd9`、`e9441ed` 两个修复提交）。执行
+`./test/run-tests.sh`：**45/45 通过，0 unexpected**。
 
 | P0/P1 复核状态 | 数量 | 说明 |
 |---|---:|---|
-| 已解决 | 11 | A-01、A-02、A-03、A-04、P-01、P-03、P-04、L-01、R-01、R-02、X-01 |
-| 部分解决 | 3 | P-02、L-02、T-01 |
-| 未解决 | 0 | 无完全未着手项；gate 统计时“部分解决”仍按未解决计 |
+| 已解决 | 14 | A-01、A-02、A-03、A-04、P-01、P-02、P-03、P-04、L-01、L-02、R-01、R-02、T-01、X-01 |
+| 部分解决 | 0 | 无 |
+| 未解决 | 0 | 无 |
 
 ### 第二轮指定探针复测
 
@@ -31,8 +31,8 @@ A-04、P-01、L-01 和 R-01，也修好了 L-02 的 exact quote 校验与同段�
 | 真实 TextUI chrome 区域 | 1,318 个 chrome 字符中产生 locator 的数量为 0；章首/章尾无漏标 |
 | exact quote / 同段多图 | 前插 `XX ` 后以 `quote-near-block` 恢复到新 offset 10；3 张图的 3 个 key 全部唯一 |
 | `zh` segment break | `中\n文`/`中文\n，继续` 无空格；`ko/en/nil` 保留分词空格，inline `lang` 可覆写继承语言 |
-| 远程 URL dot-segment（扩展对抗探针） | `https://example.com/a/../b` 与 `https://example.com/b` 的 `resource-key` **不相等** |
-| 生产 book identity（扩展对抗探针） | `book-key` 与 publisher identifier 完全相同；两本共用 identifier 的书会被当成同一身份 |
+| 远程 URL dot-segment（收尾探针） | canonical、literal `/a/../audio.mp3`、encoded `/a/%2e%2E/audio.mp3` 的 `resource-key` 均为 `https://example.com/audio.mp3` |
+| 生产 book identity（收尾探针） | 两个真实 fixture 的 identifier 同为 `urn:fixture:shared-identifier`，生产 `book-key` 分别为不同 SHA-256 fingerprint |
 
 ## 规范基线与复现方法
 
@@ -215,6 +215,12 @@ A-04、P-01、L-01 和 R-01，也修好了 L-02 的 exact quote 校验与同段�
   remote manifest URL 仍可绕过 `:469-481` 的唯一性检查。应在生成 key 前完成
   URL path dot-segment normalization，并加真实重复 manifest fixture。
 
+- **收尾复核结果：已解决。** `epub-reader-publication.el:306-368` 在 percent
+  canonicalization 后按 RFC 3986 移除 dot-segment，再以结果生成 `resource-key`。
+  独立探针确认 canonical、literal `..` 与 percent-encoded `..` 三者 key 完全相同；
+  `test/epub-reader-publication-test.el:163-198` 还用两个真实重复 manifest fixture
+  锁定直接 resolver 等价性和清单唯一性拒绝路径。
+
 ### P-03 — P1 应修：合法的远程 manifest resource 会使整本 EPUB 打不开
 
 - **位置：** `epub-reader-publication.el:220-247`。
@@ -326,6 +332,14 @@ A-04、P-01、L-01 和 R-01，也修好了 L-02 的 exact quote 校验与同段�
   `book-a/book-b`，没有经过这条生产路径；同时持久模型应以 spine href 找章，不能
   只依赖易因重排漂移的数值 index。因此 exact/多图子项已关闭，book/spine identity
   子项仍阻断 gate。
+
+- **收尾复核结果：已解决。** `epub-reader-publication.el:56-77,810-816` 以
+  identifier、`file-truename`、size、mtime 和 EPUB 字节的 SHA-256 生成并缓存生产
+  `book-key`；`epub-reader-locator.el:269-304` 以 `book-key + spine href` 判定持久身份。
+  独立探针打开两个共用 identifier 的真实 EPUB，确认 identifier 相等而 book-key 不同。
+  `test/epub-reader-publication-test.el:58-78` 验证生产 key 的跨书区分和同书重开稳定性，
+  `test/epub-reader-render-test.el:353-375` 验证 publication→render→locator→resolve
+  生产链会拒绝跨书恢复。
 
 ### R-01 — P1 应修：无条件把 source newline 变 ASCII 空格会破坏 CJK
 
@@ -447,6 +461,10 @@ A-04、P-01、L-01 和 R-01，也修好了 L-02 的 exact quote 校验与同段�
   共用 publisher identifier 的真实 publication 验证生产 book fingerprint。因 P-02/L-02
   仍有漏洞，T-01 也不能标为完全解决。
 
+- **收尾复核结果：已解决。** 测试现为 45/45。新增 remote literal/encoded
+  dot-segment 重复 manifest、共用 publisher identifier 的双书 fixture，以及生产链跨书
+  locator 负例，直接覆盖 P-02 与 L-02 最后两个缺口。
+
 ## 修复期间引入或暴露的新问题
 
 - **P1：同段多图 key 冲突。** stable DOM-path 修复把每张后代图片都写成同一
@@ -469,11 +487,11 @@ Standards 复核未发现第二轮新增的 `architecture.md` 硬违反或 TextU
 
 ## 当前测试覆盖矩阵
 
-| 模块 | 现有 42 测试实际覆盖 | 关键缺口 |
+| 模块 | 现有 45 测试实际覆盖 | 关键缺口 |
 |---|---|---|
 | Container（12） | open/close、两 adapter、traversal/cleanup、file/directory/entry/central/size/ratio 上限、glob、case/NFC/full-fold collision、OCF 禁止区间、假元数据实际流式 cap | timeout、mimetype/local-header 坏元数据、cleanup failure、实际 total cap |
-| Publication（10） | EPUB2/NCX、EPUB3/nav、local/external href、percent/UTF-8/base/root-relative、namespace/required/unique id/version、local/remote URL 重复、remote fragment、nested span nav、公开 section seam | remote URL dot-segment 解析后唯一；NCX 异常深度 |
-| Render/locator（10） | 常见 block、image leaf/多图 key、TextUI reflow、最近合成距离、空/inline/pagebreak anchor、`zh/ja/ko` whitespace、hard br、exact quote/degraded quality、手工 book/spine 负例 | 生产 book fingerprint/spine-href；重复 quote 歧义；inline image 顺序 |
+| Publication（11） | EPUB2/NCX、EPUB3/nav、local/external href、percent/UTF-8/base/root-relative、namespace/required/unique id/version、local/remote URL 重复、remote fragment/dot-segment、生产 book fingerprint、nested span nav、公开 section seam | NCX 异常深度 |
+| Render/locator（12） | 常见 block、image leaf/多图 key、TextUI reflow、最近合成距离、空/inline/pagebreak anchor、`zh/ja/ko` whitespace、hard br、exact quote/degraded quality、生产 book-key/spine-href 身份与 legacy schema 拒绝 | 重复 quote 歧义；inline image 顺序 |
 | UI（6） | 居中/open cleanup、n/p、跨章 fragment、实际 image slice locator、整个 chrome 区域、空/容器/inline fragment | 坏/受限外链、resize/chunk 恢复、错误恢复 |
 | Contract（4） | fixture 为真 ZIP、TextUI CJK kinsoku/source property、TextUI 与跨模块私有 symbol lint | 没有对 architecture 的 `textui-state` 内容做 contract lint |
 
@@ -492,15 +510,10 @@ Standards 复核未发现第二轮新增的 `architecture.md` 硬违反或 TextU
 
 ## 是否可进入第二阶段
 
-**否，gate 未解除。** 原 14 条 P0/P1 现为 11 条已解决、3 条部分解决。
-进入条件已收窄为：
-
-1. P-02 在 remote `resource-key` 生成前完整移除 literal 与 percent-encoded
-   dot-segment，并用真 manifest fixture 锁定 `/a/../b == /b`；
-2. L-02 按 `architecture.md:232-245` 生成 identifier + 规范路径 + size/mtime +
-   content hash 的 book fingerprint，并以 spine href 而非只有数值 index 恢复章节；
-3. T-01 用两本共用 publisher identifier 的真实 EPUB 和 remote dot-segment 重复清单
-   补齐上述回归，再跑完整 ERT。
+**是，gate 已解除，可以进入第二阶段。** 原 14 条 P0/P1 已全部解决，无部分解决或
+未解决项。P-02 的三种等价 URL 探针得到同一 `resource-key`；L-02 的两个真实 EPUB
+共用 identifier 但得到不同生产 fingerprint，并由跨书 locator 负例锁定。完整 ERT
+为 45/45 通过、0 unexpected。
 
 X-02、R-03、A-05、P-05 仍是 P2；可不阻断本 gate，但 X-02 应在第二阶段
 chunk/cache 开发开始前先收口。
