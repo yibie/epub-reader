@@ -15,6 +15,7 @@
 
 (require 'cl-lib)
 (require 'browse-url)
+(require 'face-remap)
 (require 'subr-x)
 (require 'textui)
 (require 'epub-reader-locator)
@@ -150,10 +151,6 @@ A single larger block is still materialized by itself."
         ;; TextUI already emits physical lines at the requested frame width.
         ;; A second Emacs soft-wrap can expose a lone glyph in the margin.
         (setq-local truncate-lines t)
-        ;; TextUI image slices assume ordinary frame rows.  Inherited positive
-        ;; spacing opens visible seams between slices, so paragraph separation
-        ;; is owned by the frame's explicit gaps instead.
-        (setq-local line-spacing nil)
         ;; Fixed-width TextUI rows need neither Emacs continuation nor
         ;; truncation fringe glyphs; those form a distracting vertical rail
         ;; beside centered CJK prose.
@@ -164,11 +161,15 @@ A single larger block is still materialized by itself."
         (add-hook 'post-command-hook
                   #'epub-reader-ui--maybe-shift-chunk nil t)
         (add-hook 'post-command-hook
-                  #'epub-reader-ui--progress-post-command t t))
+                  #'epub-reader-ui--progress-post-command t t)
+        (add-hook 'text-scale-mode-hook
+                  #'epub-reader-ui--refresh-for-text-scale nil t))
     (remove-hook 'post-command-hook
                  #'epub-reader-ui--maybe-shift-chunk t)
     (remove-hook 'post-command-hook
-                 #'epub-reader-ui--progress-post-command t)))
+                 #'epub-reader-ui--progress-post-command t)
+    (remove-hook 'text-scale-mode-hook
+                 #'epub-reader-ui--refresh-for-text-scale t)))
 
 (define-minor-mode epub-reader-toc-mode
   "Minor mode for the secondary EPUB table-of-contents buffer."
@@ -570,19 +571,42 @@ A single larger block is still materialized by itself."
     (list :type :flex :direction :row :gap 0
           :children (nreverse row))))
 
+(defun epub-reader-ui--image-row-budget ()
+  "Return image rows adjusted for this buffer's remapped font height.
+TextUI's public image contract leaves row allocation to its caller.  Use the
+smallest budget required by any live view of this buffer so a text-scale face
+remap does not leave image slices measured in unscaled frame rows."
+  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
+    (if (null windows)
+        epub-reader-image-rows
+      (max
+       1
+       (apply
+        #'min
+        (mapcar
+         (lambda (window)
+           (let* ((frame (window-frame window))
+                  (base-height (max 1 (frame-char-height frame)))
+                  (font-height (max 1 (window-font-height window))))
+             (ceiling (/ (float (* epub-reader-image-rows base-height))
+                         font-height))))
+         windows))))))
+
 (defun epub-reader-ui--chapter-elements (available-width)
   "Return the current budgeted chapter region at AVAILABLE-WIDTH."
   (let* ((session (epub-reader-ui--current-session))
          (blocks (epub-reader-ui--current-blocks session))
          (start (or (plist-get textui-state :chunk-start) 0))
          (end (or (plist-get textui-state :chunk-end) (length blocks)))
+         (image-rows (epub-reader-ui--image-row-budget))
          elements)
     (cl-loop for index from start below (min end (length blocks))
              do (push (epub-reader-render-block-element
                        (aref blocks index)
                        (epub-reader-session-publication session)
                        (epub-reader-chapter-data-section
-                        (epub-reader-ui--current-chapter session)))
+                        (epub-reader-ui--current-chapter session))
+                       image-rows)
                       elements))
     (setf (epub-reader-session-producer-block-count session)
           (length elements))
@@ -636,7 +660,11 @@ can make the final slices appear to overlap following content."
                       (save-excursion
                         (goto-char position)
                         (min (point-max) (1+ (line-end-position))))))
-                (add-text-properties line-start line-end '(line-spacing 0))
+                ;; A non-nil zero pair explicitly overrides inherited positive
+                ;; spacing.  Numeric zero is indistinguishable from an absent
+                ;; override in some redisplay paths.
+                (add-text-properties
+                 line-start line-end '(line-spacing (0 . 0)))
                 (setq position line-end))
             (setq position
                   (or (next-single-property-change
@@ -807,11 +835,12 @@ can make the final slices appear to overlap following content."
 
 (defun epub-reader-ui--restore-view-state (view-state)
   "Restore semantic point and each window top from VIEW-STATE."
-  (let ((point-locator
-         (epub-reader-view-state-point-locator view-state)))
-    (when point-locator
-      (let ((position (epub-reader-locator-point point-locator)))
-        (when position (goto-char position))))
+  (let* ((point-locator
+          (epub-reader-view-state-point-locator view-state))
+         (point-position
+          (and point-locator (epub-reader-locator-point point-locator))))
+    (when point-position
+      (goto-char point-position))
     (dolist (viewport (epub-reader-view-state-viewports view-state))
       (let* ((window (epub-reader-viewport-window viewport))
              (point-locator (epub-reader-viewport-point-locator viewport))
@@ -835,7 +864,33 @@ can make the final slices appear to overlap following content."
           ;; off when POSITION is inside a physically wrapped line.  Correct
           ;; from the current start until the captured visual metric matches.
           (epub-reader-ui--restore-window-visual-row
-           window position (epub-reader-viewport-visual-row viewport)))))))
+           window position (epub-reader-viewport-visual-row viewport)))))
+    ;; `with-selected-window' above can leave the buffer point at a viewport's
+    ;; temporary start position.  Semantic point is the final authority.
+    (when point-position
+      (goto-char point-position))))
+
+(defun epub-reader-ui--refresh-for-text-scale ()
+  "Reflow the complete reader after a buffer-local text-scale change.
+Capture semantic positions before the full TextUI rebuild because scaling can
+change both paragraph wrapping and the number of physical image slice rows."
+  (when (and epub-reader-ui-mode
+             (epub-reader-session-p epub-reader-ui--session)
+             (not (epub-reader-session-refreshing-p
+                   epub-reader-ui--session)))
+    (let ((session epub-reader-ui--session)
+          (buffer (current-buffer))
+          (view-state (epub-reader-ui--capture-view-state)))
+      (setf (epub-reader-session-refreshing-p session) t)
+      (unwind-protect
+          (progn
+            (textui-refresh buffer)
+            ;; The post-render effect has stable dependencies when only the
+            ;; font changes, so reconcile the reader-owned properties here.
+            (epub-reader-ui--post-render buffer)
+            (epub-reader-ui--restore-view-state view-state)
+            (force-mode-line-update t))
+        (setf (epub-reader-session-refreshing-p session) nil)))))
 
 (defun epub-reader-ui--refresh-chunk (start end)
   "Synchronously replace the chapter region with block range START to END."

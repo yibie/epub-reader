@@ -110,6 +110,24 @@
        (get-text-property 0 'epub-reader-source
                           (epub-reader-block-text image))))))
 
+(ert-deftest epub-reader-render-does-not-cache-transient-image-busy-state ()
+  (epub-reader-render-test--with-publication publication
+    (let* ((section
+            (epub-reader-publication-load-section publication 1))
+           (image
+            (cl-find-if
+             (lambda (block) (eq (epub-reader-block-kind block) 'image))
+             (epub-reader-render-section publication section))))
+      (cl-letf (((symbol-function 'epub-reader-publication-resolve-resource)
+                 (lambda (&rest _arguments)
+                   (signal 'epub-reader-materialization-busy
+                           '("injected image race")))))
+        (should-error
+         (epub-reader-render-block-element image publication section)
+         :type 'epub-reader-materialization-busy))
+      (should-not (epub-reader-block-image-file image))
+      (should-not (epub-reader-block-image-error image)))))
+
 (ert-deftest epub-reader-render-preserves-list-container-and-inline-order ()
   (epub-reader-render-test--with-publication publication
     (let* ((blocks (epub-reader-render-chapter publication 1))

@@ -89,6 +89,11 @@
   key kind text document-path book-key spine-index element-id level image-file
   image-href image-alt image-error list-marker)
 
+(cl-defstruct (epub-reader-render-image
+               (:constructor epub-reader-render-image--create))
+  "Normalized image metadata carried while constructing a semantic block."
+  href alt error)
+
 (defun epub-reader-render--local-name (node)
   "Return namespace-independent local tag name of XML NODE."
   (let ((name (car node)))
@@ -414,8 +419,7 @@ This validates URL resolution without materializing the image member."
             (epub-reader-render--language body root-language))
            blocks)
       (cl-labels
-          ((emit (kind node text path &optional level image-href image-file
-                       image-alt image-error list-marker)
+          ((emit (kind node text path &key level image list-marker)
              (let* ((id (epub-reader-render--attribute node "id"))
                     (anchor-text
                      (if (string-empty-p text)
@@ -431,7 +435,8 @@ This validates URL resolution without materializing the image member."
                          ('heading (epub-reader-render--heading-face level))
                          ('quote 'epub-reader-quote-face)
                          ('code 'epub-reader-code-face)
-                         ('image (if image-error
+                         ('image (if (and image
+                                         (epub-reader-render-image-error image))
                                      'epub-reader-image-error-face
                                    'epub-reader-image-alt-face))
                          (_ 'epub-reader-prose-face)))
@@ -444,9 +449,13 @@ This validates URL resolution without materializing the image member."
                  :book-key (epub-reader-publication-book-key publication)
                  :spine-index (epub-reader-section-spine-index section)
                  :element-id id :level level
-                 :image-file image-file :image-href image-href
-                 :image-alt image-alt
-                 :image-error image-error :list-marker list-marker)
+                 :image-href (and image
+                                  (epub-reader-render-image-href image))
+                 :image-alt (and image
+                                 (epub-reader-render-image-alt image))
+                 :image-error (and image
+                                   (epub-reader-render-image-error image))
+                 :list-marker list-marker)
                 blocks)))
            (emit-image (node path)
              (pcase-let ((`(,href ,alt ,image-error)
@@ -456,7 +465,10 @@ This validates URL resolution without materializing the image member."
                      (if image-error
                          (format "[%s — %s]" alt image-error)
                        (format "[%s]" alt))
-                     path nil href nil alt image-error)))
+                     path
+                     :image
+                     (epub-reader-render-image--create
+                      :href href :alt alt :error image-error))))
            (node-without-id (node)
              (cons (car node)
                    (cons
@@ -543,7 +555,7 @@ This validates URL resolution without materializing the image member."
                          (epub-reader-render--normalize-inline
                           (epub-reader-render--inline node node-language)
                           node-language)
-                         path level)))
+                         path :level level)))
                 ((equal tag "p")
                  (emit-inline-runs (or (and (symbolp context) context)
                                        'paragraph)
@@ -563,7 +575,7 @@ This validates URL resolution without materializing the image member."
                        (epub-reader-render--normalize-inline
                         (epub-reader-render--inline node node-language)
                         node-language)
-                       path nil nil nil nil nil
+                       path :list-marker
                        (if (stringp context) context "• "))
                  (cl-loop
                   for child in (epub-reader-render--children node)
@@ -652,6 +664,11 @@ Cache either the local file or a visible diagnostic on BLOCK."
            (t
             (setf (epub-reader-block-image-file block)
                   (epub-reader-link-target-file target)))))
+      (epub-reader-materialization-busy
+       ;; Busy is transient coordination, not corrupt image data.  Let the
+       ;; current frame fail cleanly so a later refresh can reuse the winner's
+       ;; cache instead of freezing a permanent diagnostic onto BLOCK.
+       (signal (car error-data) (cdr error-data)))
       (error
        (setf (epub-reader-block-image-error block)
              (format "Image error for %s: %s"
@@ -659,10 +676,12 @@ Cache either the local file or a visible diagnostic on BLOCK."
                      (error-message-string error-data))))))
   block)
 
-(defun epub-reader-render-block-element (block &optional publication section)
+(defun epub-reader-render-block-element
+    (block &optional publication section image-rows)
   "Convert semantic BLOCK to one public TextUI element.
 When PUBLICATION and SECTION are supplied, materialize an image block just
-before producing its leaf."
+before producing its leaf.  IMAGE-ROWS overrides the configured image row
+budget when the UI has a buffer-specific font metric."
   (when (and publication section)
     (epub-reader-render--materialize-image block publication section))
   (let ((text (epub-reader-render--materialized-text block)))
@@ -680,7 +699,8 @@ before producing its leaf."
       (concat (or (epub-reader-block-list-marker block) "• ")
               text)))
     ('image
-     (let* ((source
+     (let* ((rows (or image-rows epub-reader-image-rows))
+            (source
              (get-text-property 0 'epub-reader-source text))
             (book-key
              (get-text-property 0 'epub-reader-book-key text))
@@ -691,7 +711,7 @@ before producing its leaf."
              (when source
                (put-text-property
                 0 (length image-alt) 'epub-reader-image-anchor
-                (list source epub-reader-image-rows book-key spine-index)
+                (list source rows book-key spine-index)
                 image-alt)))
             (caption (epub-reader-render--text-element text))
             (diagnostic
@@ -708,7 +728,7 @@ before producing its leaf."
                (list
                 (list :type :image
                       :file (epub-reader-block-image-file block)
-                      :rows epub-reader-image-rows
+                      :rows rows
                       :alt image-alt
                       :layout '(:min-width 12 :grow 1))
                 caption)))
@@ -718,11 +738,14 @@ before producing its leaf."
         (t caption))))
     (_ (epub-reader-render--text-element text)))))
 
-(defun epub-reader-render-blocks (blocks &optional publication section)
+(defun epub-reader-render-blocks
+    (blocks &optional publication section image-rows)
   "Convert semantic BLOCKS to public TextUI elements.
-Optional PUBLICATION and SECTION enable on-demand image materialization."
+Optional PUBLICATION and SECTION enable on-demand image materialization.
+IMAGE-ROWS is forwarded to every image leaf."
   (mapcar (lambda (block)
-            (epub-reader-render-block-element block publication section))
+            (epub-reader-render-block-element
+             block publication section image-rows))
           blocks))
 
 (provide 'epub-reader-render)

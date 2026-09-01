@@ -153,7 +153,8 @@
           (setq buffer
                 (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
           (with-current-buffer buffer
-            (should-not line-spacing)
+            (should (= line-spacing 0.25))
+            (should-not (local-variable-p 'line-spacing))
             (epub-reader-next-chapter)
             (let ((positions
                    (cl-loop for position from (point-min) below (point-max)
@@ -164,10 +165,59 @@
               (dolist (position positions)
                 (should (equal (get-text-property
                                 position 'line-spacing)
-                               0))))))
+                               '(0 . 0))))
+              (let ((prose
+                     (cl-loop for position from (point-min) below (point-max)
+                              when (and
+                                    (get-text-property
+                                     position 'epub-reader-source)
+                                    (not (get-text-property
+                                          position
+                                          'epub-reader-image-slice)))
+                              return position)))
+                (should prose)
+                (should-not
+                 (get-text-property prose 'line-spacing))))))
       (set-default 'line-spacing saved-default)
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-text-scale-reflows-and-remeasures-image-rows ()
+  (epub-reader-ui-test--with-reader _buffer
+    (epub-reader-next-chapter)
+    (let* ((real-refresh (symbol-function 'textui-refresh))
+           (before-position (epub-reader-ui--first-source-position))
+           (refreshes 0))
+      (goto-char before-position)
+      (let ((before-locator
+             (epub-reader-locator-to-plist
+              (epub-reader-ui--current-locator))))
+        (cl-letf
+            (((symbol-function 'window-font-height)
+              (lambda (&optional window _face)
+                (* 2 (frame-char-height
+                      (window-frame (or window (selected-window)))))))
+             ((symbol-function 'textui-refresh)
+              (lambda (buffer)
+                (setq refreshes (1+ refreshes))
+                (funcall real-refresh buffer))))
+          (text-scale-set 2))
+        (should (= refreshes 1))
+        (should
+         (equal before-locator
+                (epub-reader-locator-to-plist
+                 (epub-reader-ui--current-locator))))
+        (let* ((position
+                (cl-loop for cursor from (point-min) below (point-max)
+                         when (get-text-property
+                               cursor 'epub-reader-image-anchor)
+                         return cursor))
+               (anchor
+                (and position
+                     (get-text-property position
+                                        'epub-reader-image-anchor))))
+          (should anchor)
+          (should (= (nth 1 anchor) (/ epub-reader-image-rows 2))))))))
 
 (ert-deftest epub-reader-ui-does-not-soft-wrap-textui-physical-lines ()
   (epub-reader-ui-test--with-reader _buffer
