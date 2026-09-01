@@ -101,6 +101,40 @@
       (delete-directory directory t)
       (delete-file source))))
 
+(ert-deftest epub-reader-ui-dirty-old-reader-does-not-overwrite-new-progress ()
+  (let ((directory (make-temp-file "epub-reader-ui-two-dirty-readers-" t))
+        (source (make-temp-file "epub-reader-ui-book-" nil ".epub"))
+        (epub-reader-enable-progress t)
+        first second reopened)
+    (copy-file (epub-reader-test-fixture "epub2.epub") source t)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          (setq first (epub-reader-open source)
+                second (epub-reader-open source))
+          ;; FIRST moves first, but its debounced save has not fired.
+          (with-current-buffer first
+            (forward-char 1)
+            (epub-reader-ui--progress-post-command)
+            (should (epub-reader-session-progress-dirty-p
+                     epub-reader-ui--session)))
+          ;; SECOND moves later and durably closes first.
+          (with-current-buffer second
+            (epub-reader-next-chapter))
+          (kill-buffer second)
+          (setq second nil)
+          ;; Closing FIRST later must flush its older movement version without
+          ;; allowing close order to turn it into the newer record.
+          (kill-buffer first)
+          (setq first nil)
+          (setq reopened (epub-reader-open source))
+          (with-current-buffer reopened
+            (should (= (plist-get textui-state :spine-index) 1))))
+      (when (buffer-live-p first) (kill-buffer first))
+      (when (buffer-live-p second) (kill-buffer second))
+      (when (buffer-live-p reopened) (kill-buffer reopened))
+      (delete-directory directory t)
+      (delete-file source))))
+
 (ert-deftest epub-reader-store-explicitly-rejects-unmigratable-schema ()
   (let ((directory (make-temp-file "epub-reader-store-schema-" t))
         (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
@@ -217,6 +251,47 @@
                         :type 'epub-reader-store-error)
           (should (file-directory-p lock))
           (should (epub-reader-store-pending store)))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-stale-reclaim-does-not-delete-aba-replacement ()
+  (let ((directory (make-temp-file "epub-reader-store-lock-aba-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (store (epub-reader-store-open source "book"))
+               (lock (concat (epub-reader-store-path store) ".lock"))
+               (real-rename (symbol-function 'rename-file))
+               (live-owner (epub-reader-store--new-lock-owner))
+               competitor-result outer-result injected)
+          (setq live-owner (plist-put live-owner :nonce "new-live-owner"))
+          (make-directory lock t)
+          (epub-reader-store--write-lock-owner
+           lock (list :pid 99999999 :host (system-name)
+                      :start '(0 0 0 0) :created (float-time)
+                      :nonce "old-dead-owner"))
+          (cl-letf (((symbol-function 'rename-file)
+                     (lambda (old new &optional ok-if-already)
+                       (when (and (not injected) (equal old lock))
+                         (setq injected t)
+                         ;; A nested call deterministically represents the
+                         ;; other process: it wins the stale reclaim, then a
+                         ;; live owner acquires the canonical pathname before
+                         ;; the outer contender reaches rename (the ABA).
+                         (setq competitor-result
+                               (epub-reader-store--reclaim-stale-lock lock))
+                         (make-directory lock)
+                         (epub-reader-store--write-lock-owner lock live-owner))
+                       (funcall real-rename old new ok-if-already))))
+            (setq outer-result
+                  (epub-reader-store--reclaim-stale-lock lock)))
+          (should injected)
+          (should competitor-result)
+          (should-not outer-result)
+          (should (file-directory-p lock))
+          (should
+           (equal (plist-get (epub-reader-store--read-lock-owner lock) :nonce)
+                  "new-live-owner")))
       (delete-directory directory t)
       (delete-file source))))
 

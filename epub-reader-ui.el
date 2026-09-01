@@ -420,14 +420,19 @@ A single larger block is still materialized by itself."
 (defun epub-reader-ui--observe-progress (&optional dirty)
   "Notice a changed semantic position and optionally mark it DIRTY."
   (let* ((session (epub-reader-ui--current-session))
-         (key (and (epub-reader-session-store session)
-                   (epub-reader-ui--current-progress-key))))
+         (store (epub-reader-session-store session))
+         (locator (and store (epub-reader-ui--current-locator)))
+         (key (and locator (epub-reader-locator-to-plist locator))))
     (when (and key
                (not (equal key (epub-reader-session-progress-key session))))
-      (setf (epub-reader-session-progress-key session) key)
       (when dirty
+        ;; Stage is an in-memory capture, so its timestamp represents the
+        ;; actual locator change.  Idle/chapter/kill paths only flush this
+        ;; snapshot and cannot turn a late close into a newer movement.
+        (epub-reader-store-stage store locator)
         (setf (epub-reader-session-progress-dirty-p session) t)
-        (epub-reader-ui--schedule-progress-save session)))
+        (epub-reader-ui--schedule-progress-save session))
+      (setf (epub-reader-session-progress-key session) key))
     key))
 
 (defun epub-reader-ui--initialize-progress-position ()
@@ -447,24 +452,18 @@ A single larger block is still materialized by itself."
     (epub-reader-ui--observe-progress t)))
 
 (defun epub-reader-ui--save-progress (&optional flush)
-  "Persist changed progress and optionally FLUSH any staged value now."
+  "Flush the last observed progress snapshot when FLUSH is non-nil."
   (let* ((session (epub-reader-ui--current-session))
-         (store (epub-reader-session-store session))
-         locator)
+         (store (epub-reader-session-store session)))
     (when store
       (when (epub-reader-session-progress-dirty-p session)
-        (setq locator (epub-reader-ui--current-locator))
-        (when locator
-          (epub-reader-store-stage store locator)
-          (epub-reader-ui--cancel-progress-timer session)
-          (setf (epub-reader-session-progress-key session)
-                (epub-reader-locator-to-plist locator)
-                (epub-reader-session-progress-dirty-p session) nil)))
+        (epub-reader-ui--cancel-progress-timer session))
       ;; A previous flush may have failed after staging.  Retrying an explicit
       ;; flush must not depend on observing another point movement.
       (when flush
-        (epub-reader-store-flush store)))
-    locator))
+        (epub-reader-store-flush store)
+        (setf (epub-reader-session-progress-dirty-p session) nil)))
+    (and store (epub-reader-store-pending store))))
 
 (defun epub-reader-ui--save-progress-safely (&optional flush)
   "Save progress like `epub-reader-ui--save-progress' without blocking reading."

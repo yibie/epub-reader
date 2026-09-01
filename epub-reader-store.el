@@ -165,6 +165,11 @@ handle's warning; reading may continue without saved progress."
 
 (defconst epub-reader-store--lock-owner-file "owner.el")
 
+(cl-defstruct (epub-reader-store-lock-snapshot
+               (:constructor epub-reader-store--lock-snapshot-create))
+  "Identity and liveness inputs captured for one lock directory instance."
+  owner file-identifier modified)
+
 (defun epub-reader-store--process-start-time (pid)
   "Return the operating-system start time for PID, or nil when unavailable."
   (let ((attributes (ignore-errors (process-attributes pid))))
@@ -247,41 +252,97 @@ handle's warning; reading may continue without saved progress."
         (epub-reader-store--same-process-start-p
          (plist-get owner :start) live-start))))))
 
-(defun epub-reader-store--lock-age (lock)
-  "Return LOCK's age in seconds, or zero when its attributes are unavailable."
-  (let ((attributes (ignore-errors (file-attributes lock))))
-    (if attributes
-        (max 0.0
-             (float-time
-              (time-subtract nil (file-attribute-modification-time attributes))))
-      0.0)))
+(defun epub-reader-store--lock-snapshot (lock)
+  "Return a stable identity snapshot for LOCK, or nil during replacement."
+  (let* ((before (ignore-errors (file-attributes lock 'integer)))
+         (before-id (and before (file-attribute-file-identifier before)))
+         (owner (and before (epub-reader-store--read-lock-owner lock)))
+         (after (and before
+                     (ignore-errors (file-attributes lock 'integer))))
+         (after-id (and after (file-attribute-file-identifier after))))
+    (when (and before-id (equal before-id after-id))
+      (epub-reader-store--lock-snapshot-create
+       :owner owner :file-identifier before-id
+       :modified (file-attribute-modification-time after)))))
+
+(defun epub-reader-store--lock-snapshot-age (snapshot)
+  "Return SNAPSHOT's age in seconds."
+  (max 0.0
+       (float-time
+        (time-subtract
+         nil (epub-reader-store-lock-snapshot-modified snapshot)))))
+
+(defun epub-reader-store--same-lock-instance-p (first second)
+  "Return non-nil when FIRST and SECOND identify the same lock instance."
+  (and first second
+       (equal (epub-reader-store-lock-snapshot-file-identifier first)
+              (epub-reader-store-lock-snapshot-file-identifier second))
+       (let ((first-owner (epub-reader-store-lock-snapshot-owner first))
+             (second-owner (epub-reader-store-lock-snapshot-owner second)))
+         (if first-owner
+             (and second-owner
+                  (equal (plist-get first-owner :nonce)
+                         (plist-get second-owner :nonce)))
+           (and (null second-owner)
+                ;; An ownerless replacement can briefly exist before its
+                ;; owner record is written; inode reuse alone must not make it
+                ;; indistinguishable from the older orphan.
+                (time-equal-p
+                 (epub-reader-store-lock-snapshot-modified first)
+                 (epub-reader-store-lock-snapshot-modified second)))))))
+
+(defun epub-reader-store--stale-lock-snapshot-p (snapshot)
+  "Return non-nil when captured lock SNAPSHOT is safely stale."
+  (let ((owner (epub-reader-store-lock-snapshot-owner snapshot)))
+    (if owner
+        (not (epub-reader-store--lock-owner-alive-p owner))
+      (> (epub-reader-store--lock-snapshot-age snapshot)
+         epub-reader-store-ownerless-lock-grace))))
 
 (defun epub-reader-store--stale-lock-p (lock)
   "Return non-nil when LOCK can be safely reclaimed."
-  (let ((owner (epub-reader-store--read-lock-owner lock)))
-    (if owner
-        (not (epub-reader-store--lock-owner-alive-p owner))
-      (> (epub-reader-store--lock-age lock)
-         epub-reader-store-ownerless-lock-grace))))
+  (let ((snapshot (epub-reader-store--lock-snapshot lock)))
+    (and snapshot (epub-reader-store--stale-lock-snapshot-p snapshot))))
 
 (defun epub-reader-store--reclaim-stale-lock (lock)
   "Atomically quarantine and remove stale LOCK, returning non-nil on success."
-  (when (epub-reader-store--stale-lock-p lock)
-    (let ((quarantine
-           (format "%s.stale-%s" lock
-                   (substring
-                    (secure-hash 'sha256
-                                 (format "%s:%s:%s" lock (emacs-pid)
-                                         (float-time)))
-                    0 16))))
-      (condition-case nil
-          (progn
-            ;; Rename is the ownership claim: only the contender whose rename
-            ;; succeeds may delete this exact stale directory.
-            (rename-file lock quarantine)
-            (delete-directory quarantine t)
-            t)
-        (file-error nil)))))
+  (let ((expected (epub-reader-store--lock-snapshot lock)))
+    (when (and expected
+               (epub-reader-store--stale-lock-snapshot-p expected))
+      (let ((quarantine
+             (format "%s.stale-%s" lock
+                     (substring
+                      (secure-hash 'sha256
+                                   (format "%s:%s:%s" lock (emacs-pid)
+                                           (float-time)))
+                      0 16)))
+            renamed)
+        (setq renamed
+              (condition-case nil
+                  (progn
+                    ;; Atomic rename selects exactly one contender.  Identity
+                    ;; is checked again through the quarantine pathname before
+                    ;; anything is deleted, closing the stale-check/rename ABA.
+                    (rename-file lock quarantine)
+                    t)
+                (file-error nil)))
+        (when renamed
+          (let ((claimed (epub-reader-store--lock-snapshot quarantine)))
+            (if (epub-reader-store--same-lock-instance-p expected claimed)
+                (progn
+                  (delete-directory quarantine t)
+                  t)
+              ;; The pathname was replaced after EXPECTED was captured.  Put
+              ;; that live lock back and report that this contender lost.
+              (condition-case error-data
+                  (rename-file quarantine lock)
+                (file-error
+                 (signal 'epub-reader-store-error
+                         (list
+                          (format
+                           "Cannot restore concurrently replaced EPUB lock %s: %s"
+                           lock (error-message-string error-data))))))
+              nil)))))))
 
 (defun epub-reader-store--acquire-lock (path)
   "Acquire and return an ownership token for PATH's transaction lock."
