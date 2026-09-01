@@ -83,7 +83,8 @@ A single larger block is still materialized by itself."
   "Non-UI state owned by one reader buffer."
   publication current-chapter dom-cache store
   refreshing-p producer-block-count history-back history-forward toc-buffer
-  spine-weights total-weight)
+  spine-weights total-weight
+  progress-key progress-dirty-p progress-timer progress-callback)
 
 (cl-defstruct (epub-reader-chapter-data
                (:constructor epub-reader-chapter-data--create))
@@ -148,9 +149,13 @@ A single larger block is still materialized by itself."
       (progn
         (setq-local truncate-lines nil)
         (add-hook 'post-command-hook
-                  #'epub-reader-ui--maybe-shift-chunk nil t))
+                  #'epub-reader-ui--maybe-shift-chunk nil t)
+        (add-hook 'post-command-hook
+                  #'epub-reader-ui--progress-post-command t t))
     (remove-hook 'post-command-hook
-                 #'epub-reader-ui--maybe-shift-chunk t)))
+                 #'epub-reader-ui--maybe-shift-chunk t)
+    (remove-hook 'post-command-hook
+                 #'epub-reader-ui--progress-post-command t)))
 
 (define-minor-mode epub-reader-toc-mode
   "Minor mode for the secondary EPUB table-of-contents buffer."
@@ -388,14 +393,77 @@ A single larger block is still materialized by itself."
             (epub-reader-ui--chapter-title)
             (epub-reader-ui--progress-percent))))
 
+(defun epub-reader-ui--cancel-progress-timer (session)
+  "Cancel SESSION's one-shot progress timer, if any."
+  (let ((timer (epub-reader-session-progress-timer session)))
+    (when (timerp timer)
+      (cancel-timer timer))
+    (setf (epub-reader-session-progress-timer session) nil)))
+
+(defun epub-reader-ui--schedule-progress-save (session)
+  "Debounce one idle progress flush for dirty SESSION."
+  (when (and (epub-reader-session-store session)
+             (epub-reader-session-progress-dirty-p session))
+    (epub-reader-ui--cancel-progress-timer session)
+    (let ((callback (epub-reader-session-progress-callback session)))
+      (unless callback
+        (error "EPUB progress effect is unavailable"))
+      (setf (epub-reader-session-progress-timer session)
+            (run-with-idle-timer
+             epub-reader-save-idle-delay nil callback)))))
+
+(defun epub-reader-ui--current-progress-key ()
+  "Return a stable plain-data key for the current semantic position."
+  (let ((locator (epub-reader-ui--current-locator)))
+    (and locator (epub-reader-locator-to-plist locator))))
+
+(defun epub-reader-ui--observe-progress (&optional dirty)
+  "Notice a changed semantic position and optionally mark it DIRTY."
+  (let* ((session (epub-reader-ui--current-session))
+         (key (and (epub-reader-session-store session)
+                   (epub-reader-ui--current-progress-key))))
+    (when (and key
+               (not (equal key (epub-reader-session-progress-key session))))
+      (setf (epub-reader-session-progress-key session) key)
+      (when dirty
+        (setf (epub-reader-session-progress-dirty-p session) t)
+        (epub-reader-ui--schedule-progress-save session)))
+    key))
+
+(defun epub-reader-ui--initialize-progress-position ()
+  "Record the displayed position as a clean progress baseline."
+  (let ((session (epub-reader-ui--current-session)))
+    (epub-reader-ui--cancel-progress-timer session)
+    (setf (epub-reader-session-progress-key session)
+          (and (epub-reader-session-store session)
+               (epub-reader-ui--current-progress-key))
+          (epub-reader-session-progress-dirty-p session) nil)))
+
+(defun epub-reader-ui--progress-post-command ()
+  "Mark progress dirty after a command changes the semantic locator."
+  (when (and (epub-reader-session-p epub-reader-ui--session)
+             (not (epub-reader-session-refreshing-p
+                   epub-reader-ui--session)))
+    (epub-reader-ui--observe-progress t)))
+
 (defun epub-reader-ui--save-progress (&optional flush)
-  "Stage the current locator and, when FLUSH is non-nil, persist it now."
+  "Persist changed progress and optionally FLUSH any staged value now."
   (let* ((session (epub-reader-ui--current-session))
          (store (epub-reader-session-store session))
-         (locator (and store (epub-reader-ui--current-locator))))
-    (when locator
-      (epub-reader-store-stage store locator)
-      (when flush (epub-reader-store-flush store)))
+         locator)
+    (when store
+      (when (epub-reader-session-progress-dirty-p session)
+        (setq locator (epub-reader-ui--current-locator))
+        (when locator
+          (epub-reader-store-stage store locator)
+          (epub-reader-ui--cancel-progress-timer session)
+          (setf (epub-reader-session-progress-key session)
+                (epub-reader-locator-to-plist locator)
+                (epub-reader-session-progress-dirty-p session) nil)))
+      ;; A previous flush may have failed after staging.  Retrying an explicit
+      ;; flush must not depend on observing another point movement.
+      (when flush
+        (epub-reader-store-flush store)))
     locator))
 
 (defun epub-reader-ui--save-progress-safely (&optional flush)
@@ -591,18 +659,14 @@ A single larger block is still materialized by itself."
        (list (epub-reader-store-book-key
               (epub-reader-session-store session)))
        (lambda ()
-         (let* ((callback
-                 (textui-async-callback
-                  (lambda ()
-                    (condition-case error-data
-                        (epub-reader-ui--save-progress t)
-                      (error
-                       (message "EPUB progress save failed: %s"
-                                (error-message-string error-data)))))))
-                (timer
-                 (run-with-idle-timer
-                  epub-reader-save-idle-delay t callback)))
-           (lambda () (when (timerp timer) (cancel-timer timer)))))))
+         (setf (epub-reader-session-progress-callback session)
+               (textui-async-callback
+                (lambda ()
+                  (setf (epub-reader-session-progress-timer session) nil)
+                  (epub-reader-ui--save-progress-safely t))))
+         (lambda ()
+           (epub-reader-ui--cancel-progress-timer session)
+           (setf (epub-reader-session-progress-callback session) nil)))))
     (list
      (list
       :type :flex :direction :column :gap 1
@@ -858,6 +922,7 @@ A single larger block is still materialized by itself."
           (epub-reader-ui--goto-block-index
            (1- (length (epub-reader-ui--current-blocks session))) t)
         (epub-reader-ui--goto-start fragment))
+      (epub-reader-ui--observe-progress t)
       (epub-reader-ui--refresh-toc-buffer)
       (force-mode-line-update t)
       buffer)))
@@ -1368,7 +1433,8 @@ A single larger block is still materialized by itself."
           (with-current-buffer buffer
             (if (plist-get textui-state :pending-locator)
                 (epub-reader-ui--restore-progress)
-              (epub-reader-ui--goto-start)))
+              (epub-reader-ui--goto-start))
+            (epub-reader-ui--initialize-progress-position))
           (setq succeeded t)
           buffer)
       (unless succeeded

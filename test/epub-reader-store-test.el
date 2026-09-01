@@ -74,6 +74,33 @@
       (delete-directory directory t)
       (delete-file source))))
 
+(ert-deftest epub-reader-ui-old-reader-close-does-not-overwrite-new-progress ()
+  (let ((directory (make-temp-file "epub-reader-ui-two-readers-" t))
+        (source (make-temp-file "epub-reader-ui-book-" nil ".epub"))
+        (epub-reader-enable-progress t)
+        first second reopened)
+    (copy-file (epub-reader-test-fixture "epub2.epub") source t)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          (setq first (epub-reader-open source)
+                second (epub-reader-open source))
+          (with-current-buffer second
+            (epub-reader-next-chapter))
+          (kill-buffer second)
+          (setq second nil)
+          ;; FIRST has never moved.  Closing it later must not give its stale
+          ;; chapter-one locator a new timestamp.
+          (kill-buffer first)
+          (setq first nil)
+          (setq reopened (epub-reader-open source))
+          (with-current-buffer reopened
+            (should (= (plist-get textui-state :spine-index) 1))))
+      (when (buffer-live-p first) (kill-buffer first))
+      (when (buffer-live-p second) (kill-buffer second))
+      (when (buffer-live-p reopened) (kill-buffer reopened))
+      (delete-directory directory t)
+      (delete-file source))))
+
 (ert-deftest epub-reader-store-explicitly-rejects-unmigratable-schema ()
   (let ((directory (make-temp-file "epub-reader-store-schema-" t))
         (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
@@ -118,6 +145,78 @@
           (should read-locked)
           (should write-locked)
           (should-not (file-exists-p (concat path ".lock"))))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-takes-over-lock-from-dead-owner ()
+  (let ((directory (make-temp-file "epub-reader-store-orphan-lock-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (epub-reader-store-lock-timeout 0.05)
+               (store (epub-reader-store-open source "book"))
+               (lock (concat (epub-reader-store-path store) ".lock")))
+          (make-directory lock t)
+          (with-temp-file (expand-file-name "owner.el" lock)
+            (prin1 (list :pid 99999999 :host (system-name)
+                         :start '(0 0 0 0) :created (float-time)
+                         :nonce "dead-owner")
+                   (current-buffer)))
+          (epub-reader-store-stage
+           store (epub-reader-store-test--locator
+                  "book" "a.xhtml" "id:a" 9))
+          (epub-reader-store-flush store)
+          (should-not (file-exists-p lock))
+          (should (= (epub-reader-locator-offset
+                      (epub-reader-store-load-locator store))
+                     8)))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-takes-over-expired-ownerless-lock ()
+  (let ((directory (make-temp-file "epub-reader-store-ownerless-lock-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (epub-reader-store-lock-timeout 0.05)
+               (epub-reader-store-ownerless-lock-grace 0.01)
+               (store (epub-reader-store-open source "book"))
+               (lock (concat (epub-reader-store-path store) ".lock")))
+          ;; Simulate a crash after mkdir but before the owner record reached
+          ;; disk.  A fresh ownerless lock still receives the grace period.
+          (make-directory lock t)
+          (set-file-times lock (seconds-to-time (- (float-time) 1.0)))
+          (epub-reader-store-stage
+           store (epub-reader-store-test--locator
+                  "book" "a.xhtml" "id:a" 6))
+          (epub-reader-store-flush store)
+          (should-not (file-exists-p lock))
+          (should (epub-reader-store-load-locator store)))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-does-not-take-over-live-owner-lock ()
+  (let ((directory (make-temp-file "epub-reader-store-live-lock-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (epub-reader-store-lock-timeout 0.02)
+               (store (epub-reader-store-open source "book"))
+               (lock (concat (epub-reader-store-path store) ".lock"))
+               (start (alist-get 'start (process-attributes (emacs-pid)))))
+          (should start)
+          (make-directory lock t)
+          (with-temp-file (expand-file-name "owner.el" lock)
+            (prin1 (list :pid (emacs-pid) :host (system-name)
+                         :start start :created 0.0 :nonce "live-owner")
+                   (current-buffer)))
+          (epub-reader-store-stage
+           store (epub-reader-store-test--locator
+                  "book" "a.xhtml" "id:a" 9))
+          (should-error (epub-reader-store-flush store)
+                        :type 'epub-reader-store-error)
+          (should (file-directory-p lock))
+          (should (epub-reader-store-pending store)))
       (delete-directory directory t)
       (delete-file source))))
 
@@ -200,17 +299,22 @@
     (copy-file (epub-reader-test-fixture "epub2.epub") source t)
     (unwind-protect
         (let ((epub-reader-store-directory directory)
-              reader book-key store idle-callback)
+              reader book-key store idle-callback idle-repeat)
           (cl-letf (((symbol-function 'run-with-idle-timer)
-                     (lambda (_seconds _repeat function &rest arguments)
+                     (lambda (_seconds repeat function &rest arguments)
+                       (setq idle-repeat repeat)
                        (setq idle-callback
                              (lambda () (apply function arguments)))
                        nil)))
-            (setq reader (epub-reader-open source)))
-          (with-current-buffer reader
-            (setq store (epub-reader-session-store epub-reader-ui--session)
-                  book-key (epub-reader-store-book-key store)))
+            (setq reader (epub-reader-open source))
+            (should-not idle-callback)
+            (with-current-buffer reader
+              (setq store (epub-reader-session-store epub-reader-ui--session)
+                    book-key (epub-reader-store-book-key store))
+              (forward-char 1)
+              (epub-reader-ui--progress-post-command)))
           (should idle-callback)
+          (should-not idle-repeat)
           (funcall idle-callback)
           (with-current-buffer reader
             (should (file-exists-p (epub-reader-store-path store)))

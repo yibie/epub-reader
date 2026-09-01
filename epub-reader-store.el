@@ -34,6 +34,14 @@ hashed sidecar filename below this directory."
   :type 'number
   :group 'epub-reader-store)
 
+(defcustom epub-reader-store-ownerless-lock-grace 2.0
+  "Seconds before an ownerless or malformed sidecar lock may be reclaimed.
+Valid same-host locks whose recorded process has exited are reclaimed
+immediately.  The grace period covers the small interval between creating a
+lock directory and writing its owner record."
+  :type 'number
+  :group 'epub-reader-store)
+
 (define-error 'epub-reader-store-error
   "Could not read or write EPUB progress" 'error)
 
@@ -155,10 +163,131 @@ handle's warning; reading may continue without saved progress."
               :locator (epub-reader-locator-to-plist locator)))
   store)
 
+(defconst epub-reader-store--lock-owner-file "owner.el")
+
+(defun epub-reader-store--process-start-time (pid)
+  "Return the operating-system start time for PID, or nil when unavailable."
+  (let ((attributes (ignore-errors (process-attributes pid))))
+    (or (alist-get 'start attributes)
+        (and (= pid (emacs-pid))
+             (boundp 'before-init-time)
+             before-init-time))))
+
+(defun epub-reader-store--new-lock-owner ()
+  "Return a verifiable owner record for a new sidecar lock."
+  (let ((pid (emacs-pid)))
+    (list :pid pid
+          :host (system-name)
+          :start (epub-reader-store--process-start-time pid)
+          :created (float-time)
+          :nonce (secure-hash
+                  'sha256
+                  (format "%s:%s:%s:%s" pid (system-name) (float-time)
+                          (random))))))
+
+(defun epub-reader-store--lock-owner-path (lock)
+  "Return the owner-record filename below LOCK."
+  (expand-file-name epub-reader-store--lock-owner-file lock))
+
+(defun epub-reader-store--valid-lock-owner-p (owner)
+  "Return non-nil when OWNER has the fields needed for safe reclamation."
+  (and (listp owner)
+       (integerp (plist-get owner :pid))
+       (> (plist-get owner :pid) 0)
+       (stringp (plist-get owner :host))
+       (plist-get owner :start)
+       (numberp (plist-get owner :created))
+       (stringp (plist-get owner :nonce))
+       (not (string-empty-p (plist-get owner :nonce)))))
+
+(defun epub-reader-store--read-lock-owner (lock)
+  "Return LOCK's validated owner record, or nil if absent or malformed."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents (epub-reader-store--lock-owner-path lock))
+        (let ((owner (read (current-buffer))))
+          (and (epub-reader-store--valid-lock-owner-p owner) owner)))
+    (error nil)))
+
+(defun epub-reader-store--write-lock-owner (lock owner)
+  "Write OWNER into newly acquired LOCK."
+  (with-temp-file (epub-reader-store--lock-owner-path lock)
+    (let ((print-length nil)
+          (print-level nil))
+      (prin1 owner (current-buffer))
+      (insert "\n")))
+  (set-file-modes (epub-reader-store--lock-owner-path lock) #o600))
+
+(defun epub-reader-store--same-process-start-p (first second)
+  "Return non-nil when FIRST and SECOND denote the same process start time."
+  (condition-case nil
+      (time-equal-p first second)
+    (error (equal first second))))
+
+(defun epub-reader-store--lock-owner-alive-p (owner)
+  "Return non-nil unless same-host OWNER can be proven dead or reused."
+  (if (not (equal (plist-get owner :host) (system-name)))
+      ;; A local process cannot safely judge a PID from another host.
+      t
+    (let* ((pid (plist-get owner :pid))
+           (attributes (ignore-errors (process-attributes pid)))
+           (live-start
+            (or (alist-get 'start attributes)
+                (and (= pid (emacs-pid))
+                     (epub-reader-store--process-start-time pid)))))
+      (cond
+       ((and (= pid (emacs-pid)) live-start)
+        (epub-reader-store--same-process-start-p
+         (plist-get owner :start) live-start))
+       ((null attributes) nil)
+       ;; A live PID without a comparable OS start time cannot be reclaimed
+       ;; safely; wait for a later probe rather than guessing it is stale.
+       ((null live-start) t)
+       (t
+        (epub-reader-store--same-process-start-p
+         (plist-get owner :start) live-start))))))
+
+(defun epub-reader-store--lock-age (lock)
+  "Return LOCK's age in seconds, or zero when its attributes are unavailable."
+  (let ((attributes (ignore-errors (file-attributes lock))))
+    (if attributes
+        (max 0.0
+             (float-time
+              (time-subtract nil (file-attribute-modification-time attributes))))
+      0.0)))
+
+(defun epub-reader-store--stale-lock-p (lock)
+  "Return non-nil when LOCK can be safely reclaimed."
+  (let ((owner (epub-reader-store--read-lock-owner lock)))
+    (if owner
+        (not (epub-reader-store--lock-owner-alive-p owner))
+      (> (epub-reader-store--lock-age lock)
+         epub-reader-store-ownerless-lock-grace))))
+
+(defun epub-reader-store--reclaim-stale-lock (lock)
+  "Atomically quarantine and remove stale LOCK, returning non-nil on success."
+  (when (epub-reader-store--stale-lock-p lock)
+    (let ((quarantine
+           (format "%s.stale-%s" lock
+                   (substring
+                    (secure-hash 'sha256
+                                 (format "%s:%s:%s" lock (emacs-pid)
+                                         (float-time)))
+                    0 16))))
+      (condition-case nil
+          (progn
+            ;; Rename is the ownership claim: only the contender whose rename
+            ;; succeeds may delete this exact stale directory.
+            (rename-file lock quarantine)
+            (delete-directory quarantine t)
+            t)
+        (file-error nil)))))
+
 (defun epub-reader-store--acquire-lock (path)
-  "Acquire and return the sidecar transaction lock directory for PATH."
+  "Acquire and return an ownership token for PATH's transaction lock."
   (let* ((lock (concat path ".lock"))
          (deadline (+ (float-time) epub-reader-store-lock-timeout))
+         (owner (epub-reader-store--new-lock-owner))
          acquired)
     (make-directory (file-name-directory path) t)
     (while (not acquired)
@@ -167,26 +296,43 @@ handle's warning; reading may continue without saved progress."
             ;; Directory creation is the portable cross-process exclusive
             ;; operation; only its owner may enter read/merge/write.
             (make-directory lock)
+            (condition-case owner-error
+                (epub-reader-store--write-lock-owner lock owner)
+              (error
+               (ignore-errors (delete-directory lock t))
+               (signal (car owner-error) (cdr owner-error))))
             (setq acquired t))
         (file-already-exists
-         (when (>= (float-time) deadline)
-           (signal 'epub-reader-store-error
-                   (list (format "Timed out waiting for EPUB sidecar lock: %s"
-                                 lock))))
-         (sleep-for 0.01))
+         (unless (epub-reader-store--reclaim-stale-lock lock)
+           (when (>= (float-time) deadline)
+             (signal 'epub-reader-store-error
+                     (list (format
+                            "Timed out waiting for EPUB sidecar lock: %s"
+                            lock))))
+           (sleep-for 0.01)))
         (error (signal (car error-data) (cdr error-data)))))
-    lock))
+    (list :path lock :nonce (plist-get owner :nonce))))
+
+(defun epub-reader-store--release-lock (token)
+  "Release the transaction lock identified by ownership TOKEN."
+  (let* ((lock (plist-get token :path))
+         (owner (epub-reader-store--read-lock-owner lock)))
+    (unless (and owner
+                 (equal (plist-get owner :nonce) (plist-get token :nonce)))
+      (signal 'epub-reader-store-error
+              (list (format "EPUB sidecar lock ownership changed: %s" lock))))
+    (delete-directory lock t)))
 
 (defun epub-reader-store--call-with-lock (path function)
   "Call FUNCTION while holding PATH's read/merge/write transaction lock."
-  (let ((lock (epub-reader-store--acquire-lock path))
+  (let ((token (epub-reader-store--acquire-lock path))
         result primary-error cleanup-error)
     (unwind-protect
         (condition-case error-data
             (setq result (funcall function))
           (error (setq primary-error error-data)))
       (condition-case error-data
-          (delete-directory lock)
+          (epub-reader-store--release-lock token)
         (error (setq cleanup-error error-data))))
     (cond
      (primary-error (signal (car primary-error) (cdr primary-error)))
@@ -232,15 +378,22 @@ handle's warning; reading may continue without saved progress."
            (let* ((data (epub-reader-store--read path))
                   (books (copy-tree (plist-get data :books)))
                   (existing (assoc book-key books))
+                  (existing-record (and existing (cdr existing)))
                   (existing-updated
-                   (and existing (plist-get (cdr existing) :updated))))
-             ;; Capture time belongs to the user position, not flush order.
-             ;; A late close from an older buffer must not move progress back.
-             (when (or (null existing)
-                       (> (plist-get pending :updated) existing-updated))
+                   (and existing-record
+                        (plist-get existing-record :updated)))
+                  (pending-record
+                   (list :updated (plist-get pending :updated)
+                         :locator (plist-get pending :locator))))
+             ;; The disk value is reread under the lock.  Position capture
+             ;; time, rather than close order, determines the per-book winner;
+             ;; a newer disk record is never replaced by an older snapshot.
+             (unless (and existing-updated
+                          (>= existing-updated
+                              (plist-get pending :updated)))
                (if existing
-                   (setcdr existing pending)
-                 (push (cons book-key pending) books))
+                   (setcdr existing pending-record)
+                 (push (cons book-key pending-record) books))
                (setq data (plist-put data :books books))
                (epub-reader-store--write-atomic path data)))))
         (setf (epub-reader-store-pending store) nil))))
