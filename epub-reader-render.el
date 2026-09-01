@@ -664,7 +664,7 @@ Cache either the local file or a visible diagnostic on BLOCK."
            (t
             (setf (epub-reader-block-image-file block)
                   (epub-reader-link-target-file target)))))
-      (epub-reader-materialization-busy
+      (epub-reader-publication-resource-busy
        ;; Busy is transient coordination, not corrupt image data.  Let the
        ;; current frame fail cleanly so a later refresh can reuse the winner's
        ;; cache instead of freezing a permanent diagnostic onto BLOCK.

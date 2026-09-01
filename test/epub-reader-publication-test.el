@@ -164,6 +164,19 @@
       publication "OEBPS/chapter1.xhtml" "../../../escape.xhtml")
      :type 'epub-reader-publication-error)))
 
+(ert-deftest epub-reader-publication-translates-transient-resource-busy ()
+  (epub-reader-publication-test--with "epub2.epub" publication
+    (let ((section
+           (epub-reader-publication-load-section publication 0)))
+      (cl-letf (((symbol-function 'epub-reader-container-materialize-member)
+                 (lambda (&rest _arguments)
+                   (signal 'epub-reader-materialization-busy
+                           '("injected resource race")))))
+        (should-error
+         (epub-reader-publication-resolve-resource
+          publication section "cover.svg")
+         :type 'epub-reader-publication-resource-busy)))))
+
 (ert-deftest epub-reader-publication-allows-only-safe-external-schemes ()
   (epub-reader-publication-test--with "epub2.epub" publication
     (dolist (href '("https://example.com/book"

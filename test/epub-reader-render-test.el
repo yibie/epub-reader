@@ -119,12 +119,12 @@
              (lambda (block) (eq (epub-reader-block-kind block) 'image))
              (epub-reader-render-section publication section))))
       (cl-letf (((symbol-function 'epub-reader-publication-resolve-resource)
-                 (lambda (&rest _arguments)
-                   (signal 'epub-reader-materialization-busy
+              (lambda (&rest _arguments)
+                   (signal 'epub-reader-publication-resource-busy
                            '("injected image race")))))
         (should-error
          (epub-reader-render-block-element image publication section)
-         :type 'epub-reader-materialization-busy))
+         :type 'epub-reader-publication-resource-busy))
       (should-not (epub-reader-block-image-file image))
       (should-not (epub-reader-block-image-error image)))))
 

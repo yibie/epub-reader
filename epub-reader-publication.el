@@ -21,6 +21,9 @@
 
 (define-error 'epub-reader-publication-error
   "Invalid EPUB publication" 'epub-reader-error)
+(define-error 'epub-reader-publication-resource-busy
+  "EPUB publication resource is temporarily busy"
+  'epub-reader-publication-error)
 
 (defcustom epub-reader-external-link-schemes '("http" "https" "mailto")
   "External URI schemes that publication links may activate."
@@ -969,10 +972,17 @@ container paths, XML parsing, and the XHTML `base' element."
          (epub-reader-publication-resolve-href
           publication (epub-reader-section-base-path section) href)))
     (unless (epub-reader-link-target-external-p target)
-      (setf (epub-reader-link-target-file target)
-            (epub-reader-container-materialize-member
-             (epub-reader-publication-container publication)
-             (epub-reader-link-target-path target))))
+      (condition-case error-data
+          (setf (epub-reader-link-target-file target)
+                (epub-reader-container-materialize-member
+                 (epub-reader-publication-container publication)
+                 (epub-reader-link-target-path target)))
+        (epub-reader-materialization-busy
+         (signal 'epub-reader-publication-resource-busy
+                 (list
+                  (format "Resource is being materialized: %s"
+                          (epub-reader-link-target-path target))
+                  error-data)))))
     target))
 
 (provide 'epub-reader-publication)
