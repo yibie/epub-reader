@@ -5,7 +5,8 @@
 TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重型依赖。
 
 与 nov.el 的差异可以概括为一句话：nov.el 以 `shr` 显示整章 HTML，而本项目以自有 EPUB
-模型、稳定 locator 和 TextUI 的宽度感知 frame/分块 viewport 组织阅读体验。
+模型、稳定 locator 和 TextUI 的宽度感知 frame/分块 viewport 组织阅读体验。逐项对比见
+[与 nov.el 的比较](#与-novel-的比较)。
 
 当前版本为 0.1.0，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
 
@@ -102,6 +103,31 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | 不支持 | 富媒体与复杂排版 | 复杂 ruby、MathML、SVG、音视频、JavaScript、通用 CSS、publisher font、float/grid fidelity |
 | 不支持 | 全书服务 | 索引式全文搜索、跨设备同步、EPUB CFI 或 Web Annotation 互操作 |
 | 不支持 | 纯 Elisp ZIP | 0.1.0 仍通过 `unzip`/`bsdtar` adapter 流式读取归档 |
+
+## 与 nov.el 的比较
+
+本项目的起点正是 nov.el 的三类结构性痛点：`shr` 的渲染时硬填充排版、`(章节序号 . point)`
+的脆弱位置模型、以及整章同步渲染的性能。这些差异来自架构而非配置，nov.el 无法靠调整变量补齐。
+
+| 维度 | nov.el 0.5.0 | epub-reader 0.1.0 |
+|---|---|---|
+| 渲染引擎 | `shr`：HTML 转 buffer，渲染时按窗宽把换行固化进文本 | 语义白名单 + TextUI：宽度驱动布局，窗口变化自动重排 |
+| 中文排版 | 默认断行别扭；需自行组合 `nov-text-width t`、visual-line、`kinsoku` 才可用 | 开箱即用：折行内置 CJK 禁则，`lang` 感知的空白归一化不在全角标点旁制造空格 |
+| 两端对齐 | 无（`shr` 不支持） | 非末行像素级两端对齐（`balanced`/`greedy` 可选） |
+| 窗口/字号变化 | 旧换行不随新布局重排；重渲染后 point 漂移 | 自动重排且语义位置保持 |
+| 阅读位置 | `(spine 序号 . buffer point)`；改字号、窗宽或版本后 point 指向错误文字 | 版本化 locator（spine + block + offset + quote 回退），跨重排/重开精确恢复并报告降级 |
+| 全书进度 | 无可靠百分比（上游 issue #30 长期悬置） | 按可读字符加权的全书百分比，书末收敛 100% |
+| 打开与换章 | 整章交给 `shr` 同步渲染，图多的书秒级等待 | 中央目录预检 + 按需解压 + 首绘小 chunk + 下一章预取；32 MB 图文杂志实测打开约 0.3s、换章约 0.03–0.07s（发布机数据，见 [perf-notes.md](docs/perf-notes.md)） |
+| 图片 | 可显示；缩放依赖 `shr` 与图像栈，resize 不重算 | fit-width、行切片、异步后到、resize/text-scale 重算，CJK 图注正常 |
+| 目录 | 目录渲染成普通章节页，返回时丢失位置（上游 issue #19） | 独立层级目录 buffer：折叠、当前章节标识、重开保位置 |
+| 输入安全 | 直接交给 `unzip`，无预检 | zip bomb、路径穿越、glob、大小写碰撞等全套预检与流式限额 |
+| 依赖与版本 | libxml + `unzip`，兼容较老的 Emacs | TextUI + `unzip`/`bsdtar`，要求 Emacs 29.1+ |
+| 标注 | 核心无，但 org-remark 有成熟集成 | 尚未实现（locator 已为标注预留 range 语义） |
+| 成熟度与生态 | 多年真实世界长尾锤炼；NonGNU ELPA 直装；shrface/org-remark/paw/calibredb/nov-xwidget 等周边 | 新项目：ERT + 多轮对抗审计（见 docs/audit-\*.md），但接触过的真实书目有限 |
+
+结论：在排版、性能与位置可靠性上，本项目已系统性超过 nov.el；nov.el 仍在标注生态与
+长尾成熟度上占优。如果一本书 epub-reader 打不开，或者你现在就需要高亮笔记，
+nov.el + org-remark 仍是可靠的替代方案。
 
 ## 已知限制
 
