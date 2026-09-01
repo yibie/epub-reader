@@ -1,7 +1,7 @@
 # TextUI 集成问题记录
 
-以下问题均只用 TextUI 公开 DSL 复现。reader 没有 advice 或调用 TextUI 私有函数；当前
-规避都留在 reader buffer 的显示策略中。
+以下问题均只用 TextUI 公开 DSL 复现。reader 没有 advice 或调用 TextUI 私有函数；通用的
+native image 缺陷已直接在 TextUI 修复，reader 只保留调用方拥有的显示策略。
 
 ## 1. `:image` 继承正 `line-spacing` 后出现切片缝隙
 
@@ -22,12 +22,13 @@
 
 源码定位：TextUI 的公开 `:image` leaf 在 `textui--render-image-spec` 中按
 `frame-char-height` 计算 `image-rows`，再用 slice display spec 分到普通文本行；它没有接收或
-消除调用者 buffer 的额外行距。数值 `line-spacing=0` 在部分 redisplay 路径里还可能等同于没有
-override；用非 nil 的零值 pair `(0 . 0)` 才能明确压过继承的正行距。
+消除调用者 buffer 的额外行距。Emacs 的 `line-spacing` newline property 只能把行距扩大到高于
+buffer/frame 默认值，数值 0 或 `(0 . 0)` 都不能把继承的正行距压回零。
 
 reader 规避：不修改 buffer-local `line-spacing`，让普通正文继续继承用户设置；post-render 只给
-带 `epub-reader-image-slice` 的完整物理行标记 `line-spacing=(0 . 0)`。结构回归同时检查正文没有
-该 property。真实像素效果仍应在图形 Emacs、不同字体和正负 text scale 下抽样。
+带 `epub-reader-image-slice` 的物理行 newline 标记 `line-height=t`。这是 Emacs `Line Height`
+文档为 tiled image slices 定义的形式：行高只由可见内容决定，并忽略该 newline 的行距。结构
+回归同时检查 buffer 仍继承 0.25、正文 newline 没有该 property。
 
 建议 TextUI 后续明确 `:image` 对非 nil `line-spacing` 的契约，或为 image leaf 提供公开的
 行度量/行距策略；在此之前 reader 不修改 TextUI。
@@ -58,3 +59,14 @@ window view state 恢复语义 point/视觉行；生成 chunk 时只用公开的
 `frame-char-height` 比率重算 `:rows`。同一 buffer 出现在多个 window 时取最保守（最小）的行预算。
 这能让重排和 caller-owned row budget 跟随缩放，但 TextUI 内部 slice 本身仍使用 frame 默认行高；
 最终像素契约最好由 TextUI 公开一个 image row metric 扩展点。
+
+## 4. native `:image` 的 CJK alt 崩溃和 property 丢失（TextUI 已修复）
+
+旧 native 路径用 `(make-string width ?\s)` 构造 unibyte 行，再用 `store-substring` 写入 alt。
+中文 alt 因此报 `Attempt to store non-byte value into unibyte string`；ASCII 即使能写入，
+`store-substring` 也只复制字符，不复制 reader 放在 alt 上的 image anchor property。
+
+TextUI 提交 `0a89825` 已把 native slice 行改成 multibyte，并用属性保真的字符串拼接嵌入 alt；
+`testui-native-image-preserves-cjk-alt-properties` 覆盖 CJK 字符与 property round-trip。reader 不再
+需要额外规避，仍通过公开 `:alt` 搬运 source anchor。图形 smoke 使用财新周刊样书的真实
+`cover.jpg`，在内存注入“中文图注”后成功生成 native slice 和 locator；样书与 sidecar 均未写入。
