@@ -37,6 +37,36 @@
   (count-screen-lines (window-start window) (window-point window)
                       nil window))
 
+(defun epub-reader-ui-test--native-image-line-p (position)
+  "Return non-nil when the physical line at POSITION contains an image slice."
+  (save-excursion
+    (goto-char position)
+    (let ((cursor (line-beginning-position))
+          (end (line-end-position))
+          found)
+      (while (and (< cursor end) (not found))
+        (let ((display (get-text-property cursor 'display)))
+          (when (and (consp display)
+                     (consp (car display))
+                     (eq (caar display) 'slice))
+            (setq found t)))
+        (setq cursor (1+ cursor)))
+      found)))
+
+(defun epub-reader-ui-test--pixel-row-height (window position)
+  "Return the graphical row height at POSITION in WINDOW."
+  (set-window-start window position t)
+  (set-window-point window position)
+  (redisplay t)
+  (let* ((next
+          (save-excursion
+            (goto-char position)
+            (forward-line 1)
+            (point)))
+         (current-y (cdr (posn-x-y (posn-at-point position window))))
+         (next-y (cdr (posn-x-y (posn-at-point next window)))))
+    (- next-y current-y)))
+
 (ert-deftest epub-reader-ui-opens-centered-textui-reader-and-cleans-up ()
   (let ((epub-reader-reading-width 32)
         root)
@@ -153,8 +183,9 @@
           (setq buffer
                 (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
           (with-current-buffer buffer
-            (should (= line-spacing 0.25))
-            (should-not (local-variable-p 'line-spacing))
+            (should (= line-spacing 0))
+            (should (local-variable-p 'line-spacing))
+            (should (= epub-reader-ui--prose-line-spacing 0.25))
             (epub-reader-next-chapter)
             (let ((positions
                    (cl-loop for position from (point-min) below (point-max)
@@ -169,6 +200,8 @@
                          (line-end-position))))
                   (should (< newline (point-max)))
                   (should (eq (get-text-property newline 'line-height) t))
+                  (should-not
+                   (get-text-property newline 'line-spacing))
                   (should-not
                    (get-text-property position 'line-spacing))))
               (let ((prose
@@ -188,10 +221,80 @@
                          (goto-char prose)
                          (line-end-position))))
                   (should-not
-                   (get-text-property newline 'line-height)))))))
+                   (get-text-property newline 'line-height))
+                  (should (= (get-text-property newline 'line-spacing)
+                             0.25)))))))
       (set-default 'line-spacing saved-default)
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-image-row-pixels-exclude-prose-line-spacing ()
+  (unless (display-graphic-p)
+    (ert-skip "Requires a graphical frame for pixel row measurement"))
+  (let ((saved-default (default-value 'line-spacing))
+        buffer)
+    (unwind-protect
+        (progn
+          (set-default 'line-spacing 0.25)
+          (setq buffer
+                (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
+          (with-current-buffer buffer
+            (epub-reader-next-chapter)
+            (redisplay t)
+            (let* ((window (get-buffer-window buffer t))
+                   (image
+                    (cl-loop for position from (point-min) below (point-max)
+                             when (and
+                                   (get-text-property
+                                    position 'epub-reader-image-slice)
+                                   (epub-reader-ui-test--native-image-line-p
+                                    position))
+                             return (save-excursion
+                                      (goto-char position)
+                                      (line-beginning-position))))
+                   (prose
+                    (save-excursion
+                      (goto-char (point-min))
+                      (search-forward "这是第二章。")
+                      (line-beginning-position)))
+                   (image-height
+                    (epub-reader-ui-test--pixel-row-height window image))
+                   (prose-height
+                    (epub-reader-ui-test--pixel-row-height window prose))
+                   no-spacing-height)
+              (let ((was-local (local-variable-p 'line-spacing))
+                    (saved line-spacing))
+                (setq-local line-spacing nil)
+                (setq no-spacing-height
+                      (epub-reader-ui-test--pixel-row-height window image))
+                (if was-local
+                    (setq-local line-spacing saved)
+                  (kill-local-variable 'line-spacing)))
+              (should (= image-height no-spacing-height))
+              (should (> prose-height image-height)))))
+      (set-default 'line-spacing saved-default)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-letterboxed-image-range-excludes-caption ()
+  (unless (display-graphic-p)
+    (ert-skip "Requires native SVG rendering in a graphical frame"))
+  (epub-reader-ui-test--with-reader _buffer
+    (epub-reader-next-chapter)
+    (redisplay t)
+    (goto-char (point-min))
+    (let (caption-start)
+      (while (and (not caption-start)
+                  (search-forward "[测试封面]" nil t))
+        (let ((candidate (- (point) (length "[测试封面]"))))
+          ;; The first occurrence is alternative text hidden beneath the
+          ;; native image display.  The later plain-text occurrence is the
+          ;; separate caption produced by the reader.
+          (unless (epub-reader-ui-test--native-image-line-p candidate)
+            (setq caption-start candidate))))
+      (should caption-start)
+      (should-not
+       (get-text-property caption-start 'epub-reader-image-slice)))))
 
 (ert-deftest epub-reader-ui-text-scale-reflows-and-remeasures-image-rows ()
   (epub-reader-ui-test--with-reader _buffer

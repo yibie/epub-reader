@@ -110,6 +110,12 @@ A single larger block is still materialized by itself."
 (defvar-local epub-reader-ui--session nil
   "Domain session owned by the current EPUB reader buffer.")
 
+(defvar-local epub-reader-ui--saved-line-spacing nil
+  "Saved `(LOCAL-P . VALUE)' for restoring the user's line spacing.")
+
+(defvar-local epub-reader-ui--prose-line-spacing nil
+  "Line spacing copied onto non-image rows in the current reader buffer.")
+
 (defvar-local epub-reader-toc--reader-buffer nil
   "Reader buffer controlled by the current TOC TextUI buffer.")
 
@@ -148,6 +154,17 @@ A single larger block is still materialized by itself."
   :keymap epub-reader-ui-mode-map
   (if epub-reader-ui-mode
       (progn
+        ;; A newline property can enlarge buffer spacing, but it cannot shrink
+        ;; spacing already accumulated by visible glyphs.  Use a zero baseline
+        ;; and put the user's value back on every non-image newline so tiled
+        ;; image slices alone remain contiguous.
+        (setq-local epub-reader-ui--saved-line-spacing
+                    (cons (local-variable-p 'line-spacing) line-spacing))
+        (setq-local epub-reader-ui--prose-line-spacing
+                    (or line-spacing
+                        (frame-parameter (selected-frame) 'line-spacing)))
+        (setq-local line-spacing 0)
+        (epub-reader-ui--disable-image-line-spacing (current-buffer))
         ;; TextUI already emits physical lines at the requested frame width.
         ;; A second Emacs soft-wrap can expose a lone glyph in the margin.
         (setq-local truncate-lines t)
@@ -169,7 +186,14 @@ A single larger block is still materialized by itself."
     (remove-hook 'post-command-hook
                  #'epub-reader-ui--progress-post-command t)
     (remove-hook 'text-scale-mode-hook
-                 #'epub-reader-ui--refresh-for-text-scale t)))
+                 #'epub-reader-ui--refresh-for-text-scale t)
+    (when (consp epub-reader-ui--saved-line-spacing)
+      (if (car epub-reader-ui--saved-line-spacing)
+          (setq-local line-spacing
+                      (cdr epub-reader-ui--saved-line-spacing))
+        (kill-local-variable 'line-spacing)))
+    (setq-local epub-reader-ui--saved-line-spacing nil
+                epub-reader-ui--prose-line-spacing nil)))
 
 (define-minor-mode epub-reader-toc-mode
   "Minor mode for the secondary EPUB table-of-contents buffer."
@@ -642,33 +666,39 @@ remap does not leave image slices measured in unscaled frame rows."
   nil)
 
 (defun epub-reader-ui--disable-image-line-spacing (&optional buffer)
-  "Set image-slice line spacing to zero in BUFFER.
+  "Keep user line spacing on prose but exclude it from image rows in BUFFER.
 TextUI image leaves divide an image into fixed-height character rows.  Positive
 buffer or inherited line spacing would otherwise introduce visible seams and
 can make the final slices appear to overlap following content."
   (with-current-buffer (or buffer (current-buffer))
     (save-excursion
-      (let ((position (point-min))
-            (inhibit-read-only t))
-        (while (< position (point-max))
-          (if (get-text-property position 'epub-reader-image-slice)
-              (let ((newline
-                      (save-excursion
-                        (goto-char position)
-                        (line-end-position))))
-                ;; Emacs defines `line-height=t' on a newline specifically for
-                ;; tiled image slices: visible contents determine line height
-                ;; and newline line-spacing is ignored.  A line-spacing text
-                ;; property can only enlarge the buffer/frame default.
-                (when (and (< newline (point-max))
-                           (= (char-after newline) ?\n))
-                  (add-text-properties newline (1+ newline) '(line-height t)))
+      (goto-char (point-min))
+      (let ((inhibit-read-only t))
+        (while (< (point) (point-max))
+          (let* ((start (line-beginning-position))
+                 (newline (line-end-position))
+                 (position start)
+                 image-row-p)
+            (while (and (< position newline) (not image-row-p))
+              (if (get-text-property position 'epub-reader-image-slice)
+                  (setq image-row-p t)
                 (setq position
-                      (min (point-max) (1+ newline))))
-            (setq position
-                  (or (next-single-property-change
-                       position 'epub-reader-image-slice nil (point-max))
-                      (point-max))))))))
+                      (or (next-single-property-change
+                           position 'epub-reader-image-slice nil newline)
+                          newline))))
+            (when (and (< newline (point-max))
+                       (= (char-after newline) ?\n))
+              (remove-text-properties
+               newline (1+ newline) '(line-height nil line-spacing nil))
+              (if image-row-p
+                  ;; This documented image-slice form also prevents newline
+                  ;; font metrics from enlarging a zero-spacing image row.
+                  (put-text-property newline (1+ newline) 'line-height t)
+                (when epub-reader-ui--prose-line-spacing
+                  (put-text-property
+                   newline (1+ newline) 'line-spacing
+                   epub-reader-ui--prose-line-spacing))))
+            (forward-line 1))))))
   nil)
 
 (defun epub-reader-ui--mark-chrome-regions (&optional buffer)
