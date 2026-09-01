@@ -2,6 +2,21 @@
 
 本文件记录 epub-reader 的公开版本变化。版本号遵循 Semantic Versioning。
 
+## Unreleased
+
+### Changed
+
+- 容器改为中央目录 preflight 后按需 materialize；启动只展开格式元数据、恢复章节和当前
+  viewport 图片，spine 权重直接读取 ZIP 中央目录的未压缩 size。
+- 图片解压移到 active chunk 的 TextUI leaf 生产阶段，并缓存已 materialize 成员。
+- reader buffer 隔离继承的 `line-spacing`，避免图片切片横缝/连续图片重叠；禁止二次软折行并
+  隐藏 continuation/truncation fringe，避免居中栏外的单字列。
+
+### Performance
+
+- 31.96 MB、164 成员的杂志样书 open→首屏中位数由 1.154 s 降至 0.351 s，首屏落盘成员由
+  164 个降至 6 个。
+
 ## 0.1.0 - 2026-08-31
 
 首个可用开发版本。

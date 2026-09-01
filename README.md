@@ -87,7 +87,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 
 | 状态 | 能力 | 0.1.0 行为 |
 |---|---|---|
-| 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；解析 metadata、manifest、spine、EPUB 2 NCX 与 EPUB 3 nav |
+| 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；中央目录安全 preflight 后按需解压 metadata、当前 spine 与当前 chunk 图片；解析 EPUB 2 NCX 与 EPUB 3 nav |
 | 已支持 | 常见 XHTML 语义 | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、图片与可见错误提示 |
 | 已支持 | CJK 与宽度重排 | TextUI 宽度感知折行、common kinsoku、窗口宽度变化全量重排，并通过 focus/source anchor 保持位置 |
 | 已支持 | 长章节 | block 数与字符数双软预算、guard/overscan、章节 region refresh；不会为整章预先生成 TextUI leaf/source property |
@@ -143,3 +143,5 @@ TEXTUI_DIR=/path/to/textui ./test/run-tests.sh
 - [audit-phase2.md](docs/audit-phase2.md) 与
   [audit-phase2-response.md](docs/audit-phase2-response.md)：viewport、TOC、store 第二阶段审计与响应。
 - [benchmark-10k.md](docs/benchmark-10k.md)：10k 段长章节基准。
+- [perf-notes.md](docs/perf-notes.md)：杂志样书惰性容器改造前后的首屏基准。
+- [textui-issues.md](docs/textui-issues.md)：图片切片行距与二次折行的 TextUI 最小复现及 reader 规避。
