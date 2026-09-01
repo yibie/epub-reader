@@ -213,6 +213,24 @@ Set only when the book took over the frame on opening.")
     map)
   "Keymap installed by the UI on rendered EPUB hyperlink runs.")
 
+(defvar epub-reader-toc-row-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'epub-reader-toc-activate-mouse)
+    map)
+  "Keymap installed on TOC rows so that a click acts like RET.")
+
+(defvar epub-reader-bookmark-row-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'epub-reader-bookmark-list-activate-mouse)
+    map)
+  "Keymap installed on bookmark list rows so that a click acts like RET.")
+
+(defvar epub-reader-annotation-row-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'epub-reader-annotation-list-activate-mouse)
+    map)
+  "Keymap installed on annotation list rows so that a click acts like RET.")
+
 (define-minor-mode epub-reader-ui-mode
   "Minor mode adding EPUB reader commands to a TextUI buffer."
   :init-value nil
@@ -1583,9 +1601,10 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                         'epub-reader-toc-group-face)
                        (t 'default))
            'mouse-face 'highlight
+           'keymap epub-reader-toc-row-map
            'help-echo (if (epub-reader-toc-entry-path entry)
-                          "RET: jump; TAB: fold"
-                        "RET/TAB: fold"))))
+                          "RET or mouse-1: jump; TAB: fold"
+                        "RET, mouse-1, or TAB: fold"))))
     (list :type :text :value value)))
 
 (defun epub-reader-toc-frame (_available-width)
@@ -1695,6 +1714,12 @@ window rows; TextUI's internal focus identity is not an EPUB position."
         (epub-reader-ui--jump-to-target
          (epub-reader-toc-entry-path entry)
          (epub-reader-toc-entry-fragment entry))))))
+
+(defun epub-reader-toc-activate-mouse (event)
+  "Move to mouse EVENT and activate the TOC row there."
+  (interactive "e")
+  (mouse-set-point event)
+  (epub-reader-toc-activate))
 
 (defun epub-reader-toc ()
   "Display this reader's hierarchical TextUI table of contents."
@@ -1840,7 +1865,8 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                            (epub-reader-bookmark-preview bookmark))
                    'epub-reader-bookmark bookmark
                    'mouse-face 'highlight
-                   'help-echo "RET: jump; d: delete")))
+                   'keymap epub-reader-bookmark-row-map
+                   'help-echo "RET or mouse-1: jump; d: delete")))
             (setq children
                   (append children (list (list :type :text :value value))))))
       (setq children
@@ -1889,6 +1915,12 @@ window rows; TextUI's internal focus identity is not an EPUB position."
       (epub-reader-ui--record-history)
       (epub-reader-ui--goto-locator (epub-reader-bookmark-locator bookmark)))
     (pop-to-buffer reader)))
+
+(defun epub-reader-bookmark-list-activate-mouse (event)
+  "Move to mouse EVENT and jump to the bookmark there."
+  (interactive "e")
+  (mouse-set-point event)
+  (epub-reader-bookmark-list-activate))
 
 (defun epub-reader-bookmark-list-delete ()
   "Delete the bookmark at point from the sidecar."
@@ -2155,7 +2187,8 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                                    (epub-reader-ui--short-text note 48))))
                  'epub-reader-annotation annotation
                  'mouse-face 'highlight
-                 'help-echo "RET: jump; d: delete; e: edit note")))
+                 'keymap epub-reader-annotation-row-map
+                 'help-echo "RET or mouse-1: jump; d: delete; e: edit note")))
           (setq children
                 (append children (list (list :type :text :value value)))))))
     (unless annotations
@@ -2204,6 +2237,12 @@ window rows; TextUI's internal focus identity is not an EPUB position."
     (with-current-buffer reader
       (epub-reader-ui--goto-annotation annotation))
     (pop-to-buffer reader)))
+
+(defun epub-reader-annotation-list-activate-mouse (event)
+  "Move to mouse EVENT and jump to the annotation there."
+  (interactive "e")
+  (mouse-set-point event)
+  (epub-reader-annotation-list-activate))
 
 (defun epub-reader-annotation-list-delete ()
   "Delete the annotation at point from the sidecar and reader."

@@ -120,7 +120,8 @@ itself is never modified.
 | `TAB` | Collapse or expand the current group |
 | `q` | Hide the TOC buffer |
 
-Reopening the TOC restores its selected row.
+Clicking an entry with the mouse does the same as `RET`. Reopening the TOC
+restores its selected row.
 
 ### Bookmarks and highlights
 
@@ -132,6 +133,8 @@ point is on a highlight to add, read, or edit its plain-text note. The `M` and
 |---|---|---|---|---|
 | Bookmarks | Jump to the bookmark | Delete it | — | Hide the list |
 | Highlights | Jump to the quoted text | Delete it | Edit its note | Hide the list |
+
+Clicking an entry in either list jumps to it, like `RET`.
 
 Highlights are restored from the saved quote when an exact source position is
 no longer available. Such a match is shown with a wavy underline and a warning

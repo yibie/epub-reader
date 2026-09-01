@@ -1430,5 +1430,128 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(defun epub-reader-ui-test--mouse-event (buffer position)
+  "Return a synthetic mouse-1 click on POSITION of BUFFER in a live window."
+  (let ((window (or (get-buffer-window buffer t)
+                    (progn (set-window-buffer (selected-window) buffer)
+                           (selected-window)))))
+    (list 'mouse-1
+          (list window position '(0 . 0) 0 nil position '(0 . 0)
+                nil '(0 . 0) '(1 . 1)))))
+
+(ert-deftest epub-reader-ui-toc-mouse-click-visits-entry ()
+  (let ((reader
+         (epub-reader-open (epub-reader-test-fixture "epub3-edge.epub")))
+        toc)
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer reader)
+          (setq toc (epub-reader-toc))
+          (let ((position (with-current-buffer toc
+                            (epub-reader-toc--key-position "0/0/0"))))
+            (should position)
+            (should (eq (lookup-key (get-text-property position 'keymap toc)
+                                    [mouse-1])
+                        #'epub-reader-toc-activate-mouse))
+            (epub-reader-toc-activate-mouse
+             (epub-reader-ui-test--mouse-event toc position)))
+          (with-current-buffer reader
+            (should (equal (get-text-property (point) 'epub-reader-anchor-id)
+                           "appendix"))))
+      (when (buffer-live-p reader) (kill-buffer reader)))))
+
+(ert-deftest epub-reader-ui-bookmark-list-mouse-click-jumps ()
+  (let ((directory (make-temp-file "epub-reader-bookmark-mouse-" t))
+        (source (make-temp-file "epub-reader-language-" nil ".epub"))
+        (epub-reader-enable-progress nil)
+        (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
+        reader list-buffer)
+    (copy-file (epub-reader-test-fixture "language-mix.epub") source t)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          (setq reader (epub-reader-open source))
+          (with-current-buffer reader
+            (goto-char (epub-reader-ui-test--source-position "id:mixed" 3))
+            (epub-reader-add-bookmark "Mixed paragraph")
+            (goto-char (point-min))
+            (setq list-buffer (epub-reader-bookmarks)))
+          (let ((position
+                 (with-current-buffer list-buffer
+                   (cl-loop for cursor from (point-min) below (point-max)
+                            when (get-text-property
+                                  cursor 'epub-reader-bookmark)
+                            return cursor))))
+            (should position)
+            (should (eq (lookup-key
+                         (get-text-property position 'keymap list-buffer)
+                         [mouse-1])
+                        #'epub-reader-bookmark-list-activate-mouse))
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (&rest _arguments) reader)))
+              (epub-reader-bookmark-list-activate-mouse
+               (epub-reader-ui-test--mouse-event list-buffer position))))
+          (with-current-buffer reader
+            (should (equal (aref (get-text-property (point) 'epub-reader-source)
+                                 1)
+                           "id:mixed"))))
+      (when (buffer-live-p list-buffer) (kill-buffer list-buffer))
+      (when (buffer-live-p reader) (kill-buffer reader))
+      (delete-file source)
+      (delete-directory directory t))))
+
+(ert-deftest epub-reader-ui-annotation-list-mouse-click-jumps ()
+  (let ((directory (make-temp-file "epub-reader-annotation-mouse-" t))
+        (source (make-temp-file "epub-reader-language-" nil ".epub"))
+        (epub-reader-enable-progress nil)
+        (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
+        (epub-reader-first-paint-max-characters
+         epub-reader-chunk-max-characters)
+        reader list-buffer)
+    (copy-file (epub-reader-test-fixture "language-mix.epub") source t)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          (setq reader (epub-reader-open source))
+          (with-current-buffer reader
+            (let* ((block (cl-find "mixed" (epub-reader-ui--current-blocks)
+                                   :key #'epub-reader-block-element-id
+                                   :test #'equal))
+                   (text (substring-no-properties
+                          (epub-reader-block-text block)))
+                   (start-offset (string-match "Emacs" text))
+                   (end-offset (+ (string-match "EPUB" text) 4))
+                   (start (epub-reader-ui-test--source-position
+                           "id:mixed" start-offset))
+                   (end (1+ (epub-reader-ui-test--source-position
+                             "id:mixed" (1- end-offset)))))
+              (goto-char end)
+              (set-mark start)
+              (setq mark-active t transient-mark-mode t)
+              (epub-reader-add-highlight start end)
+              (deactivate-mark)
+              (goto-char (point-min))
+              (setq list-buffer (epub-reader-annotations))))
+          (let ((position
+                 (with-current-buffer list-buffer
+                   (cl-loop for cursor from (point-min) below (point-max)
+                            when (get-text-property
+                                  cursor 'epub-reader-annotation)
+                            return cursor))))
+            (should position)
+            (should (eq (lookup-key
+                         (get-text-property position 'keymap list-buffer)
+                         [mouse-1])
+                        #'epub-reader-annotation-list-activate-mouse))
+            (cl-letf (((symbol-function 'pop-to-buffer) #'identity))
+              (epub-reader-annotation-list-activate-mouse
+               (epub-reader-ui-test--mouse-event list-buffer position))))
+          (with-current-buffer reader
+            (should (get-text-property (point) 'epub-reader-annotation-ids))))
+      (when (buffer-live-p list-buffer) (kill-buffer list-buffer))
+      (when (buffer-live-p reader) (kill-buffer reader))
+      (delete-file source)
+      (delete-directory directory t))))
+
 (provide 'epub-reader-ui-test)
 ;;; epub-reader-ui-test.el ends here
