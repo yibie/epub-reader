@@ -193,5 +193,34 @@
               (list (list "changed-block" (+ start-offset 4)
                           (+ end-offset 4))))))))
 
+(ert-deftest epub-reader-render-applies-mixed-highlight-with-source-anchor ()
+  (let ((publication
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "language-mix.epub"))))
+    (unwind-protect
+        (let* ((blocks (vconcat (epub-reader-render-chapter publication 0)))
+               (block (epub-reader-annotation-test--block blocks "mixed"))
+               (text (substring-no-properties (epub-reader-block-text block)))
+               (start (string-match "Emacs" text))
+               (end (+ (string-match "EPUB" text) (length "EPUB")))
+               (element
+                (epub-reader-render-block-element
+                 block nil nil nil nil
+                 (list (list :start start :end end :id "mixed-highlight"
+                             :quality 'quote :note "混排笔记"))))
+               (value (plist-get element :value)))
+          (should (memq 'epub-reader-highlight-degraded-face
+                        (ensure-list (get-text-property start 'face value))))
+          (should (equal (get-text-property
+                          start 'epub-reader-annotation-ids value)
+                         '("mixed-highlight")))
+          (should (string-match-p
+                   "relocated" (get-text-property start 'help-echo value)))
+          (should (equal (get-text-property start 'epub-reader-source value)
+                         (epub-reader-locator-source
+                          (epub-reader-block-document-path block)
+                          (epub-reader-block-key block) start))))
+      (epub-reader-publication-close publication))))
+
 (provide 'epub-reader-annotation-test)
 ;;; epub-reader-annotation-test.el ends here

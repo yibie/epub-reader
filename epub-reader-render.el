@@ -88,6 +88,16 @@
   "Face for visible image resource diagnostics."
   :group 'epub-reader)
 
+(defface epub-reader-highlight-face
+  '((t (:background "#fff2a8" :foreground "#1f1f1f")))
+  "Face for an EPUB text highlight."
+  :group 'epub-reader)
+
+(defface epub-reader-highlight-degraded-face
+  '((t (:inherit epub-reader-highlight-face :underline (:style wave))))
+  "Face for a highlight restored from its quoted text."
+  :group 'epub-reader)
+
 (defconst epub-reader-render--xml-namespace
   "http://www.w3.org/XML/1998/namespace")
 
@@ -645,14 +655,47 @@ This validates URL resolution without materializing the image member."
   (list :type :text :value value :wrap epub-reader-text-wrap-strategy
         :layout '(:min-width 20 :grow 1)))
 
-(defun epub-reader-render--materialized-text (block)
-  "Return a source-attributed copy of canonical BLOCK text."
-  (epub-reader-locator-attach-source
-   (epub-reader-block-text block)
-   (epub-reader-block-document-path block)
-   (epub-reader-block-key block)
-   (epub-reader-block-book-key block)
-   (epub-reader-block-spine-index block)))
+(defun epub-reader-render--apply-highlights (text highlights)
+  "Apply HIGHLIGHTS to source-attributed TEXT and return it.
+Each highlight is a plist with :start, exclusive :end, :id, :quality, and
+optional :note."
+  (dolist (highlight highlights text)
+    (let* ((start (max 0 (plist-get highlight :start)))
+           (end (min (length text) (plist-get highlight :end)))
+           (id (plist-get highlight :id))
+           (quality (plist-get highlight :quality))
+           (face (if (eq quality 'exact)
+                     'epub-reader-highlight-face
+                   'epub-reader-highlight-degraded-face)))
+      (when (< start end)
+        (add-face-text-property start end face nil text)
+        (dotimes (delta (- end start))
+          (let* ((position (+ start delta))
+                 (ids (get-text-property
+                       position 'epub-reader-annotation-ids text)))
+            (add-text-properties
+             position (1+ position)
+             (list 'epub-reader-annotation-ids
+                   (cl-adjoin id ids :test #'equal)
+                   'epub-reader-annotation-quality quality
+                   'help-echo
+                   (if (eq quality 'exact)
+                       (if (string-empty-p (or (plist-get highlight :note) ""))
+                           "EPUB highlight"
+                         (format "EPUB note: %s" (plist-get highlight :note)))
+                     "EPUB highlight relocated from its quoted text"))
+             text)))))))
+
+(defun epub-reader-render--materialized-text (block &optional highlights)
+  "Return a source-attributed copy of canonical BLOCK text with HIGHLIGHTS."
+  (epub-reader-render--apply-highlights
+   (epub-reader-locator-attach-source
+    (epub-reader-block-text block)
+    (epub-reader-block-document-path block)
+    (epub-reader-block-key block)
+    (epub-reader-block-book-key block)
+    (epub-reader-block-spine-index block))
+   highlights))
 
 (defun epub-reader-render-materialize-image (block publication section)
   "Materialize BLOCK's image from PUBLICATION relative to SECTION.
@@ -690,14 +733,15 @@ Cache either the local file or a visible diagnostic on BLOCK."
   block)
 
 (defun epub-reader-render-block-element
-    (block &optional publication section image-rows defer-image)
+    (block &optional publication section image-rows defer-image highlights)
   "Convert semantic BLOCK to one public TextUI element.
 When PUBLICATION and SECTION are supplied, materialize an image block just
 before producing its leaf unless DEFER-IMAGE is non-nil.  IMAGE-ROWS overrides
-the configured image row budget when the UI has a buffer-specific font metric."
+the configured image row budget when the UI has a buffer-specific font metric.
+HIGHLIGHTS are source-offset spans for this block."
   (when (and publication section (not defer-image))
     (epub-reader-render-materialize-image block publication section))
-  (let ((text (epub-reader-render--materialized-text block)))
+  (let ((text (epub-reader-render--materialized-text block highlights)))
     (pcase (epub-reader-block-kind block)
     ('quote
      (list :type :flex :direction :column :border t :padding 1

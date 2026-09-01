@@ -18,6 +18,7 @@
 (require 'face-remap)
 (require 'subr-x)
 (require 'textui)
+(require 'epub-reader-annotation)
 (require 'epub-reader-locator)
 (require 'epub-reader-publication)
 (require 'epub-reader-render)
@@ -109,6 +110,7 @@ A single larger block is still materialized by itself."
   "Non-UI state owned by one reader buffer."
   publication current-chapter dom-cache store
   refreshing-p producer-block-count history-back history-forward toc-buffer
+  bookmark-buffer annotation-buffer bookmarks annotations
   spine-weights total-weight
   progress-key progress-dirty-p progress-timer progress-callback
   background-generation background-jobs background-timer background-callback)
@@ -145,6 +147,12 @@ A single larger block is still materialized by itself."
 (defvar-local epub-reader-toc--reader-buffer nil
   "Reader buffer controlled by the current TOC TextUI buffer.")
 
+(defvar-local epub-reader-bookmark-list--reader-buffer nil
+  "Reader buffer controlled by the current bookmark list.")
+
+(defvar-local epub-reader-annotation-list--reader-buffer nil
+  "Reader buffer controlled by the current annotation list.")
+
 (defvar-keymap epub-reader-ui-mode-map
   :doc "Keymap active in EPUB reader TextUI buffers."
   "n" #'epub-reader-next-chapter
@@ -157,6 +165,11 @@ A single larger block is still materialized by itself."
   "f" #'epub-reader-history-forward
   "t" #'epub-reader-toc
   "g" #'epub-reader-jump
+  "m" #'epub-reader-add-bookmark
+  "M" #'epub-reader-bookmarks
+  "h" #'epub-reader-add-highlight
+  "e" #'epub-reader-edit-note
+  "a" #'epub-reader-annotations
   "RET" #'epub-reader-follow-link
   "q" #'epub-reader-quit)
 
@@ -165,6 +178,19 @@ A single larger block is still materialized by itself."
   "RET" #'epub-reader-toc-activate
   "TAB" #'epub-reader-toc-toggle
   "q" #'epub-reader-toc-quit)
+
+(defvar-keymap epub-reader-bookmark-list-mode-map
+  :doc "Keymap active in EPUB bookmark list buffers."
+  "RET" #'epub-reader-bookmark-list-activate
+  "d" #'epub-reader-bookmark-list-delete
+  "q" #'epub-reader-bookmark-list-quit)
+
+(defvar-keymap epub-reader-annotation-list-mode-map
+  :doc "Keymap active in EPUB annotation list buffers."
+  "RET" #'epub-reader-annotation-list-activate
+  "d" #'epub-reader-annotation-list-delete
+  "e" #'epub-reader-annotation-list-edit-note
+  "q" #'epub-reader-annotation-list-quit)
 
 (defvar epub-reader-ui-link-map
   (let ((map (make-sparse-keymap)))
@@ -228,6 +254,20 @@ A single larger block is still materialized by itself."
   :keymap epub-reader-toc-mode-map
   (setq-local truncate-lines t))
 
+(define-minor-mode epub-reader-bookmark-list-mode
+  "Minor mode for the secondary EPUB bookmark list buffer."
+  :init-value nil
+  :lighter " EPUB-Bookmarks"
+  :keymap epub-reader-bookmark-list-mode-map
+  (setq-local truncate-lines t))
+
+(define-minor-mode epub-reader-annotation-list-mode
+  "Minor mode for the secondary EPUB annotation list buffer."
+  :init-value nil
+  :lighter " EPUB-Annotations"
+  :keymap epub-reader-annotation-list-mode-map
+  (setq-local truncate-lines t))
+
 (defun epub-reader-ui--state-value (key)
   "Return KEY from the current reader's TextUI state."
   (unless (and (derived-mode-p 'textui-mode) epub-reader-ui-mode)
@@ -239,6 +279,27 @@ A single larger block is still materialized by itself."
   (unless (epub-reader-session-p epub-reader-ui--session)
     (user-error "EPUB reader session is unavailable"))
   epub-reader-ui--session)
+
+(defun epub-reader-ui--decode-values (values decoder kind)
+  "Decode plain VALUES with DECODER, warning and skipping invalid KIND values."
+  (let (decoded)
+    (dolist (value values (nreverse decoded))
+      (condition-case error-data
+          (push (funcall decoder value) decoded)
+        (error
+         (display-warning
+          'epub-reader
+          (format "Invalid saved EPUB %s ignored: %s"
+                  kind (error-message-string error-data))
+          :warning))))))
+
+(defun epub-reader-ui--flush-reader-marks (session)
+  "Durably flush pending bookmarks or annotations for SESSION."
+  (condition-case error-data
+      (epub-reader-store-flush (epub-reader-session-store session))
+    (error
+     (user-error "Could not save EPUB bookmark or annotation: %s"
+                 (error-message-string error-data)))))
 
 (defun epub-reader-ui--current-chapter (&optional session)
   "Return SESSION's current canonical chapter data."
@@ -632,7 +693,8 @@ current when it runs, so it also covers this request."
   "Notice a changed semantic position and optionally mark it DIRTY."
   (let* ((session (epub-reader-ui--current-session))
          (store (epub-reader-session-store session))
-         (locator (and store (epub-reader-ui--current-locator)))
+         (locator (and epub-reader-enable-progress store
+                       (epub-reader-ui--current-locator)))
          (key (and locator (epub-reader-locator-to-plist locator))))
     (when (and key
                (not (equal key (epub-reader-session-progress-key session))))
@@ -651,7 +713,8 @@ current when it runs, so it also covers this request."
   (let ((session (epub-reader-ui--current-session)))
     (epub-reader-ui--cancel-progress-timer session)
     (setf (epub-reader-session-progress-key session)
-          (and (epub-reader-session-store session)
+          (and epub-reader-enable-progress
+               (epub-reader-session-store session)
                (epub-reader-ui--current-progress-key))
           (epub-reader-session-progress-dirty-p session) nil)))
 
@@ -793,6 +856,43 @@ remap does not leave image slices measured in unscaled frame rows."
                          font-height))))
          windows))))))
 
+(defun epub-reader-ui--locator-records (blocks)
+  "Return canonical locator records for semantic BLOCKS."
+  (cl-loop for block across blocks
+           collect
+           (list (epub-reader-block-book-key block)
+                 (epub-reader-block-spine-index block)
+                 (epub-reader-block-document-path block)
+                 (epub-reader-block-key block)
+                 (substring-no-properties (epub-reader-block-text block)))))
+
+(defun epub-reader-ui--annotation-spans-by-block (session blocks)
+  "Resolve SESSION annotations against BLOCKS and index their source spans."
+  (let ((records (epub-reader-ui--locator-records blocks))
+        (table (make-hash-table :test #'equal)))
+    (dolist (annotation (epub-reader-session-annotations session))
+      (let* ((range (epub-reader-annotation-range annotation))
+             (start (epub-reader-locator-range-start range))
+             (section-path
+              (and (> (length blocks) 0)
+                   (epub-reader-block-document-path (aref blocks 0)))))
+        (when (equal (epub-reader-locator-path start) section-path)
+          (let* ((resolution
+                  (epub-reader-locator-range-resolve range records))
+                 (quality
+                  (epub-reader-locator-range-resolution-quality resolution)))
+            (setf (epub-reader-annotation-quality annotation) quality)
+            (dolist (span
+                     (epub-reader-locator-range-resolution-spans resolution))
+              (let ((value
+                     (list :start (nth 1 span) :end (nth 2 span)
+                           :id (epub-reader-annotation-id annotation)
+                           :quality quality
+                           :note (epub-reader-annotation-note annotation))))
+                (puthash (car span)
+                         (cons value (gethash (car span) table)) table)))))))
+    table))
+
 (defun epub-reader-ui--chapter-elements (available-width)
   "Return the current budgeted chapter region at AVAILABLE-WIDTH."
   (let* ((session (epub-reader-ui--current-session))
@@ -800,6 +900,8 @@ remap does not leave image slices measured in unscaled frame rows."
          (start (or (plist-get textui-state :chunk-start) 0))
          (end (or (plist-get textui-state :chunk-end) (length blocks)))
          (image-rows (epub-reader-ui--image-row-budget))
+         (highlights (epub-reader-ui--annotation-spans-by-block
+                      session blocks))
          elements)
     (cl-loop for index from start below (min end (length blocks))
              do (push (epub-reader-render-block-element
@@ -807,7 +909,9 @@ remap does not leave image slices measured in unscaled frame rows."
                        (epub-reader-session-publication session)
                        (epub-reader-chapter-data-section
                         (epub-reader-ui--current-chapter session))
-                       image-rows t)
+                       image-rows t
+                       (gethash (epub-reader-block-key (aref blocks index))
+                                highlights))
                       elements))
     (setf (epub-reader-session-producer-block-count session)
           (length elements))
@@ -938,7 +1042,8 @@ can make the final slices appear to overlap following content."
        (lambda ()
          (epub-reader-ui--cancel-background-work session)
          (setf (epub-reader-session-background-callback session) nil))))
-    (when (epub-reader-session-store session)
+    (when (and epub-reader-enable-progress
+               (epub-reader-session-store session))
       (textui-effect
        'epub-reader-progress-save
        (list (epub-reader-store-book-key
@@ -1298,11 +1403,8 @@ window rows; TextUI's internal focus identity is not an EPUB position."
       (user-error "History target is no longer in the reading spine"))
     (unless (= index (epub-reader-ui--state-value :spine-index))
       (epub-reader-ui--switch-chapter index nil t))
-    (let ((block-index
-           (gethash (epub-reader-locator-block locator)
-                    (epub-reader-ui--current-block-index session))))
-      (when block-index
-        (epub-reader-ui--ensure-block-visible block-index)))
+    (epub-reader-ui--ensure-block-visible
+     (epub-reader-ui--restore-target-index session locator))
     (let ((resolution (epub-reader-locator-goto locator)))
       (unless (epub-reader-locator-resolution-position resolution)
         (user-error "History position could not be restored"))
@@ -1637,6 +1739,454 @@ window rows; TextUI's internal focus identity is not an EPUB position."
      (epub-reader-toc-entry-path entry)
      (epub-reader-toc-entry-fragment entry))))
 
+(defun epub-reader-ui--short-text (text length)
+  "Return whitespace-normalized TEXT truncated to LENGTH characters."
+  (let ((clean (string-trim
+                (replace-regexp-in-string
+                 "[[:space:]\n]+" " " (substring-no-properties text)))))
+    (if (> (length clean) length)
+        (concat (substring clean 0 length) "…")
+      clean)))
+
+(defun epub-reader-ui--preview-for-locator (session locator)
+  "Return a short canonical paragraph preview for LOCATOR in SESSION."
+  (let ((block-index
+         (gethash (epub-reader-locator-block locator)
+                  (epub-reader-ui--current-block-index session))))
+    (if block-index
+        (epub-reader-ui--short-text
+         (epub-reader-block-text
+          (aref (epub-reader-ui--current-blocks session) block-index))
+         48)
+      (epub-reader-ui--short-text
+       (or (epub-reader-locator-context locator) "Bookmark") 48))))
+
+(defun epub-reader-add-bookmark (&optional name)
+  "Add a bookmark at point, prompting for its optional short NAME."
+  (interactive)
+  (let* ((session (epub-reader-ui--current-session))
+         (locator (epub-reader-ui--current-locator)))
+    (unless locator (user-error "Point is outside EPUB content"))
+    (let* ((preview (epub-reader-ui--preview-for-locator session locator))
+           (default-name (epub-reader-ui--short-text preview 18))
+           (chosen (or name (read-string "Bookmark name: " default-name)))
+           (bookmark
+            (epub-reader-bookmark-create
+             (epub-reader-locator-book-key locator)
+             (if (string-empty-p chosen) default-name chosen)
+             preview locator)))
+      (epub-reader-store-stage-bookmark
+       (epub-reader-session-store session)
+       (epub-reader-bookmark-to-plist bookmark))
+      (push bookmark (epub-reader-session-bookmarks session))
+      (epub-reader-ui--flush-reader-marks session)
+      (message "Bookmark saved: %s" (epub-reader-bookmark-name bookmark))
+      bookmark)))
+
+(defun epub-reader-bookmark-list--session ()
+  "Return the live reader session owned by this bookmark list."
+  (unless (buffer-live-p epub-reader-bookmark-list--reader-buffer)
+    (user-error "The EPUB reader buffer has been closed"))
+  (with-current-buffer epub-reader-bookmark-list--reader-buffer
+    (epub-reader-ui--current-session)))
+
+(defun epub-reader-bookmark-list-frame (_available-width)
+  "Return the TextUI frame for the current book's bookmarks."
+  (let* ((session (epub-reader-bookmark-list--session))
+         (publication (epub-reader-session-publication session))
+         (bookmarks
+          (sort (copy-sequence (epub-reader-session-bookmarks session))
+                (lambda (left right)
+                  (< (epub-reader-bookmark-created left)
+                     (epub-reader-bookmark-created right)))))
+         (children
+          (list
+           (list :type :text
+                 :value (propertize
+                         (format "%s — Bookmarks"
+                                 (epub-reader-publication-title publication))
+                         'face 'epub-reader-header-face)))))
+    (if bookmarks
+        (dolist (bookmark bookmarks)
+          (let* ((locator (epub-reader-bookmark-locator bookmark))
+                 (value
+                  (propertize
+                   (format "%d. %s — %s"
+                           (1+ (epub-reader-locator-spine-index locator))
+                           (epub-reader-bookmark-name bookmark)
+                           (epub-reader-bookmark-preview bookmark))
+                   'epub-reader-bookmark bookmark
+                   'mouse-face 'highlight
+                   'help-echo "RET: jump; d: delete")))
+            (setq children
+                  (append children (list (list :type :text :value value))))))
+      (setq children
+            (append children
+                    (list (list :type :text
+                                :value (propertize
+                                        "No bookmarks yet" 'face 'shadow))))))
+    (list (list :type :flex :direction :column :gap 1
+                :children children))))
+
+(defun epub-reader-bookmark-list--at-point ()
+  "Return the bookmark at or immediately before point."
+  (or (get-text-property (point) 'epub-reader-bookmark)
+      (and (> (point) (point-min))
+           (get-text-property (1- (point)) 'epub-reader-bookmark))))
+
+(defun epub-reader-bookmark-list--refresh (&optional selected-id)
+  "Refresh the current bookmark list and restore SELECTED-ID when visible."
+  (textui-refresh (current-buffer))
+  (when selected-id
+    (let ((position
+           (cl-loop for cursor from (point-min) below (point-max)
+                    for bookmark = (get-text-property
+                                    cursor 'epub-reader-bookmark)
+                    when (and bookmark
+                              (equal (epub-reader-bookmark-id bookmark)
+                                     selected-id))
+                    return cursor)))
+      (when position (goto-char position)))))
+
+(defun epub-reader-bookmark-list-activate ()
+  "Jump to the bookmark at point."
+  (interactive)
+  (let ((bookmark (epub-reader-bookmark-list--at-point))
+        (reader epub-reader-bookmark-list--reader-buffer))
+    (unless bookmark (user-error "No bookmark at point"))
+    (with-current-buffer reader
+      (epub-reader-ui--record-history)
+      (epub-reader-ui--goto-locator (epub-reader-bookmark-locator bookmark)))
+    (pop-to-buffer reader)))
+
+(defun epub-reader-bookmark-list-delete ()
+  "Delete the bookmark at point from the sidecar."
+  (interactive)
+  (let* ((bookmark (epub-reader-bookmark-list--at-point))
+         (session (epub-reader-bookmark-list--session)))
+    (unless bookmark (user-error "No bookmark at point"))
+    (epub-reader-store-delete-bookmark
+     (epub-reader-session-store session) (epub-reader-bookmark-id bookmark))
+    (setf (epub-reader-session-bookmarks session)
+          (cl-delete (epub-reader-bookmark-id bookmark)
+                     (epub-reader-session-bookmarks session)
+                     :key #'epub-reader-bookmark-id :test #'equal))
+    (epub-reader-ui--flush-reader-marks session)
+    (epub-reader-bookmark-list--refresh)))
+
+(defun epub-reader-bookmark-list-quit ()
+  "Hide the bookmark list."
+  (interactive)
+  (delete-windows-on (current-buffer) t))
+
+(defun epub-reader-bookmarks ()
+  "Display this book's bookmarks in a secondary TextUI buffer."
+  (interactive)
+  (let* ((reader (current-buffer))
+         (session (epub-reader-ui--current-session))
+         (existing (epub-reader-session-bookmark-buffer session)))
+    (if (buffer-live-p existing)
+        (progn (display-buffer existing) existing)
+      (let* ((epub-reader-bookmark-list--reader-buffer reader)
+             (buffer
+              (textui-open
+               (generate-new-buffer-name
+                (format "*EPUB Bookmarks: %s*"
+                        (epub-reader-publication-title
+                         (epub-reader-session-publication session))))
+               #'epub-reader-bookmark-list-frame nil)))
+        (with-current-buffer buffer
+          (setq-local epub-reader-bookmark-list--reader-buffer reader)
+          (epub-reader-bookmark-list-mode 1))
+        (setf (epub-reader-session-bookmark-buffer session) buffer)
+        buffer))))
+
+(defun epub-reader-add-highlight (start end)
+  "Highlight the source text in the active region from START to END."
+  (interactive "r")
+  (unless (use-region-p)
+    (user-error "Select EPUB text before adding a highlight"))
+  (let* ((session (epub-reader-ui--current-session))
+         (range (epub-reader-locator-range-capture
+                 start end (epub-reader-ui--state-value :spine-index)))
+         (annotation
+          (epub-reader-annotation-create
+           (epub-reader-publication-book-key
+            (epub-reader-session-publication session))
+           range)))
+    (epub-reader-store-stage-annotation
+     (epub-reader-session-store session)
+     (epub-reader-annotation-to-plist annotation))
+    (push annotation (epub-reader-session-annotations session))
+    (epub-reader-ui--flush-reader-marks session)
+    (deactivate-mark)
+    (epub-reader-ui--refresh-chunk
+     (plist-get textui-state :chunk-start)
+     (plist-get textui-state :chunk-end))
+    (message "Highlight saved")
+    annotation))
+
+(defun epub-reader-ui--annotation-by-id (session id)
+  "Return SESSION annotation identified by ID."
+  (cl-find id (epub-reader-session-annotations session)
+           :key #'epub-reader-annotation-id :test #'equal))
+
+(defun epub-reader-ui--annotation-at-point (session)
+  "Return the annotation selected by source properties at point in SESSION."
+  (let ((ids (or (get-text-property (point) 'epub-reader-annotation-ids)
+                 (and (> (point) (point-min))
+                      (get-text-property
+                       (1- (point)) 'epub-reader-annotation-ids)))))
+    (cond
+     ((null ids) nil)
+     ((null (cdr ids)) (epub-reader-ui--annotation-by-id session (car ids)))
+     (t
+      (let* ((choices
+              (mapcar
+               (lambda (id)
+                 (let* ((annotation
+                         (epub-reader-ui--annotation-by-id session id))
+                        (quote
+                         (and annotation
+                              (epub-reader-locator-range-exact
+                               (epub-reader-annotation-range annotation)))))
+                   (cons (format "%s — %s" (substring id 0 (min 8 (length id)))
+                                 (epub-reader-ui--short-text (or quote "") 36))
+                         annotation)))
+               ids))
+             (choice (completing-read "Annotation: " choices nil t)))
+        (cdr (assoc choice choices)))))))
+
+(defun epub-reader-ui--set-annotation-note (session annotation note)
+  "Set ANNOTATION's NOTE, persist it through SESSION, and return it."
+  (setf (epub-reader-annotation-note annotation) note)
+  (epub-reader-store-stage-annotation
+   (epub-reader-session-store session)
+   (epub-reader-annotation-to-plist annotation))
+  (epub-reader-ui--flush-reader-marks session)
+  annotation)
+
+(defun epub-reader-edit-note ()
+  "View or edit the note attached to the highlight at point."
+  (interactive)
+  (let* ((session (epub-reader-ui--current-session))
+         (annotation (epub-reader-ui--annotation-at-point session)))
+    (unless annotation (user-error "Point is not on an EPUB highlight"))
+    (epub-reader-ui--set-annotation-note
+     session annotation
+     (read-string "Highlight note: " (epub-reader-annotation-note annotation)))
+    (epub-reader-ui--refresh-chunk
+     (plist-get textui-state :chunk-start)
+     (plist-get textui-state :chunk-end))
+    (message "Highlight note saved")))
+
+(defun epub-reader-ui--goto-annotation (annotation)
+  "Navigate the current reader to ANNOTATION and return its resolution."
+  (let* ((session (epub-reader-ui--current-session))
+         (range (epub-reader-annotation-range annotation))
+         (start (epub-reader-locator-range-start range))
+         (publication (epub-reader-session-publication session))
+         (index (epub-reader-ui--spine-index-for-path
+                 publication (epub-reader-locator-path start))))
+    (unless index (user-error "Annotation chapter is no longer in this book"))
+    (if (= index (epub-reader-ui--state-value :spine-index))
+        (epub-reader-ui--record-history)
+      (epub-reader-ui--switch-chapter index))
+    (let* ((blocks (epub-reader-ui--current-blocks session))
+           (resolution
+            (epub-reader-locator-range-resolve
+             range (epub-reader-ui--locator-records blocks)))
+           (span (car (epub-reader-locator-range-resolution-spans resolution))))
+      (unless span (user-error "Annotation text could not be found"))
+      (setf (epub-reader-annotation-quality annotation)
+            (epub-reader-locator-range-resolution-quality resolution))
+      (let ((block-index
+             (gethash (car span) (epub-reader-ui--current-block-index session))))
+        (unless block-index (user-error "Annotation block could not be found"))
+        (epub-reader-ui--ensure-block-visible block-index))
+      (let ((position
+             (cl-loop for cursor from (point-min) below (point-max)
+                      for source = (get-text-property
+                                    cursor 'epub-reader-source)
+                      when (and (epub-reader-locator-source-p source)
+                                (equal (aref source 1) (car span))
+                                (= (aref source 2) (nth 1 span)))
+                      return cursor)))
+        (unless position (user-error "Annotation is outside the rendered chunk"))
+        (goto-char position)
+        (epub-reader-ui--recenter-visible-windows)
+        (unless (eq (epub-reader-locator-range-resolution-quality resolution)
+                    'exact)
+          (message "Highlight restored from quoted text; review its position"))
+        resolution))))
+
+(defun epub-reader-annotation-list--session ()
+  "Return the live reader session owned by this annotation list."
+  (unless (buffer-live-p epub-reader-annotation-list--reader-buffer)
+    (user-error "The EPUB reader buffer has been closed"))
+  (with-current-buffer epub-reader-annotation-list--reader-buffer
+    (epub-reader-ui--current-session)))
+
+(defun epub-reader-annotation-list-frame (_available-width)
+  "Return annotations grouped by chapter as a TextUI frame."
+  (let* ((session (epub-reader-annotation-list--session))
+         (publication (epub-reader-session-publication session))
+         (annotations
+          (sort (copy-sequence (epub-reader-session-annotations session))
+                (lambda (left right)
+                  (let ((left-start (epub-reader-locator-range-start
+                                     (epub-reader-annotation-range left)))
+                        (right-start (epub-reader-locator-range-start
+                                      (epub-reader-annotation-range right))))
+                    (if (= (epub-reader-locator-spine-index left-start)
+                           (epub-reader-locator-spine-index right-start))
+                        (< (epub-reader-annotation-created left)
+                           (epub-reader-annotation-created right))
+                      (< (epub-reader-locator-spine-index left-start)
+                         (epub-reader-locator-spine-index right-start)))))))
+         (children
+          (list (list :type :text
+                      :value
+                      (propertize
+                       (format "%s — Highlights"
+                               (epub-reader-publication-title publication))
+                       'face 'epub-reader-header-face))))
+         previous-index)
+    (dolist (annotation annotations)
+      (let* ((range (epub-reader-annotation-range annotation))
+             (index (epub-reader-locator-spine-index
+                     (epub-reader-locator-range-start range))))
+        (unless (equal index previous-index)
+          (setq children
+                (append children
+                        (list (list :type :text
+                                    :value
+                                    (propertize
+                                     (format "Chapter %d" (1+ index))
+                                     'face 'epub-reader-toc-group-face)))))
+          (setq previous-index index))
+        (let* ((note (epub-reader-annotation-note annotation))
+               (warning
+                (if (memq (epub-reader-annotation-quality annotation)
+                          '(quote none identity-mismatch))
+                    "⚠ " ""))
+               (value
+                (propertize
+                 (format "%s“%s”%s" warning
+                         (epub-reader-ui--short-text
+                          (epub-reader-locator-range-exact range) 60)
+                         (if (string-empty-p note) ""
+                           (format " — %s"
+                                   (epub-reader-ui--short-text note 48))))
+                 'epub-reader-annotation annotation
+                 'mouse-face 'highlight
+                 'help-echo "RET: jump; d: delete; e: edit note")))
+          (setq children
+                (append children (list (list :type :text :value value)))))))
+    (unless annotations
+      (setq children
+            (append children
+                    (list (list :type :text
+                                :value (propertize
+                                        "No highlights yet" 'face 'shadow))))))
+    (list (list :type :flex :direction :column :gap 1
+                :children children))))
+
+(defun epub-reader-annotation-list--at-point ()
+  "Return the annotation at or immediately before point."
+  (or (get-text-property (point) 'epub-reader-annotation)
+      (and (> (point) (point-min))
+           (get-text-property (1- (point)) 'epub-reader-annotation))))
+
+(defun epub-reader-annotation-list--refresh (&optional selected-id)
+  "Refresh this annotation list, restoring SELECTED-ID when present."
+  (textui-refresh (current-buffer))
+  (when selected-id
+    (let ((position
+           (cl-loop for cursor from (point-min) below (point-max)
+                    for annotation = (get-text-property
+                                      cursor 'epub-reader-annotation)
+                    when (and annotation
+                              (equal (epub-reader-annotation-id annotation)
+                                     selected-id))
+                    return cursor)))
+      (when position (goto-char position)))))
+
+(defun epub-reader-annotation-list-activate ()
+  "Jump to the annotation at point."
+  (interactive)
+  (let ((annotation (epub-reader-annotation-list--at-point))
+        (reader epub-reader-annotation-list--reader-buffer))
+    (unless annotation (user-error "No annotation at point"))
+    (with-current-buffer reader
+      (epub-reader-ui--goto-annotation annotation))
+    (pop-to-buffer reader)))
+
+(defun epub-reader-annotation-list-delete ()
+  "Delete the annotation at point from the sidecar and reader."
+  (interactive)
+  (let* ((annotation (epub-reader-annotation-list--at-point))
+         (reader epub-reader-annotation-list--reader-buffer)
+         (session (epub-reader-annotation-list--session)))
+    (unless annotation (user-error "No annotation at point"))
+    (epub-reader-store-delete-annotation
+     (epub-reader-session-store session)
+     (epub-reader-annotation-id annotation))
+    (setf (epub-reader-session-annotations session)
+          (cl-delete (epub-reader-annotation-id annotation)
+                     (epub-reader-session-annotations session)
+                     :key #'epub-reader-annotation-id :test #'equal))
+    (epub-reader-ui--flush-reader-marks session)
+    (with-current-buffer reader
+      (epub-reader-ui--refresh-chunk
+       (plist-get textui-state :chunk-start)
+       (plist-get textui-state :chunk-end)))
+    (epub-reader-annotation-list--refresh)))
+
+(defun epub-reader-annotation-list-edit-note ()
+  "Edit the note for the annotation at point."
+  (interactive)
+  (let* ((annotation (epub-reader-annotation-list--at-point))
+         (reader epub-reader-annotation-list--reader-buffer)
+         (session (epub-reader-annotation-list--session)))
+    (unless annotation (user-error "No annotation at point"))
+    (epub-reader-ui--set-annotation-note
+     session annotation
+     (read-string "Highlight note: " (epub-reader-annotation-note annotation)))
+    (with-current-buffer reader
+      (epub-reader-ui--refresh-chunk
+       (plist-get textui-state :chunk-start)
+       (plist-get textui-state :chunk-end)))
+    (epub-reader-annotation-list--refresh
+     (epub-reader-annotation-id annotation))))
+
+(defun epub-reader-annotation-list-quit ()
+  "Hide the annotation list."
+  (interactive)
+  (delete-windows-on (current-buffer) t))
+
+(defun epub-reader-annotations ()
+  "Display this book's highlights and notes in a TextUI buffer."
+  (interactive)
+  (let* ((reader (current-buffer))
+         (session (epub-reader-ui--current-session))
+         (existing (epub-reader-session-annotation-buffer session)))
+    (if (buffer-live-p existing)
+        (progn (display-buffer existing) existing)
+      (let* ((epub-reader-annotation-list--reader-buffer reader)
+             (buffer
+              (textui-open
+               (generate-new-buffer-name
+                (format "*EPUB Highlights: %s*"
+                        (epub-reader-publication-title
+                         (epub-reader-session-publication session))))
+               #'epub-reader-annotation-list-frame nil)))
+        (with-current-buffer buffer
+          (setq-local epub-reader-annotation-list--reader-buffer reader)
+          (epub-reader-annotation-list-mode 1))
+        (setf (epub-reader-session-annotation-buffer session) buffer)
+        buffer))))
+
 (defun epub-reader-follow-link ()
   "Follow the EPUB hyperlink at point."
   (interactive)
@@ -1700,11 +2250,19 @@ window rows; TextUI's internal focus identity is not an EPUB position."
         (progn
           (setq publication (epub-reader-publication-open file))
           (let* ((store
-                  (and epub-reader-enable-progress
-                       (epub-reader-store-open
-                        file (epub-reader-publication-book-key publication))))
+                  (epub-reader-store-open
+                   file (epub-reader-publication-book-key publication)))
                  (saved-locator
-                  (and store (epub-reader-store-load-locator store)))
+                  (and epub-reader-enable-progress
+                       (epub-reader-store-load-locator store)))
+                 (bookmarks
+                  (epub-reader-ui--decode-values
+                   (epub-reader-store-load-bookmarks store)
+                   #'epub-reader-bookmark-from-plist "bookmark"))
+                 (annotations
+                  (epub-reader-ui--decode-values
+                   (epub-reader-store-load-annotations store)
+                   #'epub-reader-annotation-from-plist "annotation"))
                  (saved-index
                   (or (and saved-locator
                            (epub-reader-ui--spine-index-for-path
@@ -1718,6 +2276,7 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                          :publication publication
                          :dom-cache (make-hash-table :test #'equal)
                          :store store :history-back nil :history-forward nil
+                         :bookmarks bookmarks :annotations annotations
                          :spine-weights weights
                          :total-weight
                          (cl-loop for weight across weights sum weight))))
@@ -1762,11 +2321,14 @@ window rows; TextUI's internal focus identity is not an EPUB position."
           (textui-register-cleanup
            buffer
            (lambda ()
-             (let ((toc-buffer
-                    (and session
-                         (epub-reader-session-toc-buffer session))))
-               (when (buffer-live-p toc-buffer)
-                 (kill-buffer toc-buffer)))
+             (dolist (secondary
+                      (and session
+                           (list
+                            (epub-reader-session-toc-buffer session)
+                            (epub-reader-session-bookmark-buffer session)
+                            (epub-reader-session-annotation-buffer session))))
+               (when (buffer-live-p secondary)
+                 (kill-buffer secondary)))
              (unwind-protect
                  (when (epub-reader-session-store session)
                    (condition-case error-data
@@ -1775,7 +2337,7 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                          (epub-reader-store-close
                           (epub-reader-session-store session)))
                      (error
-                      (message "EPUB final progress save failed: %s"
+                      (message "EPUB final sidecar save failed: %s"
                                (error-message-string error-data)))))
                (epub-reader-publication-close publication))))
           (with-current-buffer buffer
