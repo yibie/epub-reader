@@ -258,6 +258,46 @@
       (should (eq (epub-reader-locator-range-resolution-quality resolution)
                   'unsupported-schema)))))
 
+(ert-deftest epub-reader-locator-range-rejects-reversed-cross-block-endpoints ()
+  "A persisted backwards range must not quote-relocate to a plausible match."
+  (let* ((records '(("book" 0 "chapter.xhtml" "b1" "aaaaaa")
+                    ("book" 0 "chapter.xhtml" "b2" "target")))
+         (range
+          (epub-reader-locator-range--create
+           :schema 1
+           :start (epub-reader-annotation-test--locator "b2" 0)
+           :end (epub-reader-annotation-test--locator "b1" 5)
+           :exact "target" :prefix "" :suffix ""))
+         (decoded
+          (epub-reader-locator-range-from-plist
+           (epub-reader-locator-range-to-plist range)))
+         (resolution
+          (epub-reader-locator-range-resolve decoded records)))
+    (should (eq (epub-reader-locator-range-resolution-quality resolution)
+                'invalid-range))
+    (should-not (epub-reader-locator-range-resolution-spans resolution))))
+
+(ert-deftest epub-reader-locator-range-capture-normalizes-reversed-region ()
+  "Interactive endpoint order is canonical even when the region is backwards."
+  (with-temp-buffer
+    (insert (epub-reader-locator-attach-source
+             "Alpha" "chapter.xhtml" "b1" "book" 0))
+    (insert "\n")
+    (insert (epub-reader-locator-attach-source
+             "Beta" "chapter.xhtml" "b2" "book" 0))
+    (let* ((records '(("book" 0 "chapter.xhtml" "b1" "Alpha")
+                      ("book" 0 "chapter.xhtml" "b2" "Beta")))
+           (range (epub-reader-locator-range-capture
+                   (point-max) (point-min) 0 nil records)))
+      (should (equal (epub-reader-locator-block
+                      (epub-reader-locator-range-start range))
+                     "b1"))
+      (should (equal (epub-reader-locator-block
+                      (epub-reader-locator-range-end range))
+                     "b2"))
+      (should (equal (epub-reader-locator-range-exact range)
+                     "AlphaBeta")))))
+
 (ert-deftest epub-reader-locator-range-relocates-mixed-quote ()
   (epub-reader-annotation-test--with-language-buffer
       (_buffer _publication blocks)

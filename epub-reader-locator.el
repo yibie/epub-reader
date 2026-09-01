@@ -122,7 +122,9 @@ Each span is (BLOCK START END), with END exclusive."
         :suffix (epub-reader-locator-range-suffix range)))
 
 (defun epub-reader-locator-range-from-plist (data)
-  "Return a validated locator range decoded from plain plist DATA."
+  "Return a validated locator range decoded from plain plist DATA.
+Same-block order is checked here.  Cross-block order is checked against the
+canonical chapter mapping by `epub-reader-locator-range-resolve'."
   (let ((schema (plist-get data :schema))
         (exact (plist-get data :exact))
         (prefix (plist-get data :prefix))
@@ -664,6 +666,9 @@ exclusive."
                       mapping (epub-reader-locator-range-end range)))
                     (exact (epub-reader-locator-range-exact range)))
         (cond
+         ((and start-index end-index (> start-index end-index))
+          (epub-reader-locator-range-resolution--create
+           :spans nil :quality 'invalid-range))
          ((and start-index end-index (<= start-index end-index)
                (equal (substring text start-index (1+ end-index)) exact))
           (epub-reader-locator-range-resolution--create
