@@ -2341,11 +2341,15 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                         '(:eval (epub-reader-ui--header-line)))
             (setq-local default-directory
                         (file-name-directory (expand-file-name file))))
-          (when (and (epub-reader-session-store session)
-                     (epub-reader-store-warning
-                      (epub-reader-session-store session)))
-            (message "%s" (epub-reader-store-warning
-                            (epub-reader-session-store session))))
+          (when (epub-reader-session-store session)
+            (dolist (warning
+                     (delq nil
+                           (list
+                            (epub-reader-store-warning
+                             (epub-reader-session-store session))
+                            (epub-reader-store-progress-warning
+                             (epub-reader-session-store session)))))
+              (message "%s" warning)))
           (textui-register-cleanup
            buffer
            (lambda ()

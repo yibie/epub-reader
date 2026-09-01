@@ -49,7 +49,8 @@ their canonical pathname becomes visible."
 (cl-defstruct (epub-reader-store
                (:constructor epub-reader-store--create))
   "One book identity's handle to a versioned sidecar."
-  path book-key pending pending-bookmarks pending-annotations warning closed-p)
+  path book-key pending pending-bookmarks pending-annotations
+  warning progress-warning closed-p)
 
 (defconst epub-reader-store--schema 2)
 
@@ -195,12 +196,13 @@ handle's warning; reading may continue without saved progress."
     (let* ((data (epub-reader-store--read (epub-reader-store-path store)))
            (entry (assoc (epub-reader-store-book-key store)
                          (plist-get data :books))))
-      (when entry
+      (setf (epub-reader-store-progress-warning store) nil)
+      (when-let* ((record (cdr-safe entry))
+                  (locator-data (plist-get record :locator)))
         (condition-case error-data
-            (epub-reader-locator-from-plist
-             (plist-get (cdr entry) :locator))
+            (epub-reader-locator-from-plist locator-data)
           (error
-           (setf (epub-reader-store-warning store)
+           (setf (epub-reader-store-progress-warning store)
                  (format "Invalid saved EPUB locator: %s"
                          (error-message-string error-data)))
            nil))))))
