@@ -33,6 +33,7 @@ build_epub() {
 build_epub epub2 "$source_dir/epub2"
 build_epub epub3 "$source_dir/epub3"
 build_epub epub3-edge "$source_dir/epub3-edge"
+build_epub language-mix "$source_dir/language-mix"
 
 shared_identifier_source="$work_dir/shared-identifier-source"
 cp -R "$source_dir/epub2" "$shared_identifier_source"
