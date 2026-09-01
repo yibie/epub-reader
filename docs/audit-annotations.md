@@ -3,7 +3,8 @@
 审计日期：2026-09-01
 
 初审范围固定为 `git diff a6c7732...5ac7676`。修复复核范围固定为
-`git diff 5ac7676...8db20a4`。功能提交为：
+`git diff 5ac7676...8db20a4`；R-03 最终复核范围为
+`git diff aae0455...26d7b69`。功能提交为：
 
 - `fd2aa85`：range locator 与英文/混排布局契约；
 - `a5fc3b5`：sidecar schema 2、书签/标注持久化与迁移；
@@ -16,25 +17,24 @@
 `The Economist-04.07.2026.epub` 只读打开；所有 sidecar 探针均写入随机临时目录，没有在样书旁
 创建或修改文件。
 
-当前 HEAD 完整执行 `./test/run-tests.sh`：**123 项，121 passed，0 unexpected，2 个 GUI-only
+当前 HEAD 完整执行 `./test/run-tests.sh`：**125 项，123 passed，0 unexpected，2 个 GUI-only
 用例按预期 skipped**。新增回归在修复前提交上确会失败，说明不是只会证明现实现状的空测试。
 
 ## 结论先行
 
-**Gate 暂不解除。** R-01、R-02、S-01、U-01、U-02 已关闭；R-03 的 schema 999 反例也已关闭，
-但同一 finding 要求的端点顺序防御只覆盖同 block。独立探针把持久 range 构造成
-`b2:0 -> b1:5`，decoder 接受，resolver 又把反向范围降级为 `quote` 并锚到 `b2:0..6`，没有返回
-`invalid-range`。这是确定性的坏 sidecar 错锚，不是微秒级理论竞态，故 R-03 只能判部分解决。
+**Gate 解除。** R-01、R-02、R-03、S-01、U-01、U-02 已全部关闭。独立重放持久化
+`b2:0 -> b1:5` 反例得到 `quality=invalid-range, spans=nil`；正向
+`b1:0 -> b2:5` 仍得到 `quality=exact` 和两个正确 spans，说明修复没有误杀合法跨 block range。
 
 | 级别 | 数量 | Finding |
 |---|---:|---|
 | P0 阻断 | 0 | — |
-| P1 应修 | 1 | R-03（部分解决） |
+| P1 应修 | 0 | — |
 | P2 建议 | 3 | T-01、A-01、D-01 |
 
-Gate 解除只剩一项：range resolver 在两个 endpoint 均能映射到 canonical chapter index 时，必须先
-拒绝 `start-index > end-index`，再允许 exact/quote fallback，并增加跨 block 反向回归。A-01、
-T-01、D-01 不单独阻断。
+R-03 的最后条件已经满足：range resolver 在两个 endpoint 均能映射到 canonical chapter index
+时，会先拒绝 `start-index > end-index`，再考虑 exact/quote fallback。A-01、T-01、D-01 为已知
+P2，不单独阻断。
 
 ## 修复复核摘要
 
@@ -43,9 +43,9 @@ T-01、D-01 不单独阻断。
 - 生产代码仍无 `textui--*` 私有调用；canonical chapter index 归 locator 所有，UI 通过 locator
   API capture/resolve，没有新增模块越界。
 - marks-only 读取、live list 刷新与跨章节 annotation 解析均沿用 store/locator 的既有公开 seam。
-- R-03 的 decoder 只能就 schema/identity 和同 block offset 做结构校验；跨 block 顺序必须由已有
-  canonical mapping 的 resolver 校验。当前 `epub-reader-locator.el:659-688` 在发现
-  `start-index > end-index` 后直接进入 quote fallback，违反 range 的有向顺序不变量。
+- R-03 的 decoder 只能就 schema/identity 和同 block offset 做结构校验；跨 block 顺序由已有
+  canonical mapping 的 resolver 校验。`epub-reader-locator.el:666-671` 在 quote fallback 前返回
+  `invalid-range`，判断仍由 locator 模块所有，没有新增 UI/store 越界或 TextUI 私有调用。
 
 ### Spec
 
@@ -53,8 +53,8 @@ T-01、D-01 不单独阻断。
   `" tearing it down. Edwar"`，与 canonical substring 一致；改变 text scale/宽度后仍为 `exact`。
 - 重复 quote 探针回到原 block `b2:4..10`，完全同分返回 `ambiguous`；marks-only sidecar 重开后
   locator=nil、warning=nil，1 个 bookmark 与 1 个 annotation 均可读。
-- live bookmark/annotation list 与未访问章节 degraded 警告回归通过；但反向跨 block range 被错当
-  `quote`，因此本轮 spec 尚未全部满足。
+- live bookmark/annotation list 与未访问章节 degraded 警告回归通过；反向跨 block range 现返回
+  `invalid-range`，正向跨 block exact range 仍正常解析，本轮 spec 已全部满足。
 
 ## 双轴初审摘要
 
@@ -92,7 +92,7 @@ T-01、D-01 不单独阻断。
 | quote 多处命中 | 复核原锚点回到 `b2:4..10`；无法消歧时返回 `ambiguous` | **已解决，R-02** |
 | 合成空白 | 带无 source 的 synthetic space/newline 的 `中 … 文` 捕获为 `中文` | 通过 |
 | 图片边界 | 纯 image slice 报 `The selected region contains no EPUB text`；image+caption 只捕获一次 `[测试封面]` | 通过 |
-| endpoint schema/顺序 | schema=999 已拒绝；但 `b2:0 -> b1:5` 被 decode 并错解为 `quote` | **部分解决，R-03** |
+| endpoint schema/顺序 | schema=999 已拒绝；`b2:0 -> b1:5` 返回 `invalid-range` 且 spans=nil，正向范围仍 exact | **已解决，R-03** |
 | frozen v1 迁移 | 旧 fixture 升到 schema 2 后进度 path 保留，bookmark=1、annotation=1，无残留 lock | 通过 |
 | marks-only 重开 | locator=nil、warning=nil，bookmark=1、annotation=1 | **已解决，S-01** |
 | 双 buffer 合并 | 两个 reader 独立添加高亮、逆序关闭，重开为 2 条；item-level merge/锁测试全绿 | 通过 |
@@ -150,10 +150,11 @@ index。独立 Economist 探针跨真实隐藏空格，capture 与 canonical 完
 
 ### R-03 — P1 应修：range 接受不受支持的 endpoint locator schema
 
-**复核结果：部分解决。** endpoint schema=999 的 persisted decode 已报错，内存 range resolver
-返回 `unsupported-schema`。但 decoder 对不同 block 跳过 offset/顺序检查，resolver 也未在已映射的
-`start-index=6 > end-index=5` 时返回 `invalid-range`；独立 `b2:0 -> b1:5` 反例反而得到
-`quality=quote, spans=(("b2" 0 6))`。应在 quote fallback 前拒绝反向 canonical indexes，并补回归。
+**复核结果：已解决。** endpoint schema=999 的 persisted decode 报错，内存 range resolver 返回
+`unsupported-schema`。跨 block 顺序在 canonical mapping 建立后、quote fallback 前校验；独立
+persist/decode 探针中 `b2:0 -> b1:5` 返回 `quality=invalid-range, spans=nil`。对照探针
+`b1:0 -> b2:5` 仍为 `quality=exact, spans=(("b1" 0 6) ("b2" 0 6))`。新增回归还验证交互式反向
+region 会在 capture 时正规化为正向 endpoints。
 
 - **位置：** `epub-reader-locator.el:112-135,498-514`。
 - **问题：** `range-from-plist` 只要求外层 schema=1；通用 locator decoder 只要求 schema 是整数，
@@ -275,6 +276,6 @@ bookmark/highlight 也会刷新 live secondary buffer。原两项列表反例均
 
 ## 最终 Gate
 
-**不通过。** 当前未关闭计数为 **P0=0、P1=1、P2=3**。R-01、R-02、S-01、U-01、U-02 已关闭；
-R-03 因跨 block 反向 endpoint 仍可静默错锚而保持部分解决。修复上述单一确定性反例后即可解除
-标注阶段 gate；GUI-only 的两个既有 skipped 用例与三个 P2 不单独阻断。
+**通过，Gate 解除。** 当前未关闭计数为 **P0=0、P1=0、P2=3**。六条阻断 finding 均已关闭；
+Standards 与 Spec 复核均无新 finding。125 项测试为 123 passed、0 unexpected、2 个既有 GUI-only
+skip；三个 P2 不单独阻断，可以进入下一阶段。
