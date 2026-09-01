@@ -26,20 +26,24 @@
 两条新增定向 ERT **2/2 通过**，并原样复跑 dirty-old 与两方 ABA 探针，再补一条只针对
 S-04 恢复分支的第三 contender 交错探针。
 
+Gate 终审基线为 `a9fcfe0...98ae9a7`，只复核 S-04 intent 协议。实现者报告 78/78；本审计
+运行三 contender 与 dead-intent 两条定向 ERT **2/2 通过**，并以独立脚本复现同样的三方
+交错，再让真实短命子 Emacs 留下 intent 后由父进程 acquire。随后沿同一 S-04 协议补测
+canonical lock 的 `mkdir -> owner.el` 发布窗口。
+
 ## 结论先行
 
-**最终 Gate 仍未解除，不建议进入下一阶段。** S-01 已彻底解决：真实位置变化时立即 stage，
-dirty-old 逆序保存恢复 spine 1。S-04 的原两方 ABA 与 inode 重用反例也已转绿，但实现会先把
-可能属于新活 owner 的 canonical lock 搬到 quarantine，复核 identity 失败后再放回；这个短暂
-空窗允许第三 contender 取得 canonical lock。确定性交错探针留下 canonical=`third-live`、
-quarantine=`replacement-live`，事务互斥仍可能失效。因此 S-04 仍为**部分解决的 P1**。
-本轮没有重新审计其他 finding。
+**最终 Gate 仍未解除，不可进入下一阶段。** 原三方 intent 反例与真实 dead-intent crash
+探针都通过；但 canonical lock 的普通 acquire 仍先 `mkdir`、再非原子写 `owner.el`。A 在两步间
+暂停超过 ownerless grace 时，B 可用 intent 回收并完成 acquire；A 恢复后按旧 pathname 覆写
+B 的 owner，postcheck 又看不到已释放的 intent。确定性交错得到 `outer=t nested=t`，两个正常
+caller 都拿到 token。因此 S-04 仍为**部分解决的 P1**。本轮没有重新审计其他 finding。
 
 | 最终状态 | 数量 | Finding |
 |---|---:|---|
 | P0 阻断 | 0 | 无 |
 | 原 P1 已解决 | 5 | V-01、V-02、S-01、T-01、G-01 |
-| 新发现 P1 部分解决 | 1 | S-04（ABA 恢复空窗） |
+| 新发现 P1 部分解决 | 1 | S-04（canonical owner 发布 ABA） |
 | P2 已解决 | 3 | S-02、X-01、X-02 |
 | P2 部分解决 | 1 | V-03 |
 | P2（沿用上轮结论） | 2 | V-04、S-03；本轮未复核 |
@@ -60,7 +64,9 @@ quarantine=`replacement-live`，事务互斥仍可能失效。因此 S-04 仍为
 | S-04 普通孤儿锁 | 同主机 dead PID owner 可接管，locator 持久化，lock 无残留 | 已解决 |
 | S-04 两方 ABA | stale check 后把旧锁替换为有效 live-owner 锁；outer 返回 nil，新 lock 与 nonce 保留 | 已解决 |
 | S-04 inode 重用 | 相同 file-identifier 但 owner nonce 或 ownerless mtime 不同 | 均判为不同 instance |
-| S-04 恢复空窗 | outer 搬走 replacement lock 后，第三 contender 先建 canonical；restore 失败并遗留 replacement quarantine | **未解决，仍阻断** |
+| S-04 intent 三方 | competitor 接管成功，outer 返回 nil；第三方 acquire 被 intent 阻止，无 live lock/intent 残留 | 已解决 |
+| S-04 crash intent | 真实子 Emacs 发布 intent 后退出；父进程确认 owner 已死并成功 acquire | 已解决 |
+| S-04 owner 发布 | A 在 mkdir/owner 写入间超时，B 接管并 acquire，A 恢复；outer/nested 均返回 token | **未解决，仍阻断** |
 
 ## 初审独立探针摘要（修复前）
 
@@ -216,6 +222,21 @@ quarantine=`replacement-live`，事务互斥仍可能失效。因此 S-04 仍为
   `test/epub-reader-store-test.el:257-296` 没覆盖此分支。应使用 OS advisory lock、真正 CAS，或
   一个不会在 owner 校验前暴露空 canonical pathname 的共同仲裁锁，并增加三方回归。异主机
   owner 永久视作 alive 的保守策略也仍只有内联注释，公开使用共享 store 前需文档化。
+- **Gate 终审结果：部分解决，P1 未关闭。** `epub-reader-store.el:307-458` 以唯一 takeover intent 协调
+  reclaimer/acquirer：intent 先在临时目录写完整 owner，再同目录 rename 发布；acquire 在
+  `mkdir` 前后都检查 active intent，后检查命中时按 nonce 释放自己且不进入事务。原三方探针
+  得到 `competitor=t outer=nil outer-error=nil third-blocked=t third-token=nil live-count=0
+  intents=nil`，关闭 canonical 暂空时第三方进入的窗口；对应回归
+  `test/epub-reader-store-test.el:299-371` 通过。真实子 Emacs 创建 intent 后退出，父进程确认 PID
+  已死并成功 acquire，`test/epub-reader-store-test.el:373-393` 同样通过。
+
+  但 intent 没有原子化 ordinary acquire 的 owner 发布：`epub-reader-store.el:423-431` 先
+  `make-directory lock`，随后才写 owner。确定性探针让 A 在该窗口停顿并把 lock mtime 调到超过
+  grace；B 经正常 stale 判定、intent reclaim、acquire 后，A 恢复并覆写 B 的 `owner.el`，最终
+  `outer=t nested=t outer-error=nil nested-error=nil canonical-matches-outer=t`。两方均从
+  `--acquire-lock` 得到 token，违反事务互斥。应把完整 canonical owner 也通过临时目录 + 原子
+  rename 发布，或在写入前后用 directory instance/nonce 校验且绝不覆盖 replacement，并补该
+  回归。残余 P2 仍包括 dead intent 不清理造成的无界扫描，以及异主机永久保守阻塞策略。
 
 ### S-02 — P2 建议：有 schema 检查，但没有 migration 路由
 
@@ -309,21 +330,20 @@ quarantine=`replacement-live`，事务互斥仍可能失效。因此 S-04 仍为
 
 ## Standards
 
-最终 Standards 轴仍只复核 S-01/S-04。S-01 已符合 `architecture.md:246-247`：位置变化时
-冻结 timestamp，后续生命周期只 flush snapshot，未发现相关 smell。S-04 在 rename 后后验
-identity 虽防止删除 replacement，却会短暂移走活锁，使第三 contender 能取得 canonical，仍
-硬违反 `architecture.md:247` 的事务互斥。`epub-reader-store--stale-lock-p`
-(`epub-reader-store.el:302-305`) 当前无调用，是 Low Middle Man/Speculative Generality 判断项。
+Gate 终审 Standards 轴只复核 S-04。intent 的 acquire 前后检查已关闭原三 contender 空窗；
+但 `epub-reader-store.el:423-431` 的 canonical `mkdir -> owner.el` 发布仍可让两个正常 acquire
+返回 token，硬违反 `architecture.md:247` 的事务互斥。Low judgment calls：dead intent 从不
+清理会造成无界目录/扫描；`:411-456` 三处 timeout/sleep/error 逻辑属于 Duplicated Code。
 
 ## Spec
 
-最终 Spec 轴仍只复核 S-01/S-04。S-01 完整满足 dirty-old 逆序保存规格。S-04 满足普通 orphan、
-顺序 live owner、两方 ABA 与 inode 重用防护，但未保持接管全过程互斥：replacement 被搬走到
-恢复之间第三 contender 可获得 canonical。异主机 owner 永久 alive 仍只有内联注释，没有公开
-policy/回归。未发现两项之外的 scope creep。
+Gate 终审 Spec 轴只复核 S-04。三 contender intent 与 dead-intent crash 规格均满足；active
+intent 下手工写 replacement 绕过 acquire，不能算事务 owner，原严格措辞据此撤回。但 normal
+acquire 的 ownerless publication window 仍使 A/B 双方返回 token，属于 High 未满足。异主机
+dead intent 永久 active 是 Low policy 缺口。未发现 scope creep。
 
-双轴摘要：Standards 1 个 High、1 个 Low smell；Spec 1 个 High、1 个 Low policy 缺口；
-最严重项均为 S-04 的三方恢复空窗。
+双轴摘要：Standards 1 个 High、2 个 Low judgment calls；Spec 1 个 High、1 个 Low policy
+缺口；最严重项均为 S-04 的 canonical owner 发布 ABA。
 
 ## 已验证通过
 
@@ -336,6 +356,8 @@ policy/回归。未发现两项之外的 scope creep。
   接管可完成，已有有效 live owner 的顺序场景会拒绝接管。
 - 两个 reader 都移动时，先移动但后关闭的 reader 不再覆盖更新位置；两方 ABA replacement
   会按 nonce/file-identifier 被识别并恢复，inode 重用 guard 的独立比较探针通过。
+- takeover intent 能阻止原三方注入点的第三 acquire；真实死进程遗留 intent 不阻塞后续
+  canonical acquire。
 - exact 与 degraded restore 都写入 `:restore-quality` 并分别用 message/warning 提示；
   `test/epub-reader-store-test.el:73-120` 的端到端路径通过。
 - TOC 多级 flatten/fold、collapsed state、当前章节 face、跨 spine 跳转以及 `q`/重开选中行通过；
@@ -349,20 +371,20 @@ policy/回归。未发现两项之外的 scope creep。
 
 ## 测试质量
 
-实现者报告 76/76；最终复核按用户限定运行本轮两条新增 ERT，**2/2 通过**。新增测试已准确
-转化上轮 dirty-old 和两方 ABA 反例。S-04 仍漏一个决定 Gate 的后继交错：
+实现者报告 78/78；Gate 终审运行三 contender 与 dead-intent 两条新增 ERT，**2/2 通过**。
+两条测试准确覆盖 intent 三方序列化与 crash 后不阻塞；仍漏一个决定 Gate 的 normal API 交错：
 
-- `test/epub-reader-store-test.el:257-296` 验证 outer 识别 replacement 后能把它放回，但没有在
-  outer 已搬走 replacement、准备 restore 前让第三 contender 取得 canonical；也没有锁定异主机
-  orphan 的保守 policy。
+- A 在 `make-directory lock` 后、`--write-lock-owner` 前停顿超过 grace；B 回收并 acquire；A
+  恢复。应断言最多一个 token，且 A 不能覆写 B 的 owner。当前独立探针实际为 outer/nested
+  均有 token。
 
 其他测试本轮未重跑或重新评价。
 
 ## Gate 结论
 
-**Gate 未解除，不可进入下一阶段。** S-01 已关闭；唯一剩余阻断项是 S-04：接管必须在不移走
-活 canonical lock、不暴露可被第三方 `mkdir` 的空窗前提下原子绑定原 owner identity。修复后
-必须通过三 contender 回归：replacement owner 在 outer 误搬/识别期间始终保持唯一事务所有权，
-不得遗留 live lock 于 quarantine。异主机 orphan policy 应同时明确。
+**Gate 未解除，不可进入下一阶段。** S-01 已关闭；S-04 的 intent 三方空窗也已关闭，但
+canonical lock 必须以完整 owner 原子发布，或在写 owner 前后验证 directory instance/nonce 且
+绝不覆盖 replacement。修复后必须通过 owner-publication 回归：A/B 只能一个获得 token，胜者的
+owner record 不能被败者覆盖。异主机 orphan policy 和 stale-intent 清理可作为 P2 后续处理。
 
 其他 finding 本轮未复核；S-04 一个 P1 已足以维持 Gate。
