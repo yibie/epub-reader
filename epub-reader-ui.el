@@ -652,20 +652,19 @@ can make the final slices appear to overlap following content."
             (inhibit-read-only t))
         (while (< position (point-max))
           (if (get-text-property position 'epub-reader-image-slice)
-              (let* ((line-start
+              (let ((newline
                       (save-excursion
                         (goto-char position)
-                        (line-beginning-position)))
-                     (line-end
-                      (save-excursion
-                        (goto-char position)
-                        (min (point-max) (1+ (line-end-position))))))
-                ;; A non-nil zero pair explicitly overrides inherited positive
-                ;; spacing.  Numeric zero is indistinguishable from an absent
-                ;; override in some redisplay paths.
-                (add-text-properties
-                 line-start line-end '(line-spacing (0 . 0)))
-                (setq position line-end))
+                        (line-end-position))))
+                ;; Emacs defines `line-height=t' on a newline specifically for
+                ;; tiled image slices: visible contents determine line height
+                ;; and newline line-spacing is ignored.  A line-spacing text
+                ;; property can only enlarge the buffer/frame default.
+                (when (and (< newline (point-max))
+                           (= (char-after newline) ?\n))
+                  (add-text-properties newline (1+ newline) '(line-height t)))
+                (setq position
+                      (min (point-max) (1+ newline))))
             (setq position
                   (or (next-single-property-change
                        position 'epub-reader-image-slice nil (point-max))

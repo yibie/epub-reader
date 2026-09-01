@@ -163,9 +163,14 @@
                             collect position)))
               (should positions)
               (dolist (position positions)
-                (should (equal (get-text-property
-                                position 'line-spacing)
-                               '(0 . 0))))
+                (let ((newline
+                       (save-excursion
+                         (goto-char position)
+                         (line-end-position))))
+                  (should (< newline (point-max)))
+                  (should (eq (get-text-property newline 'line-height) t))
+                  (should-not
+                   (get-text-property position 'line-spacing))))
               (let ((prose
                      (cl-loop for position from (point-min) below (point-max)
                               when (and
@@ -177,7 +182,13 @@
                               return position)))
                 (should prose)
                 (should-not
-                 (get-text-property prose 'line-spacing))))))
+                 (get-text-property prose 'line-spacing))
+                (let ((newline
+                       (save-excursion
+                         (goto-char prose)
+                         (line-end-position))))
+                  (should-not
+                   (get-text-property newline 'line-height)))))))
       (set-default 'line-spacing saved-default)
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
