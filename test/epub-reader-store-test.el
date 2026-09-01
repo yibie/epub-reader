@@ -48,6 +48,79 @@
       (delete-directory directory t)
       (delete-file source))))
 
+(ert-deftest epub-reader-store-newer-staged-position-wins-across-handles ()
+  (let ((directory (make-temp-file "epub-reader-store-order-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (older (epub-reader-store-open source "book"))
+               (newer (epub-reader-store-open source "book"))
+               (old-locator
+                (epub-reader-store-test--locator
+                 "book" "a.xhtml" "id:a" 1))
+               (new-locator
+                (epub-reader-store-test--locator
+                 "book" "a.xhtml" "id:a" 14)))
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 10.0)))
+            (epub-reader-store-stage older old-locator))
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 20.0)))
+            (epub-reader-store-stage newer new-locator))
+          (epub-reader-store-flush newer)
+          (epub-reader-store-flush older)
+          (should
+           (= (epub-reader-locator-offset
+               (epub-reader-store-load-locator newer))
+              (epub-reader-locator-offset new-locator))))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-explicitly-rejects-unmigratable-schema ()
+  (let ((directory (make-temp-file "epub-reader-store-schema-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (initial (epub-reader-store-open source "book"))
+               (path (epub-reader-store-path initial)))
+          (make-directory (file-name-directory path) t)
+          (with-temp-file path (insert "(:schema 0 :books nil)\n"))
+          (let ((store (epub-reader-store-open source "book")))
+            (should (string-match-p "has no migration"
+                                    (epub-reader-store-warning store)))
+            (should-not (epub-reader-store-load-locator store))))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-lock-covers-read-merge-write-transaction ()
+  (let ((directory (make-temp-file "epub-reader-store-lock-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (store (epub-reader-store-open source "book"))
+               (path (epub-reader-store-path store))
+               (real-read (symbol-function 'epub-reader-store--read))
+               (real-write
+                (symbol-function 'epub-reader-store--write-atomic))
+               read-locked write-locked)
+          (epub-reader-store-stage
+           store (epub-reader-store-test--locator
+                  "book" "a.xhtml" "id:a" 4))
+          (cl-letf (((symbol-function 'epub-reader-store--read)
+                     (lambda (candidate)
+                       (setq read-locked
+                             (file-directory-p (concat candidate ".lock")))
+                       (funcall real-read candidate)))
+                    ((symbol-function 'epub-reader-store--write-atomic)
+                     (lambda (candidate data)
+                       (setq write-locked
+                             (file-directory-p (concat candidate ".lock")))
+                       (funcall real-write candidate data))))
+            (epub-reader-store-flush store))
+          (should read-locked)
+          (should write-locked)
+          (should-not (file-exists-p (concat path ".lock"))))
+      (delete-directory directory t)
+      (delete-file source))))
+
 (ert-deftest epub-reader-store-retains-corrupt-sidecar ()
   (let ((directory (make-temp-file "epub-reader-store-corrupt-" t))
         (source (make-temp-file "epub-reader-store-source-" nil ".epub")))

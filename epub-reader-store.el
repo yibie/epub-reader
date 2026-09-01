@@ -29,6 +29,11 @@ hashed sidecar filename below this directory."
   :type '(choice (const :tag "Beside EPUB" nil) directory)
   :group 'epub-reader-store)
 
+(defcustom epub-reader-store-lock-timeout 5.0
+  "Seconds to wait for another sidecar transaction to finish."
+  :type 'number
+  :group 'epub-reader-store)
+
 (define-error 'epub-reader-store-error
   "Could not read or write EPUB progress" 'error)
 
@@ -70,6 +75,25 @@ hashed sidecar filename below this directory."
             (list (format "Invalid or unsupported EPUB sidecar: %s" path))))
   data)
 
+(defun epub-reader-store--decode-data (data path)
+  "Validate or explicitly reject versioned sidecar DATA from PATH."
+  (let ((schema (and (listp data) (plist-get data :schema))))
+    (cond
+     ((not (integerp schema))
+      (signal 'epub-reader-store-error
+              (list (format "Invalid EPUB sidecar schema: %s" path))))
+     ((= schema epub-reader-store--schema)
+      (epub-reader-store--validate-data data path))
+     ((< schema epub-reader-store--schema)
+      (signal 'epub-reader-store-error
+              (list (format
+                     "Legacy EPUB sidecar schema %d has no migration: %s"
+                     schema path))))
+     (t
+      (signal 'epub-reader-store-error
+              (list (format "Newer EPUB sidecar schema %d is unsupported: %s"
+                            schema path)))))))
+
 (defun epub-reader-store--read (path)
   "Read and validate sidecar PATH, or return an empty value when absent."
   (if (not (file-exists-p path))
@@ -81,7 +105,7 @@ hashed sidecar filename below this directory."
             (skip-chars-forward " \t\r\n")
             (unless (eobp)
               (error "Trailing sidecar data"))
-            (epub-reader-store--validate-data data path)))
+            (epub-reader-store--decode-data data path)))
       (epub-reader-store-error (signal (car error-data) (cdr error-data)))
       (error
        (signal 'epub-reader-store-error
@@ -126,8 +150,48 @@ handle's warning; reading may continue without saved progress."
                  (epub-reader-store-book-key store))
     (signal 'epub-reader-store-error
             '("Locator belongs to another EPUB identity")))
-  (setf (epub-reader-store-pending store) locator)
+  (setf (epub-reader-store-pending store)
+        (list :updated (float-time)
+              :locator (epub-reader-locator-to-plist locator)))
   store)
+
+(defun epub-reader-store--acquire-lock (path)
+  "Acquire and return the sidecar transaction lock directory for PATH."
+  (let* ((lock (concat path ".lock"))
+         (deadline (+ (float-time) epub-reader-store-lock-timeout))
+         acquired)
+    (make-directory (file-name-directory path) t)
+    (while (not acquired)
+      (condition-case error-data
+          (progn
+            ;; Directory creation is the portable cross-process exclusive
+            ;; operation; only its owner may enter read/merge/write.
+            (make-directory lock)
+            (setq acquired t))
+        (file-already-exists
+         (when (>= (float-time) deadline)
+           (signal 'epub-reader-store-error
+                   (list (format "Timed out waiting for EPUB sidecar lock: %s"
+                                 lock))))
+         (sleep-for 0.01))
+        (error (signal (car error-data) (cdr error-data)))))
+    lock))
+
+(defun epub-reader-store--call-with-lock (path function)
+  "Call FUNCTION while holding PATH's read/merge/write transaction lock."
+  (let ((lock (epub-reader-store--acquire-lock path))
+        result primary-error cleanup-error)
+    (unwind-protect
+        (condition-case error-data
+            (setq result (funcall function))
+          (error (setq primary-error error-data)))
+      (condition-case error-data
+          (delete-directory lock)
+        (error (setq cleanup-error error-data))))
+    (cond
+     (primary-error (signal (car primary-error) (cdr primary-error)))
+     (cleanup-error (signal (car cleanup-error) (cdr cleanup-error)))
+     (t result))))
 
 (defun epub-reader-store--write-atomic (path data)
   "Atomically replace PATH with printable sidecar DATA."
@@ -160,19 +224,25 @@ handle's warning; reading may continue without saved progress."
       (when (epub-reader-store-warning store)
         (signal 'epub-reader-store-error
                 (list (epub-reader-store-warning store))))
-      (let* ((path (epub-reader-store-path store))
-             (data (epub-reader-store--read path))
-             (book-key (epub-reader-store-book-key store))
-             (books (copy-tree (plist-get data :books)))
-             (record
-              (list :updated (float-time)
-                    :locator (epub-reader-locator-to-plist pending)))
-             (existing (assoc book-key books)))
-        (if existing
-            (setcdr existing record)
-          (push (cons book-key record) books))
-        (setq data (plist-put data :books books))
-        (epub-reader-store--write-atomic path data)
+      (let ((path (epub-reader-store-path store))
+            (book-key (epub-reader-store-book-key store)))
+        (epub-reader-store--call-with-lock
+         path
+         (lambda ()
+           (let* ((data (epub-reader-store--read path))
+                  (books (copy-tree (plist-get data :books)))
+                  (existing (assoc book-key books))
+                  (existing-updated
+                   (and existing (plist-get (cdr existing) :updated))))
+             ;; Capture time belongs to the user position, not flush order.
+             ;; A late close from an older buffer must not move progress back.
+             (when (or (null existing)
+                       (> (plist-get pending :updated) existing-updated))
+               (if existing
+                   (setcdr existing pending)
+                 (push (cons book-key pending) books))
+               (setq data (plist-put data :books books))
+               (epub-reader-store--write-atomic path data)))))
         (setf (epub-reader-store-pending store) nil))))
   store)
 
