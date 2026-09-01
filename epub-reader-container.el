@@ -85,8 +85,9 @@
 
 (cl-defstruct (epub-reader-container
                (:constructor epub-reader-container--create))
-  "An extracted EPUB archive owned by the caller."
-  source root adapter closed-p)
+  "A lazily materialized EPUB archive owned by the caller."
+  source root adapter entry-table materialized materializing
+  materialized-bytes closed-p)
 
 (cl-defstruct (epub-reader-container-entry
                (:constructor epub-reader-container-entry--create))
@@ -489,9 +490,105 @@ Signal before writing a chunk that would cross an actual byte or time limit."
         (epub-reader-container--verify-materialized-target root target))))
   root)
 
+(defun epub-reader-container--entry-table (entries)
+  "Return an exact-name lookup table for validated ENTRIES."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (entry entries table)
+      (puthash (epub-reader-container-entry-name entry) entry table))))
+
+(defun epub-reader-container--live-entry (container relative-path)
+  "Return live CONTAINER's metadata entry for RELATIVE-PATH or signal."
+  (when (epub-reader-container-closed-p container)
+    (signal 'epub-reader-container-error '("EPUB container is closed")))
+  (epub-reader-container--validate-entry relative-path)
+  (or (gethash relative-path
+               (epub-reader-container-entry-table container))
+      (signal 'epub-reader-container-error
+              (list (format "Archive member is missing: %S"
+                            relative-path)))))
+
+;;;###autoload
+(defun epub-reader-container-member-p (container relative-path)
+  "Return non-nil when live CONTAINER contains RELATIVE-PATH."
+  (when (epub-reader-container-closed-p container)
+    (signal 'epub-reader-container-error '("EPUB container is closed")))
+  (epub-reader-container--validate-entry relative-path)
+  (and (gethash relative-path
+                (epub-reader-container-entry-table container))
+       t))
+
+;;;###autoload
+(defun epub-reader-container-member-size (container relative-path)
+  "Return RELATIVE-PATH's declared uncompressed size in live CONTAINER."
+  (epub-reader-container-entry-size
+   (epub-reader-container--live-entry container relative-path)))
+
+;;;###autoload
+(defun epub-reader-container-materialize-member (container relative-path)
+  "Materialize RELATIVE-PATH from CONTAINER once and return its local path.
+The member was already path- and size-checked during central-directory
+preflight.  Actual bytes are streamed into a private same-directory file and
+published only after all per-member and cumulative limits pass."
+  (let* ((entry (epub-reader-container--live-entry container relative-path))
+         (materialized (epub-reader-container-materialized container))
+         (cached (gethash relative-path materialized))
+         (root (epub-reader-container-root container))
+         (target (epub-reader-container--target root relative-path)))
+    (cond
+     ((epub-reader-container-entry-directory-p entry)
+      (signal 'epub-reader-container-error
+              (list (format "Cannot materialize directory member: %S"
+                            relative-path))))
+     (cached
+      (unless (and (equal cached target) (file-regular-p cached))
+        (signal 'epub-reader-container-error
+                (list (format "Materialized member cache was altered: %S"
+                              relative-path))))
+      (epub-reader-container--verify-materialized-target root cached)
+      cached)
+     ((gethash relative-path
+               (epub-reader-container-materializing container))
+      (signal 'epub-reader-container-error
+              (list (format "Recursive materialization of archive member: %S"
+                            relative-path))))
+     (t
+      (make-directory (file-name-directory target) t)
+      (let* ((temporary
+              (make-temp-file
+               (expand-file-name
+                (concat "." (file-name-nondirectory target) ".part-")
+                (file-name-directory target))))
+             (total-counter
+              (list (epub-reader-container-materialized-bytes container)))
+             succeeded)
+        (puthash relative-path t
+                 (epub-reader-container-materializing container))
+        (unwind-protect
+            (progn
+              (epub-reader-container--stream-member
+               (epub-reader-container-adapter container)
+               (epub-reader-container-source container)
+               entry temporary total-counter)
+              (epub-reader-container--verify-materialized-target
+               root temporary)
+              ;; A non-overwriting same-directory rename publishes only a
+              ;; complete member and makes concurrent/reentrant losers fail.
+              (rename-file temporary target)
+              (setq temporary nil
+                    succeeded t)
+              (puthash relative-path target materialized)
+              (setf (epub-reader-container-materialized-bytes container)
+                    (car total-counter))
+              target)
+          (remhash relative-path
+                   (epub-reader-container-materializing container))
+          (unless succeeded
+            (when (and temporary (file-exists-p temporary))
+              (delete-file temporary)))))))))
+
 ;;;###autoload
 (defun epub-reader-container-open (file)
-  "Safely extract EPUB FILE and return an `epub-reader-container'.
+  "Safely open EPUB FILE and return a lazy `epub-reader-container'.
 The caller must eventually call `epub-reader-container-close'."
   (let ((archive (expand-file-name file)))
     (unless (file-readable-p archive)
@@ -500,17 +597,29 @@ The caller must eventually call `epub-reader-container-close'."
           (adapter (epub-reader-container--choose-adapter))
           succeeded)
       (unwind-protect
-          (let ((entries (epub-reader-container--preflight archive)))
-            (epub-reader-container--extract adapter archive root entries)
+          (let* ((entries (epub-reader-container--preflight archive))
+                 (container
+                  (epub-reader-container--create
+                   :source archive :root root :adapter adapter
+                   :entry-table (epub-reader-container--entry-table entries)
+                   :materialized (make-hash-table :test #'equal)
+                   :materializing (make-hash-table :test #'equal)
+                   :materialized-bytes 0 :closed-p nil)))
+            ;; These two members are the only format bootstrap required before
+            ;; the publication layer can discover the OPF path.
+            (epub-reader-container-materialize-member container "mimetype")
+            (epub-reader-container-materialize-member
+             container "META-INF/container.xml")
             (setq succeeded t)
-            (epub-reader-container--create
-             :source archive :root root :adapter adapter :closed-p nil))
+            container)
         (unless succeeded
           (when (file-directory-p root)
             (ignore-errors (delete-directory root t))))))))
 
 (defun epub-reader-container-path (container relative-path)
-  "Return extracted path for RELATIVE-PATH inside live CONTAINER."
+  "Return the safe target path for RELATIVE-PATH inside live CONTAINER.
+This function does not materialize the member.  Use
+`epub-reader-container-materialize-member' when bytes are required."
   (when (epub-reader-container-closed-p container)
     (signal 'epub-reader-container-error '("EPUB container is closed")))
   (epub-reader-container--validate-entry relative-path)

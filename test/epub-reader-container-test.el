@@ -9,6 +9,45 @@
 (require 'epub-reader-container)
 (require 'epub-reader-test-helper)
 
+(ert-deftest epub-reader-container-open-materializes-only-bootstrap-members ()
+  (let ((container
+         (epub-reader-container-open
+          (epub-reader-test-fixture "epub2.epub"))))
+    (unwind-protect
+        (progn
+          (should
+           (equal (epub-reader-test-materialized-files container)
+                  '("META-INF/container.xml" "mimetype")))
+          (should (= (epub-reader-container-member-size
+                      container "OEBPS/chapter1.xhtml")
+                     437))
+          (should-not
+           (file-exists-p
+            (epub-reader-container-path container "OEBPS/chapter1.xhtml"))))
+      (epub-reader-container-close container))))
+
+(ert-deftest epub-reader-container-materialize-member-is-cached ()
+  (let ((container
+         (epub-reader-container-open
+          (epub-reader-test-fixture "epub2.epub")))
+        (real-stream (symbol-function 'epub-reader-container--stream-member))
+        (calls 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'epub-reader-container--stream-member)
+                   (lambda (&rest arguments)
+                     (setq calls (1+ calls))
+                     (apply real-stream arguments))))
+          (let ((first
+                 (epub-reader-container-materialize-member
+                  container "OEBPS/chapter1.xhtml"))
+                (second
+                 (epub-reader-container-materialize-member
+                  container "OEBPS/chapter1.xhtml")))
+            (should (equal first second))
+            (should (file-readable-p first))
+            (should (= calls 1))))
+      (epub-reader-container-close container))))
+
 (ert-deftest epub-reader-container-opens-and-cleans-up ()
   (let* ((container
           (epub-reader-container-open
@@ -61,7 +100,7 @@
                      (epub-reader-test-fixture "epub3.epub")))
               (should (eq (epub-reader-container-adapter container) adapter))
               (should (file-exists-p
-                       (epub-reader-container-path
+                       (epub-reader-container-materialize-member
                         container "EPUB/package.opf"))))
           (when container
             (epub-reader-container-close container)))))))

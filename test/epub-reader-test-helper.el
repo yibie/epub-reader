@@ -16,5 +16,13 @@
   (expand-file-name name
                     (expand-file-name "fixtures" epub-reader-test--directory)))
 
+(defun epub-reader-test-materialized-files (container)
+  "Return sorted archive-relative files materialized for CONTAINER."
+  (let ((root (epub-reader-container-root container)))
+    (sort
+     (mapcar (lambda (file) (file-relative-name file root))
+             (directory-files-recursively root "." nil))
+     #'string<)))
+
 (provide 'epub-reader-test-helper)
 ;;; epub-reader-test-helper.el ends here

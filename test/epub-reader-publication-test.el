@@ -39,6 +39,29 @@
                      "OEBPS/chapter1.xhtml"))
       (should (equal (epub-reader-toc-entry-fragment (car toc)) "first")))))
 
+(ert-deftest epub-reader-publication-lazily-materializes-spine-resources ()
+  (epub-reader-publication-test--with "epub2.epub" publication
+    (let* ((container (epub-reader-publication-container publication))
+           (root (epub-reader-container-root container))
+           (first
+            (epub-reader-publication-spine-resource publication 0)))
+      (should
+       (equal (epub-reader-test-materialized-files container)
+              '("META-INF/container.xml" "OEBPS/content.opf"
+                "OEBPS/toc.ncx" "mimetype")))
+      (should (= (epub-reader-resource-size first) 437))
+      (should-not (file-exists-p
+                   (expand-file-name "OEBPS/chapter1.xhtml" root)))
+      (should-not (file-exists-p
+                   (expand-file-name "OEBPS/chapter2.xhtml" root)))
+      (let ((section
+             (epub-reader-publication-load-section publication 0)))
+        (should (epub-reader-section-p section))
+        (should (file-readable-p
+                 (expand-file-name "OEBPS/chapter1.xhtml" root)))
+        (should-not (file-exists-p
+                     (expand-file-name "OEBPS/chapter2.xhtml" root)))))))
+
 (ert-deftest epub-reader-publication-parses-epub3-nav-and-linearity ()
   (epub-reader-publication-test--with "epub3.epub" publication
     (should (equal (epub-reader-publication-version publication) "3.0"))
@@ -120,10 +143,11 @@
 
 (ert-deftest epub-reader-publication-resolves-local-and-external-hrefs ()
   (epub-reader-publication-test--with "epub2.epub" publication
-    (let ((target
-           (epub-reader-publication-resolve-href
-            publication "OEBPS/chapter1.xhtml"
-            "chapter2.xhtml#second")))
+    (let* ((section
+            (epub-reader-publication-load-section publication 0))
+           (target
+            (epub-reader-publication-resolve-resource
+             publication section "chapter2.xhtml#second")))
       (should-not (epub-reader-link-target-external-p target))
       (should (equal (epub-reader-link-target-path target)
                      "OEBPS/chapter2.xhtml"))
@@ -285,8 +309,9 @@
     (let* ((section
             (epub-reader-publication-load-section publication 0))
            (target
-            (epub-reader-publication-resolve-resource
-             publication section "target.xhtml#base-target")))
+            (epub-reader-publication-resolve-href
+             publication (epub-reader-section-base-path section)
+             "target.xhtml#base-target")))
       (should (epub-reader-section-p section))
       (should (equal (epub-reader-section-path section)
                      "EPUB/text/a b.xhtml"))

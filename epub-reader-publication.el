@@ -30,7 +30,7 @@
 (cl-defstruct (epub-reader-resource
                (:constructor epub-reader-resource--create))
   "One OPF manifest resource."
-  id href path file uri remote-p media-type properties)
+  id href path file size uri remote-p media-type properties)
 
 (cl-defstruct (epub-reader-spine-item
                (:constructor epub-reader-spine-item--create))
@@ -475,7 +475,8 @@ key, but is not interpreted as a path."
 (defun epub-reader-publication--package-path (container)
   "Return the OPF package path declared by CONTAINER."
   (let* ((container-path
-          (epub-reader-container-path container "META-INF/container.xml")))
+          (epub-reader-container-materialize-member
+           container "META-INF/container.xml")))
     (unless (file-readable-p container-path)
       (signal 'epub-reader-publication-error
               '("EPUB has no META-INF/container.xml")))
@@ -580,7 +581,12 @@ key, but is not interpreted as a path."
          id
          (epub-reader-resource--create
           :id id :href href :path path
-          :file (and path (epub-reader-link-target-file target))
+          :file nil
+          :size (and path
+                     (epub-reader-container-member-p
+                      (epub-reader-publication-container publication) path)
+                     (epub-reader-container-member-size
+                      (epub-reader-publication-container publication) path))
           :uri (and remote-p (epub-reader-link-target-uri target))
           :remote-p remote-p
           :media-type media-type
@@ -589,8 +595,8 @@ key, but is not interpreted as a path."
          table)))
     table))
 
-(defun epub-reader-publication--spine (package manifest)
-  "Parse PACKAGE spine using MANIFEST and return an ordered vector."
+(defun epub-reader-publication--spine (publication package manifest)
+  "Parse PACKAGE spine for PUBLICATION using MANIFEST."
   (let ((spine
          (epub-reader-publication--child
           package "spine" epub-reader-publication--opf-namespace))
@@ -611,7 +617,9 @@ key, but is not interpreted as a path."
           (signal 'epub-reader-publication-error
                   (list (format "Remote spine resources are unsupported: %s"
                                 (epub-reader-resource-uri resource)))))
-        (unless (file-readable-p (epub-reader-resource-file resource))
+        (unless (epub-reader-container-member-p
+                 (epub-reader-publication-container publication)
+                 (epub-reader-resource-path resource))
           (signal 'epub-reader-publication-error
                   (list (format "Spine resource is missing: %s"
                                 (epub-reader-resource-path resource)))))
@@ -674,9 +682,11 @@ key, but is not interpreted as a path."
          (toc-id (and spine
                       (epub-reader-publication--attribute spine "toc")))
          (resource (and toc-id (gethash toc-id manifest))))
-    (when (and resource (file-readable-p (epub-reader-resource-file resource)))
-      (let* ((root (epub-reader-publication--parse-file
-                    (epub-reader-resource-file resource)))
+    (let ((file (and resource
+                     (epub-reader-publication--materialize-manifest-resource
+                      publication resource))))
+      (when file
+        (let* ((root (epub-reader-publication--parse-file file))
              (nav-map
               (and (epub-reader-publication--qname-p
                     (car root) epub-reader-publication--ncx-namespace "ncx")
@@ -688,7 +698,8 @@ key, but is not interpreted as a path."
                  (epub-reader-publication--ncx-point
                   publication (epub-reader-resource-path resource) point))
                (epub-reader-publication--children
-                nav-map "navPoint" epub-reader-publication--ncx-namespace)))))))
+                nav-map "navPoint"
+                epub-reader-publication--ncx-namespace))))))))
 
 (defun epub-reader-publication--nav-label (node)
   "Return accessible label text for EPUB navigation NODE."
@@ -741,10 +752,11 @@ key, but is not interpreted as a path."
        (when (member "nav" (epub-reader-resource-properties resource))
          (setq nav-resource resource)))
      manifest)
-    (when (and nav-resource
-               (file-readable-p (epub-reader-resource-file nav-resource)))
-      (let* ((root (epub-reader-publication--parse-file
-                    (epub-reader-resource-file nav-resource)))
+    (let ((file (and nav-resource
+                     (epub-reader-publication--materialize-manifest-resource
+                      publication nav-resource))))
+      (when file
+        (let* ((root (epub-reader-publication--parse-file file))
              (nav
               (cl-find-if
                (lambda (candidate)
@@ -765,11 +777,28 @@ key, but is not interpreted as a path."
                  (epub-reader-publication--nav-li
                   publication (epub-reader-resource-path nav-resource) li))
                (epub-reader-publication--children
-                list-node "li" epub-reader-publication--xhtml-namespace)))))))
+                list-node "li"
+                epub-reader-publication--xhtml-namespace))))))))
+
+(defun epub-reader-publication--materialize-manifest-resource
+    (publication resource)
+  "Materialize local manifest RESOURCE in PUBLICATION, or return nil."
+  (when (and resource
+             (not (epub-reader-resource-remote-p resource))
+             (epub-reader-container-member-p
+              (epub-reader-publication-container publication)
+              (epub-reader-resource-path resource)))
+    (let ((file
+           (epub-reader-container-materialize-member
+            (epub-reader-publication-container publication)
+            (epub-reader-resource-path resource))))
+      (setf (epub-reader-resource-file resource) file)
+      file)))
 
 (defun epub-reader-publication--check-mimetype (container)
   "Require the canonical EPUB mimetype member in CONTAINER."
-  (let ((file (epub-reader-container-path container "mimetype")))
+  (let ((file
+         (epub-reader-container-materialize-member container "mimetype")))
     (unless (and (file-readable-p file)
                  (with-temp-buffer
                    (set-buffer-multibyte nil)
@@ -782,7 +811,8 @@ key, but is not interpreted as a path."
   "Parse live CONTAINER and return a publication owning it."
   (epub-reader-publication--check-mimetype container)
   (let* ((opf-path (epub-reader-publication--package-path container))
-         (opf-file (epub-reader-container-path container opf-path)))
+         (opf-file
+          (epub-reader-container-materialize-member container opf-path)))
     (unless (file-readable-p opf-file)
       (signal 'epub-reader-publication-error
               (list (format "Package document is missing: %s" opf-path))))
@@ -830,7 +860,8 @@ key, but is not interpreted as a path."
              :closed-p nil))
            (manifest
             (epub-reader-publication--manifest publication package))
-           (spine (epub-reader-publication--spine package manifest)))
+           (spine
+            (epub-reader-publication--spine publication package manifest)))
       (setf (epub-reader-publication-manifest publication) manifest
             (epub-reader-publication-spine publication) spine
             (epub-reader-publication-toc publication)
@@ -886,7 +917,9 @@ container paths, XML parsing, and the XHTML `base' element."
     (when (epub-reader-resource-remote-p resource)
       (signal 'epub-reader-publication-error
               '("Cannot parse a remote spine section")))
-    (let ((file (epub-reader-resource-file resource)))
+    (let ((file
+           (epub-reader-publication--materialize-manifest-resource
+            publication resource)))
       (unless (and file (file-readable-p file))
         (signal 'epub-reader-publication-error
                 (list (format "Spine section is missing: %s"
@@ -924,11 +957,18 @@ container paths, XML parsing, and the XHTML `base' element."
          :document document)))))
 
 (defun epub-reader-publication-resolve-resource (publication section href)
-  "Resolve HREF relative to parsed SECTION in PUBLICATION."
+  "Resolve and materialize HREF relative to SECTION in PUBLICATION."
   (unless (epub-reader-section-p section)
     (signal 'wrong-type-argument (list 'epub-reader-section-p section)))
-  (epub-reader-publication-resolve-href
-   publication (epub-reader-section-base-path section) href))
+  (let ((target
+         (epub-reader-publication-resolve-href
+          publication (epub-reader-section-base-path section) href)))
+    (unless (epub-reader-link-target-external-p target)
+      (setf (epub-reader-link-target-file target)
+            (epub-reader-container-materialize-member
+             (epub-reader-publication-container publication)
+             (epub-reader-link-target-path target))))
+    target))
 
 (provide 'epub-reader-publication)
 ;;; epub-reader-publication.el ends here
