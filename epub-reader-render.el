@@ -169,34 +169,42 @@
       ((not (epub-reader-render--element-p child)) "")
       (t
        (let* ((tag (epub-reader-render--local-name child))
-              (text (epub-reader-render--inline child)))
-         (pcase tag
-           ((or "em" "i")
-            (epub-reader-render--add-face
-             text 'epub-reader-emphasis-face))
-           ((or "strong" "b")
-            (epub-reader-render--add-face
-             text 'epub-reader-strong-face))
-           ("code"
-            (epub-reader-render--add-face text 'epub-reader-code-face))
-           ("a"
-            (let ((href (epub-reader-render--attribute child "href"))
-                  (result (epub-reader-render--add-face
-                           text 'epub-reader-link-face)))
-              (when (and href (> (length result) 0))
-                (add-text-properties
-                 0 (length result)
-                 (list 'epub-reader-href href
-                       'help-echo href
-                       'mouse-face 'highlight
-                       'follow-link t
-                       'keymap epub-reader-render-link-map)
-                 result))
-              result))
-           ("br" "\n")
-           ("img" "")
-           ((or "ul" "ol" "table") "")
-           (_ text))))))
+              (text (epub-reader-render--inline child))
+              (rendered
+               (pcase tag
+                 ((or "em" "i")
+                  (epub-reader-render--add-face
+                   text 'epub-reader-emphasis-face))
+                 ((or "strong" "b")
+                  (epub-reader-render--add-face
+                   text 'epub-reader-strong-face))
+                 ("code"
+                  (epub-reader-render--add-face text 'epub-reader-code-face))
+                 ("a"
+                  (let ((href (epub-reader-render--attribute child "href"))
+                        (result (epub-reader-render--add-face
+                                 text 'epub-reader-link-face)))
+                    (when (and href (> (length result) 0))
+                      (add-text-properties
+                       0 (length result)
+                       (list 'epub-reader-href href
+                             'help-echo href
+                             'mouse-face 'highlight
+                             'follow-link t
+                             'keymap epub-reader-render-link-map)
+                       result))
+                    result))
+                 ("br" "\n")
+                 ((or "img" "image") "")
+                 ((or "ul" "ol" "table") "")
+                 (_ text)))
+              (id (epub-reader-render--attribute child "id")))
+         (when id
+           (if (string-empty-p rendered)
+               (setq rendered (propertize "\u2060" 'display ""))
+             (setq rendered (copy-sequence rendered)))
+           (put-text-property 0 1 'epub-reader-anchor-id id rendered))
+         rendered))))
    (cddr node) ""))
 
 (defun epub-reader-render--normalize-inline (string)
@@ -267,14 +275,19 @@
     (let* ((document-path (epub-reader-resource-path resource))
            (root (epub-reader-render--document-dom resource))
            (body (or (epub-reader-render--descendant root "body") root))
-           (counter 0)
            blocks)
       (cl-labels
-          ((emit (kind node text &optional level image-file image-alt)
-             (unless (string-empty-p text)
-               (let* ((id (epub-reader-render--attribute node "id"))
-                      (key (format "b%05d%s" counter
-                                   (if id (concat ":" id) "")))
+          ((emit (kind node text path &optional level image-file image-alt)
+             (let* ((id (epub-reader-render--attribute node "id"))
+                    (anchor-text
+                     (if (string-empty-p text)
+                         (propertize "\u2060" 'display "")
+                       (copy-sequence text)))
+                    (_anchor-property
+                     (when id
+                       (put-text-property
+                        0 1 'epub-reader-anchor-id id anchor-text)))
+                    (key (if id (concat "id:" id) (concat "path:" path)))
                       (face
                        (pcase kind
                          ('heading (epub-reader-render--heading-face level))
@@ -284,21 +297,27 @@
                          (_ 'epub-reader-prose-face)))
                       (attributed
                        (epub-reader-locator-attach-source
-                        (epub-reader-render--add-face text face)
+                        (epub-reader-render--add-face anchor-text face)
                         document-path key)))
-                 (cl-incf counter)
-                 (push
-                  (epub-reader-block--create
-                   :key key :kind kind :text attributed
-                   :document-path document-path :element-id id :level level
-                   :image-file image-file :image-alt image-alt)
-                  blocks))))
-           (emit-image (node)
+               (push
+                (epub-reader-block--create
+                 :key key :kind kind :text attributed
+                 :document-path document-path :element-id id :level level
+                 :image-file image-file :image-alt image-alt)
+                blocks)))
+           (emit-image (node path)
              (pcase-let ((`(,file ,alt)
                            (epub-reader-render--image-data
                             publication document-path node)))
-               (emit 'image node (format "[%s]" alt) nil file alt)))
-           (walk (node &optional context)
+               (emit 'image node (format "[%s]" alt) path nil file alt)))
+           (walk-children (node context path)
+             (cl-loop
+              for child in (epub-reader-render--children node)
+              for index from 0
+              do (walk child context
+                       (format "%s/%d:%s" path index
+                               (epub-reader-render--local-name child)))))
+           (walk (node context path)
              (let ((tag (epub-reader-render--local-name node)))
                (cond
                 ((string-match-p "\\`h[1-6]\\'" tag)
@@ -306,47 +325,54 @@
                    (emit 'heading node
                          (epub-reader-render--normalize-inline
                           (epub-reader-render--inline node))
-                         level)))
+                         path level)))
                 ((equal tag "p")
                  (emit (or context 'paragraph) node
                        (epub-reader-render--normalize-inline
-                        (epub-reader-render--inline node)))
+                        (epub-reader-render--inline node)) path)
                  (dolist (image (epub-reader-render--descendants node "img"))
-                   (emit-image image)))
+                   (emit-image image (concat path "/image"))))
                 ((equal tag "blockquote")
-                 (dolist (child (epub-reader-render--children node))
-                   (walk child 'quote)))
+                 (when (epub-reader-render--attribute node "id")
+                   (emit 'anchor node "" path))
+                 (walk-children node 'quote path))
                 ((equal tag "pre")
                  (emit 'code node
                        (string-trim-right
-                        (epub-reader-render--raw-text node))))
+                        (epub-reader-render--raw-text node)) path))
                 ((member tag '("ul" "ol"))
-                 (dolist (child (epub-reader-render--children node "li"))
-                   (walk child 'list-item)))
+                 (walk-children node 'list-item path))
                 ((equal tag "li")
                  (emit (or context 'list-item) node
                        (epub-reader-render--normalize-inline
-                        (epub-reader-render--inline node)))
-                 (dolist (child (epub-reader-render--children node))
-                   (when (member (epub-reader-render--local-name child)
-                                 '("ul" "ol"))
-                     (walk child))))
-                ((member tag '("img" "image")) (emit-image node))
+                        (epub-reader-render--inline node)) path)
+                 (cl-loop
+                  for child in (epub-reader-render--children node)
+                  for index from 0
+                  when (member (epub-reader-render--local-name child)
+                               '("ul" "ol"))
+                  do (walk child nil
+                           (format "%s/%d:%s" path index
+                                   (epub-reader-render--local-name child)))))
+                ((member tag '("img" "image")) (emit-image node path))
                 ((equal tag "figure")
+                 (when (epub-reader-render--attribute node "id")
+                   (emit 'anchor node "" path))
                  (dolist (image (epub-reader-render--descendants node "img"))
-                   (emit-image image))
+                   (emit-image image (concat path "/image")))
                  (dolist (caption
                           (epub-reader-render--children node "figcaption"))
                    (emit 'paragraph caption
                          (epub-reader-render--normalize-inline
-                          (epub-reader-render--inline caption)))))
+                          (epub-reader-render--inline caption))
+                         (concat path "/caption"))))
                 ((equal tag "table")
-                 (emit 'code node (epub-reader-render--table-text node)))
+                 (emit 'code node (epub-reader-render--table-text node) path))
                 (t
-                 (dolist (child (epub-reader-render--children node))
-                   (walk child context)))))))
-        (dolist (child (epub-reader-render--children body))
-          (walk child)))
+                 (when (epub-reader-render--attribute node "id")
+                   (emit 'anchor node "" path))
+                 (walk-children node context path))))))
+        (walk-children body nil "body"))
       (nreverse blocks))))
 
 (defun epub-reader-render--text-element (value)
@@ -370,7 +396,16 @@
      (epub-reader-render--text-element
       (concat "• " (epub-reader-block-text block))))
     ('image
-     (let ((caption
+     (let* ((source
+             (get-text-property 0 'epub-reader-source
+                                (epub-reader-block-text block)))
+            (image-alt (copy-sequence (epub-reader-block-text block)))
+            (_image-anchor
+             (when source
+               (put-text-property
+                0 (length image-alt) 'epub-reader-image-anchor
+                (cons source epub-reader-image-rows) image-alt)))
+            (caption
             (epub-reader-render--text-element
              (epub-reader-block-text block))))
        (if (epub-reader-block-image-file block)
@@ -380,7 +415,7 @@
                   (list :type :image
                         :file (epub-reader-block-image-file block)
                         :rows epub-reader-image-rows
-                        :alt (epub-reader-block-image-alt block)
+                        :alt image-alt
                         :layout '(:min-width 12 :grow 1))
                   caption))
          caption)))

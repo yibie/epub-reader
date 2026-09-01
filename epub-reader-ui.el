@@ -59,7 +59,8 @@
 
 (defun epub-reader-ui--spacer (width)
   "Return a fixed native spacer element of WIDTH cells."
-  (list :type 'item :format "%v" :value (make-string width ?\s)
+  (list :type 'item :format "%v"
+        :value (propertize (make-string width ?\s) 'epub-reader-chrome t)
         :layout (list :width width)))
 
 (defun epub-reader-ui--header (publication index)
@@ -71,13 +72,15 @@
            (format "%s  ·  %d/%d"
                    (epub-reader-publication-title publication)
                    (1+ index) count)
-           'face 'epub-reader-header-face))))
+           'face 'epub-reader-header-face
+           'epub-reader-chrome t))))
 
 (defun epub-reader-ui--footer ()
   "Return the first-release reader key hint."
   (list :type :text
-        :value (propertize "n 下一章  ·  p 上一章  ·  RET 打开链接  ·  q 关闭"
-                          'face 'epub-reader-footer-face)))
+        :value (propertize
+                "n 下一章  ·  p 上一章  ·  RET 打开链接  ·  q 关闭"
+                'face 'epub-reader-footer-face 'epub-reader-chrome t)))
 
 (defun epub-reader-ui-frame (available-width)
   "Return the complete reader frame for AVAILABLE-WIDTH."
@@ -100,6 +103,10 @@
                  (epub-reader-render-blocks blocks)
                  (list (epub-reader-ui--footer)))))
          children)
+    (textui-effect
+     'epub-reader-image-locators (list index available-width)
+     (lambda ()
+       (epub-reader-locator-tag-image-runs (current-buffer))))
     (when (> left 0)
       (push (epub-reader-ui--spacer left) children))
     (push column children)
@@ -128,10 +135,12 @@
           (suffix (concat ":" fragment))
           found)
       (while (and (< position (point-max)) (not found))
-        (let ((source (get-text-property position 'epub-reader-source)))
+        (let ((source (get-text-property position 'epub-reader-source))
+              (anchor (get-text-property position 'epub-reader-anchor-id)))
           (when (and (epub-reader-locator-source-p source)
                      (equal (aref source 0) path)
-                     (string-suffix-p suffix (aref source 1)))
+                     (or (equal anchor fragment)
+                         (string-suffix-p suffix (aref source 1))))
             (setq found position)))
         (unless found
           (setq position

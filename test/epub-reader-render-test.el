@@ -113,5 +113,89 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest epub-reader-locator-chooses-nearest-source-not-scan-order ()
+  (with-temp-buffer
+    (insert (epub-reader-locator-attach-source "前" "chapter.xhtml" "before"))
+    (insert "\n\n\n\n\n\n\n\n\n\n")
+    (insert (epub-reader-locator-attach-source "后" "chapter.xhtml" "after"))
+    (let ((locator (epub-reader-locator-at-point 0 3)))
+      (should locator)
+      (should (equal (epub-reader-locator-block locator) "before")))
+    (goto-char 2)
+    (insert (propertize "chrome" 'epub-reader-chrome t))
+    (should-not (epub-reader-locator-at-point 0 3)))
+  (with-temp-buffer
+    (insert (epub-reader-locator-attach-source "甲" "chapter.xhtml" "same"))
+    (insert "\u200b")
+    (insert (epub-reader-locator-attach-source "乙" "chapter.xhtml" "same"))
+    (let ((locator (epub-reader-locator-at-point 0 2)))
+      (should (= (epub-reader-locator-offset locator) 0)))))
+
+(ert-deftest epub-reader-render-preserves-empty-and-inline-id-anchors ()
+  (let ((publication
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "epub3-edge.epub"))))
+    (unwind-protect
+        (let* ((blocks (epub-reader-render-chapter publication 0))
+               (empty
+                (cl-find "empty-block" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+               (container
+                (cl-find "container-target" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+               (page
+                (cl-find "page-1" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+               (inline
+                (cl-find-if
+                 (lambda (block)
+                   (cl-loop for position from 0
+                            below (length (epub-reader-block-text block))
+                            thereis
+                            (equal
+                             (get-text-property
+                              position 'epub-reader-anchor-id
+                              (epub-reader-block-text block))
+                             "inline-target")))
+                 blocks)))
+          (dolist (block (list empty container page inline))
+            (should block)
+            (should (epub-reader-locator-source-p
+                     (get-text-property
+                      0 'epub-reader-source
+                      (epub-reader-block-text block)))))
+          (should (equal (epub-reader-block-key empty) "id:empty-block"))
+          (should (equal
+                   (get-text-property
+                    0 'epub-reader-anchor-id (epub-reader-block-text page))
+                   "page-1")))
+      (epub-reader-publication-close publication))))
+
+(ert-deftest epub-reader-locator-reports-degraded-resolution-quality ()
+  (with-temp-buffer
+    (insert (epub-reader-locator-attach-source
+             "Alpha target Omega" "chapter.xhtml" "old-block"))
+    (let ((locator (epub-reader-locator-at-point 0 8)))
+      (erase-buffer)
+      (insert (epub-reader-locator-attach-source
+               "Alpha target Omega" "chapter.xhtml" "new-block"))
+      (let ((resolution (epub-reader-locator-resolve locator)))
+        (should (eq (epub-reader-locator-resolution-quality resolution)
+                    'quote-in-spine))
+        (should (epub-reader-locator-resolution-position resolution)))
+      (setf (epub-reader-locator-block locator) "new-block"
+            (epub-reader-locator-offset locator) 999)
+      (should
+       (eq (epub-reader-locator-resolution-quality
+            (epub-reader-locator-resolve locator))
+           'quote-near-block))
+      (setf (epub-reader-locator-prefix locator) "missing"
+            (epub-reader-locator-suffix locator) "quote"
+            (epub-reader-locator-block locator) "missing-block")
+      (should
+       (eq (epub-reader-locator-resolution-quality
+            (epub-reader-locator-resolve locator))
+           'spine-start)))))
+
 (provide 'epub-reader-render-test)
 ;;; epub-reader-render-test.el ends here

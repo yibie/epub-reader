@@ -67,5 +67,50 @@
         (should (equal (aref source 0) "OEBPS/chapter2.xhtml"))
         (should (string-suffix-p ":second" (aref source 1)))))))
 
+(ert-deftest epub-reader-ui-tags-every-rendered-image-row-with-source ()
+  (epub-reader-ui-test--with-reader _buffer
+    (epub-reader-next-chapter)
+    (let ((positions
+           (cl-loop for position from (point-min) below (point-max)
+                    when (get-text-property position
+                                            'epub-reader-image-slice)
+                    collect position)))
+      (should positions)
+      (goto-char (nth (/ (length positions) 2) positions))
+      (let ((locator (epub-reader-locator-at-point 1)))
+        (should locator)
+        (should
+         (equal
+          (epub-reader-locator-block locator)
+          (epub-reader-block-key
+           (cl-find 'image (plist-get textui-state :blocks)
+                    :key #'epub-reader-block-kind))))))))
+
+(ert-deftest epub-reader-ui-chrome-does-not-produce-reading-locator ()
+  (epub-reader-ui-test--with-reader _buffer
+    (let ((chrome
+           (cl-loop for position from (point-min) below (point-max)
+                    when (get-text-property position 'epub-reader-chrome)
+                    return position)))
+      (should chrome)
+      (should-not (epub-reader-locator-at-point 0 chrome)))))
+
+(ert-deftest epub-reader-ui-resolves-empty-container-and-inline-fragments ()
+  (let ((buffer
+         (epub-reader-open (epub-reader-test-fixture "epub3-edge.epub"))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (dolist (fragment '("empty-block" "container-target"
+                              "inline-target" "page-1"))
+            (let ((position
+                   (epub-reader-ui--fragment-position
+                    "EPUB/text/a b.xhtml" fragment)))
+              (should position)
+              (should (equal (get-text-property
+                              position 'epub-reader-anchor-id)
+                             fragment)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (provide 'epub-reader-ui-test)
 ;;; epub-reader-ui-test.el ends here
