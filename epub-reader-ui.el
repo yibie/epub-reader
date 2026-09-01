@@ -57,11 +57,22 @@ A single larger block is still materialized by itself."
   "Face for the reader key-hint footer."
   :group 'epub-reader)
 
+(defface epub-reader-toc-current-face
+  '((t (:inherit highlight :weight bold)))
+  "Face for the current spine entry in the TOC buffer."
+  :group 'epub-reader)
+
+(defface epub-reader-toc-group-face
+  '((t (:inherit font-lock-keyword-face :weight semibold)))
+  "Face for collapsible TOC groups."
+  :group 'epub-reader)
+
 (cl-defstruct (epub-reader-session
                (:constructor epub-reader-session--create))
   "Non-UI state owned by one reader buffer."
   publication section blocks block-index anchor-index dom-cache store
-  refreshing-p producer-block-count)
+  refreshing-p producer-block-count history-back history-forward toc-buffer
+  spine-weights total-weight)
 
 (cl-defstruct (epub-reader-chapter-data
                (:constructor epub-reader-chapter-data--create))
@@ -78,15 +89,37 @@ A single larger block is still materialized by itself."
   "Semantic point plus all live window viewport records."
   point-locator viewports)
 
+(cl-defstruct (epub-reader-toc-row
+               (:constructor epub-reader-toc-row--create))
+  "One flattened visible TOC row."
+  key entry depth expanded-p current-p)
+
 (defvar-local epub-reader-ui--session nil
   "Domain session owned by the current EPUB reader buffer.")
+
+(defvar-local epub-reader-toc--reader-buffer nil
+  "Reader buffer controlled by the current TOC TextUI buffer.")
 
 (defvar-keymap epub-reader-ui-mode-map
   :doc "Keymap active in EPUB reader TextUI buffers."
   "n" #'epub-reader-next-chapter
+  "]" #'epub-reader-next-chapter
   "p" #'epub-reader-previous-chapter
+  "[" #'epub-reader-previous-chapter
+  "SPC" #'epub-reader-scroll-forward
+  "S-SPC" #'epub-reader-scroll-backward
+  "b" #'epub-reader-history-back
+  "f" #'epub-reader-history-forward
+  "t" #'epub-reader-toc
+  "g" #'epub-reader-jump
   "RET" #'epub-reader-follow-link
   "q" #'epub-reader-quit)
+
+(defvar-keymap epub-reader-toc-mode-map
+  :doc "Keymap active in EPUB TOC TextUI buffers."
+  "RET" #'epub-reader-toc-activate
+  "TAB" #'epub-reader-toc-toggle
+  "q" #'quit-window)
 
 (defvar epub-reader-ui-link-map
   (let ((map (make-sparse-keymap)))
@@ -107,6 +140,13 @@ A single larger block is still materialized by itself."
                   #'epub-reader-ui--maybe-shift-chunk nil t))
     (remove-hook 'post-command-hook
                  #'epub-reader-ui--maybe-shift-chunk t)))
+
+(define-minor-mode epub-reader-toc-mode
+  "Minor mode for the secondary EPUB table-of-contents buffer."
+  :init-value nil
+  :lighter " EPUB-TOC"
+  :keymap epub-reader-toc-mode-map
+  (setq-local truncate-lines t))
 
 (defun epub-reader-ui--state-value (key)
   "Return KEY from the current reader's TextUI state."
@@ -222,6 +262,70 @@ A single larger block is still materialized by itself."
     (setq next (plist-put next :chunk-start start))
     (plist-put next :chunk-end end)))
 
+(defun epub-reader-ui--spine-weights (publication)
+  "Return resource-size weights for PUBLICATION's reading spine."
+  (vconcat
+   (cl-loop for item across (epub-reader-publication-spine publication)
+            for resource = (epub-reader-spine-item-resource item)
+            for file = (epub-reader-resource-file resource)
+            collect (max 1 (or (and file
+                                    (file-attribute-size
+                                     (file-attributes file 'string)))
+                               1)))))
+
+(defun epub-reader-ui--current-locator ()
+  "Return the current semantic locator, or nil outside chapter content."
+  (epub-reader-locator-at-point
+   (epub-reader-ui--state-value :spine-index)))
+
+(defun epub-reader-ui--record-history ()
+  "Push the current semantic position onto back history."
+  (let* ((session (epub-reader-ui--current-session))
+         (locator (epub-reader-ui--current-locator)))
+    (when locator
+      (setf (epub-reader-session-history-back session)
+            (cons locator (epub-reader-session-history-back session))
+            (epub-reader-session-history-forward session) nil))))
+
+(defun epub-reader-ui--chapter-title ()
+  "Return a readable title for the current chapter."
+  (let ((blocks
+         (epub-reader-session-blocks (epub-reader-ui--current-session))))
+    (or (cl-loop for block across blocks
+                 when (eq (epub-reader-block-kind block) 'heading)
+                 return (string-trim
+                         (substring-no-properties
+                          (epub-reader-block-text block))))
+        (format "Chapter %d" (1+ (epub-reader-ui--state-value :spine-index))))))
+
+(defun epub-reader-ui--progress-percent ()
+  "Return weighted whole-book progress for point in the current buffer."
+  (let* ((session (epub-reader-ui--current-session))
+         (weights (epub-reader-session-spine-weights session))
+         (total (max 1 (or (epub-reader-session-total-weight session) 1)))
+         (spine-index (epub-reader-ui--state-value :spine-index))
+         (blocks (epub-reader-session-blocks session))
+         (locator (epub-reader-ui--current-locator))
+         (block-index
+          (or (and locator
+                   (gethash (epub-reader-locator-block locator)
+                            (epub-reader-session-block-index session)))
+              0))
+         (local (/ (float block-index) (max 1 (length blocks))))
+         (before (cl-loop for index below spine-index
+                          sum (aref weights index)))
+         (current (aref weights spine-index)))
+    (* 100.0 (/ (+ before (* current local)) total))))
+
+(defun epub-reader-ui--header-line ()
+  "Return book, chapter, and weighted progression for `header-line-format'."
+  (let* ((session (epub-reader-ui--current-session))
+         (publication (epub-reader-session-publication session)))
+    (format " %s  ·  %s  ·  %.1f%% "
+            (epub-reader-publication-title publication)
+            (epub-reader-ui--chapter-title)
+            (epub-reader-ui--progress-percent))))
+
 (defun epub-reader-ui--spacer (width)
   "Return a fixed native spacer element of WIDTH cells."
   (list :type 'item :format "%v"
@@ -244,7 +348,7 @@ A single larger block is still materialized by itself."
   "Return the first-release reader key hint."
   (list :type :text
         :value (propertize
-                "n 下一章  ·  p 上一章  ·  RET 打开链接  ·  q 关闭"
+                "SPC 翻页  ·  n/p 换章  ·  b/f 历史  ·  t 目录  ·  g 跳转"
                 'face 'epub-reader-footer-face 'epub-reader-chrome t)))
 
 (defun epub-reader-ui--centered-column (available-width children &optional gap)
@@ -530,7 +634,45 @@ A single larger block is still materialized by itself."
     (goto-char position)
     (epub-reader-ui--recenter-visible-windows)))
 
-(defun epub-reader-ui--switch-chapter (index &optional fragment)
+(defun epub-reader-ui--goto-block-index (block-index &optional at-end)
+  "Move to semantic BLOCK-INDEX, optionally to its last source character."
+  (let* ((session (epub-reader-ui--current-session))
+         (block (aref (epub-reader-session-blocks session) block-index))
+         (key (epub-reader-block-key block)))
+    (epub-reader-ui--ensure-block-visible block-index)
+    (let ((position
+           (if at-end
+               (cl-loop for candidate downfrom (1- (point-max)) to (point-min)
+                        for source = (get-text-property
+                                      candidate 'epub-reader-source)
+                        when (and (epub-reader-locator-source-p source)
+                                  (equal (aref source 1) key))
+                        return candidate)
+             (let ((position (point-min)) found)
+               (while (and (< position (point-max)) (not found))
+                 (let ((source
+                        (get-text-property position 'epub-reader-source)))
+                   (when (and (epub-reader-locator-source-p source)
+                              (equal (aref source 1) key))
+                     (setq found position)))
+                 (unless found (setq position (1+ position))))
+               found))))
+      (when position
+        (goto-char position)
+        (epub-reader-ui--recenter-visible-windows))
+      position)))
+
+(defun epub-reader-ui--refresh-toc-buffer ()
+  "Refresh the session TOC buffer while preserving its selected row."
+  (let ((toc-buffer
+         (epub-reader-session-toc-buffer
+          (epub-reader-ui--current-session))))
+    (when (buffer-live-p toc-buffer)
+      (with-current-buffer toc-buffer
+        (epub-reader-toc--refresh)))))
+
+(defun epub-reader-ui--switch-chapter
+    (index &optional fragment no-history at-end)
   "Synchronously switch the current reader to spine INDEX and FRAGMENT."
   (let* ((buffer (current-buffer))
          (session (epub-reader-ui--current-session))
@@ -538,6 +680,8 @@ A single larger block is still materialized by itself."
          (count (length (epub-reader-publication-spine publication))))
     (unless (and (>= index 0) (< index count))
       (user-error "No chapter in that direction"))
+    (unless no-history
+      (epub-reader-ui--record-history))
     (let* ((_chapter (epub-reader-ui--load-chapter session index))
            (target (or (and fragment
                             (gethash
@@ -555,7 +699,12 @@ A single larger block is still materialized by itself."
            (epub-reader-ui--state-with-chunk
             next (car range) (cadr range)))))
       (textui-refresh buffer)
-      (epub-reader-ui--goto-start fragment)
+      (if at-end
+          (epub-reader-ui--goto-block-index
+           (1- (length (epub-reader-session-blocks session))) t)
+        (epub-reader-ui--goto-start fragment))
+      (epub-reader-ui--refresh-toc-buffer)
+      (force-mode-line-update t)
       buffer)))
 
 (defun epub-reader-next-chapter ()
@@ -569,6 +718,91 @@ A single larger block is still materialized by itself."
   (interactive)
   (epub-reader-ui--switch-chapter
    (1- (epub-reader-ui--state-value :spine-index))))
+
+(defun epub-reader-ui--goto-locator (locator)
+  "Navigate to persisted LOCATOR without adding another history entry."
+  (let* ((session (epub-reader-ui--current-session))
+         (publication (epub-reader-session-publication session))
+         (index
+          (epub-reader-ui--spine-index-for-path
+           publication (epub-reader-locator-path locator))))
+    (unless index
+      (user-error "History target is no longer in the reading spine"))
+    (unless (= index (epub-reader-ui--state-value :spine-index))
+      (epub-reader-ui--switch-chapter index nil t))
+    (let ((block-index
+           (gethash (epub-reader-locator-block locator)
+                    (epub-reader-session-block-index session))))
+      (when block-index
+        (epub-reader-ui--ensure-block-visible block-index)))
+    (let ((resolution (epub-reader-locator-goto locator)))
+      (unless (epub-reader-locator-resolution-position resolution)
+        (user-error "History position could not be restored"))
+      (epub-reader-ui--recenter-visible-windows)
+      resolution)))
+
+(defun epub-reader-history-back ()
+  "Return to the previous semantic navigation position."
+  (interactive)
+  (let* ((session (epub-reader-ui--current-session))
+         (stack (epub-reader-session-history-back session)))
+    (unless stack (user-error "No earlier EPUB location"))
+    (let ((current (epub-reader-ui--current-locator))
+          (target (car stack)))
+      (setf (epub-reader-session-history-back session) (cdr stack))
+      (when current
+        (push current (epub-reader-session-history-forward session)))
+      (epub-reader-ui--goto-locator target))))
+
+(defun epub-reader-history-forward ()
+  "Move forward after `epub-reader-history-back'."
+  (interactive)
+  (let* ((session (epub-reader-ui--current-session))
+         (stack (epub-reader-session-history-forward session)))
+    (unless stack (user-error "No later EPUB location"))
+    (let ((current (epub-reader-ui--current-locator))
+          (target (car stack)))
+      (setf (epub-reader-session-history-forward session) (cdr stack))
+      (when current
+        (push current (epub-reader-session-history-back session)))
+      (epub-reader-ui--goto-locator target))))
+
+(defun epub-reader-scroll-forward ()
+  "Scroll forward, shifting chunks or advancing at chapter end."
+  (interactive)
+  (condition-case nil
+      (scroll-up-command)
+    (end-of-buffer
+     (let* ((session (epub-reader-ui--current-session))
+            (blocks (epub-reader-session-blocks session))
+            (end (plist-get textui-state :chunk-end))
+            (index (epub-reader-ui--state-value :spine-index))
+            (count (length
+                    (epub-reader-publication-spine
+                     (epub-reader-session-publication session)))))
+       (cond
+        ((< end (length blocks))
+         (epub-reader-ui--goto-block-index end))
+        ((< (1+ index) count)
+         (epub-reader-ui--switch-chapter (1+ index)))
+        (t (user-error "End of publication"))))))
+  (epub-reader-ui--maybe-shift-chunk))
+
+(defun epub-reader-scroll-backward ()
+  "Scroll backward, shifting chunks or moving to the previous chapter end."
+  (interactive)
+  (condition-case nil
+      (scroll-down-command)
+    (beginning-of-buffer
+     (let ((start (plist-get textui-state :chunk-start))
+           (index (epub-reader-ui--state-value :spine-index)))
+       (cond
+        ((> start 0)
+         (epub-reader-ui--goto-block-index (1- start) t))
+        ((> index 0)
+         (epub-reader-ui--switch-chapter (1- index) nil nil t))
+        (t (user-error "Beginning of publication"))))))
+  (epub-reader-ui--maybe-shift-chunk))
 
 (defun epub-reader-ui--href-at-point ()
   "Return EPUB href text property at or immediately before point."
@@ -585,6 +819,198 @@ A single larger block is still materialized by itself."
                   (epub-reader-spine-item-resource item))
                  path)
            return index))
+
+(defun epub-reader-ui--jump-to-target (path fragment)
+  "Navigate current reader to spine PATH and optional FRAGMENT."
+  (let* ((session (epub-reader-ui--current-session))
+         (publication (epub-reader-session-publication session))
+         (index (epub-reader-ui--spine-index-for-path publication path)))
+    (unless index
+      (user-error "TOC target is not in the reading spine: %s" path))
+    (if (= index (epub-reader-ui--state-value :spine-index))
+        (progn
+          (epub-reader-ui--record-history)
+          (epub-reader-ui--goto-start fragment))
+      (epub-reader-ui--switch-chapter index fragment))))
+
+(defun epub-reader-toc--reader-session ()
+  "Return the live reader session controlled by the current TOC buffer."
+  (unless (buffer-live-p epub-reader-toc--reader-buffer)
+    (user-error "The EPUB reader buffer has been closed"))
+  (with-current-buffer epub-reader-toc--reader-buffer
+    (epub-reader-ui--current-session)))
+
+(defun epub-reader-toc--rows
+    (entries collapsed current-path &optional prefix depth)
+  "Flatten visible ENTRIES using COLLAPSED keys and CURRENT-PATH."
+  (let ((depth (or depth 0))
+        rows)
+    (cl-loop
+     for entry in entries
+     for index from 0
+     for key = (if prefix (format "%s/%d" prefix index)
+                 (number-to-string index))
+     for children = (epub-reader-toc-entry-children entry)
+     for collapsed-p = (member key collapsed)
+     do (push
+         (epub-reader-toc-row--create
+          :key key :entry entry :depth depth
+          :expanded-p (and children (not collapsed-p))
+          :current-p (and (epub-reader-toc-entry-path entry)
+                          (equal (epub-reader-toc-entry-path entry)
+                                 current-path)))
+         rows)
+     when (and children (not collapsed-p))
+     do (setq rows
+              (nconc
+               (nreverse
+                (epub-reader-toc--rows
+                 children collapsed current-path key (1+ depth)))
+               rows)))
+    (nreverse rows)))
+
+(defun epub-reader-toc--row-element (row)
+  "Return one TextUI text element for TOC ROW."
+  (let* ((entry (epub-reader-toc-row-entry row))
+         (children (epub-reader-toc-entry-children entry))
+         (disclosure (cond ((not children) "  ")
+                           ((epub-reader-toc-row-expanded-p row) "▾ ")
+                           (t "▸ ")))
+         (current (if (epub-reader-toc-row-current-p row) "▶ " "  "))
+         (value
+          (propertize
+           (format "%s%s%s%s" current
+                   (make-string (* 2 (epub-reader-toc-row-depth row)) ?\s)
+                   disclosure (epub-reader-toc-entry-label entry))
+           'epub-reader-toc-row row
+           'epub-reader-toc-key (epub-reader-toc-row-key row)
+           'face (cond ((epub-reader-toc-row-current-p row)
+                        'epub-reader-toc-current-face)
+                       ((and children
+                             (not (epub-reader-toc-entry-path entry)))
+                        'epub-reader-toc-group-face)
+                       (t 'default))
+           'mouse-face 'highlight
+           'help-echo (if (epub-reader-toc-entry-path entry)
+                          "RET: jump; TAB: fold"
+                        "RET/TAB: fold"))))
+    (list :type :text :value value)))
+
+(defun epub-reader-toc-frame (_available-width)
+  "Return the secondary TextUI table-of-contents frame."
+  (let* ((session (epub-reader-toc--reader-session))
+         (publication (epub-reader-session-publication session))
+         (current-path (epub-reader-section-path
+                        (epub-reader-session-section session)))
+         (rows
+          (epub-reader-toc--rows
+           (epub-reader-publication-toc publication)
+           (plist-get textui-state :collapsed) current-path)))
+    (list
+     (list :type :flex :direction :column :gap 0
+           :children (mapcar #'epub-reader-toc--row-element rows)))))
+
+(defun epub-reader-toc--row-at-point ()
+  "Return the TOC row at or immediately before point."
+  (or (get-text-property (point) 'epub-reader-toc-row)
+      (and (> (point) (point-min))
+           (get-text-property (1- (point)) 'epub-reader-toc-row))))
+
+(defun epub-reader-toc--key-position (key)
+  "Return buffer position of visible TOC row KEY."
+  (cl-loop for position from (point-min) below (point-max)
+           when (equal (get-text-property position 'epub-reader-toc-key) key)
+           return position))
+
+(defun epub-reader-toc--refresh ()
+  "Refresh current TOC and preserve point by stable row key."
+  (let* ((row (epub-reader-toc--row-at-point))
+         (key (and row (epub-reader-toc-row-key row))))
+    (textui-refresh (current-buffer))
+    (when key
+      (let ((position (epub-reader-toc--key-position key)))
+        (when position (goto-char position))))))
+
+(defun epub-reader-toc-toggle ()
+  "Toggle the TOC subtree at point."
+  (interactive)
+  (let* ((row (epub-reader-toc--row-at-point))
+         (entry (and row (epub-reader-toc-row-entry row))))
+    (unless (and row (epub-reader-toc-entry-children entry))
+      (user-error "TOC entry has no children"))
+    (let* ((key (epub-reader-toc-row-key row))
+           (collapsed (copy-sequence (plist-get textui-state :collapsed))))
+      (setq textui-state
+            (plist-put
+             (copy-sequence textui-state) :collapsed
+             (if (member key collapsed)
+                 (delete key collapsed)
+               (cons key collapsed))))
+      (epub-reader-toc--refresh))))
+
+(defun epub-reader-toc-activate ()
+  "Jump to the TOC target at point, or fold a targetless group."
+  (interactive)
+  (let* ((row (epub-reader-toc--row-at-point))
+         (entry (and row (epub-reader-toc-row-entry row))))
+    (unless row (user-error "No TOC entry at point"))
+    (if (not (epub-reader-toc-entry-path entry))
+        (epub-reader-toc-toggle)
+      (with-current-buffer epub-reader-toc--reader-buffer
+        (epub-reader-ui--jump-to-target
+         (epub-reader-toc-entry-path entry)
+         (epub-reader-toc-entry-fragment entry))))))
+
+(defun epub-reader-toc ()
+  "Display this reader's hierarchical TextUI table of contents."
+  (interactive)
+  (let* ((reader (current-buffer))
+         (session (epub-reader-ui--current-session))
+         (existing (epub-reader-session-toc-buffer session)))
+    (if (buffer-live-p existing)
+        (progn (display-buffer existing) existing)
+      (let* ((epub-reader-toc--reader-buffer reader)
+            (buffer
+             (textui-open
+              (generate-new-buffer-name
+               (format "*EPUB TOC: %s*"
+                       (epub-reader-publication-title
+                        (epub-reader-session-publication session))))
+              #'epub-reader-toc-frame '(:collapsed nil))))
+        (with-current-buffer buffer
+          (setq-local epub-reader-toc--reader-buffer reader)
+          (epub-reader-toc-mode 1))
+        (setf (epub-reader-session-toc-buffer session) buffer)
+        (display-buffer buffer '(display-buffer-in-side-window
+                                 (side . left) (window-width . 34)))
+        buffer))))
+
+(defun epub-reader-ui--completion-entries (entries &optional prefix)
+  "Return flattened completion alist for target-bearing ENTRIES."
+  (cl-mapcan
+   (lambda (entry)
+     (let* ((label (epub-reader-toc-entry-label entry))
+            (qualified (if prefix (format "%s / %s" prefix label) label)))
+       (append
+        (and (epub-reader-toc-entry-path entry)
+             (list (cons qualified entry)))
+        (epub-reader-ui--completion-entries
+         (epub-reader-toc-entry-children entry) qualified))))
+   entries))
+
+(defun epub-reader-jump ()
+  "Jump to an EPUB TOC/title target using `completing-read'."
+  (interactive)
+  (let* ((publication
+          (epub-reader-session-publication (epub-reader-ui--current-session)))
+         (entries
+          (epub-reader-ui--completion-entries
+           (epub-reader-publication-toc publication)))
+         (choice (completing-read "EPUB target: " entries nil t))
+         (entry (cdr (assoc choice entries))))
+    (epub-reader-ui--jump-to-target
+     (epub-reader-toc-entry-path entry)
+     (epub-reader-toc-entry-fragment entry))))
 
 (defun epub-reader-follow-link ()
   "Follow the EPUB hyperlink at point."
@@ -608,7 +1034,8 @@ A single larger block is still materialized by itself."
             (user-error "Linked document is not in the reading spine: %s"
                         (epub-reader-link-target-path target)))
           (if (= index current-index)
-              (let* ((block-index
+              (let* ((_history (epub-reader-ui--record-history))
+                     (block-index
                       (and (epub-reader-link-target-fragment target)
                            (gethash
                             (epub-reader-link-target-fragment target)
@@ -647,12 +1074,16 @@ A single larger block is still materialized by itself."
     (unwind-protect
         (progn
           (setq publication (epub-reader-publication-open file))
-          (let* ((_session
+          (let* ((weights (epub-reader-ui--spine-weights publication))
+                 (_session
                   (setq session
                         (epub-reader-session--create
                          :publication publication
                          :dom-cache (make-hash-table :test #'equal)
-                         :store nil)))
+                         :store nil :history-back nil :history-forward nil
+                         :spine-weights weights
+                         :total-weight
+                         (cl-loop for weight across weights sum weight))))
                  (_chapter (epub-reader-ui--load-chapter session 0))
                  (range
                   (epub-reader-ui--chunk-range
@@ -675,11 +1106,19 @@ A single larger block is still materialized by itself."
             (setq-local epub-reader-ui--session session)
             (epub-reader-ui-mode 1)
             (setq-local buffer-file-name nil)
+            (setq-local header-line-format
+                        '(:eval (epub-reader-ui--header-line)))
             (setq-local default-directory
                         (file-name-directory (expand-file-name file))))
           (textui-register-cleanup
-           buffer (lambda ()
-                    (epub-reader-publication-close publication)))
+           buffer
+           (lambda ()
+             (let ((toc-buffer
+                    (and session
+                         (epub-reader-session-toc-buffer session))))
+               (when (buffer-live-p toc-buffer)
+                 (kill-buffer toc-buffer)))
+             (epub-reader-publication-close publication)))
           (with-current-buffer buffer
             (epub-reader-ui--goto-start))
           (setq succeeded t)

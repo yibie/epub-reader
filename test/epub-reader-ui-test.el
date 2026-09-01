@@ -313,5 +313,103 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest epub-reader-ui-history-back-and-forward-use-locators ()
+  (epub-reader-ui-test--with-reader _buffer
+    (let ((origin (epub-reader-ui--current-locator)))
+      (epub-reader-next-chapter)
+      (let ((destination (epub-reader-ui--current-locator)))
+        (should (= (plist-get textui-state :spine-index) 1))
+        (epub-reader-history-back)
+        (should (= (plist-get textui-state :spine-index) 0))
+        (should (equal (epub-reader-locator-path
+                        (epub-reader-ui--current-locator))
+                       (epub-reader-locator-path origin)))
+        (epub-reader-history-forward)
+        (should (= (plist-get textui-state :spine-index) 1))
+        (should (equal (epub-reader-locator-path
+                        (epub-reader-ui--current-locator))
+                       (epub-reader-locator-path destination)))))))
+
+(ert-deftest epub-reader-ui-scroll-crosses-chapter-boundaries ()
+  (epub-reader-ui-test--with-reader _buffer
+    (goto-char (point-max))
+    (cl-letf (((symbol-function 'scroll-up-command)
+               (lambda (&rest _arguments) (signal 'end-of-buffer nil))))
+      (epub-reader-scroll-forward))
+    (should (= (plist-get textui-state :spine-index) 1))
+    (goto-char (point-min))
+    (cl-letf (((symbol-function 'scroll-down-command)
+               (lambda (&rest _arguments)
+                 (signal 'beginning-of-buffer nil))))
+      (epub-reader-scroll-backward))
+    (should (= (plist-get textui-state :spine-index) 0))
+    (should (equal (epub-reader-locator-path
+                    (epub-reader-ui--current-locator))
+                   "OEBPS/chapter1.xhtml"))))
+
+(ert-deftest epub-reader-ui-toc-folds-jumps-and-keeps-row-position ()
+  (let ((reader
+         (epub-reader-open (epub-reader-test-fixture "epub3-edge.epub")))
+        toc)
+    (unwind-protect
+        (progn
+          (with-current-buffer reader
+            (setq toc (epub-reader-toc)))
+          (with-current-buffer toc
+            (should epub-reader-toc-mode)
+            (should-not (plist-member textui-state :reader-buffer))
+            (goto-char (point-min))
+            (let ((key (get-text-property (point) 'epub-reader-toc-key)))
+              (should (equal key "0"))
+              (epub-reader-toc-toggle)
+              (should (equal (get-text-property
+                              (point) 'epub-reader-toc-key)
+                             key))
+              (should-not (string-match-p
+                           "章一" (buffer-substring-no-properties
+                                  (point-min) (point-max))))
+              (epub-reader-toc-toggle))
+            (let ((appendix
+                   (epub-reader-toc--key-position "0/0/0")))
+              (should appendix)
+              (goto-char appendix)
+              (epub-reader-toc-activate)))
+          (with-current-buffer reader
+            (should (equal (get-text-property
+                            (point) 'epub-reader-anchor-id)
+                           "appendix"))))
+      (when (buffer-live-p reader) (kill-buffer reader))
+      (should-not (buffer-live-p toc)))))
+
+(ert-deftest epub-reader-ui-toc-marks-current-chapter-after-cross-spine-jump ()
+  (epub-reader-ui-test--with-reader reader
+    (let ((toc (epub-reader-toc)))
+      (with-current-buffer toc
+        (let ((second (epub-reader-toc--key-position "1")))
+          (should second)
+          (goto-char second)
+          (epub-reader-toc-activate)
+          (should (equal (get-text-property
+                          (point) 'epub-reader-toc-key)
+                         "1"))
+          (should (eq (get-text-property (point) 'face)
+                      'epub-reader-toc-current-face))))
+      (with-current-buffer reader
+        (should (= (plist-get textui-state :spine-index) 1))))))
+
+(ert-deftest epub-reader-ui-completion-and-header-show-weighted-progress ()
+  (epub-reader-ui-test--with-reader _buffer
+    (let ((initial (epub-reader-ui--progress-percent))
+          (header (epub-reader-ui--header-line)))
+      (should (string-match-p "最小 EPUB 2" header))
+      (should (string-match-p "哲学从问题开始" header))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _arguments) "第二章")))
+        (epub-reader-jump))
+      (should (= (plist-get textui-state :spine-index) 1))
+      (should (> (epub-reader-ui--progress-percent) initial))
+      (should (string-match-p "第二章 图像与论证"
+                              (epub-reader-ui--header-line))))))
+
 (provide 'epub-reader-ui-test)
 ;;; epub-reader-ui-test.el ends here
