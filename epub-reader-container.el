@@ -82,12 +82,22 @@
   "EPUB archive exceeded a resource limit" 'epub-reader-unsafe-archive)
 (define-error 'epub-reader-archive-timeout
   "EPUB archive extraction timed out" 'epub-reader-archive-limit)
+(define-error 'epub-reader-archive-changed
+  "EPUB archive changed after preflight" 'epub-reader-container-error)
+(define-error 'epub-reader-materialization-busy
+  "EPUB member materialization is already in progress"
+  'epub-reader-container-error)
 
 (cl-defstruct (epub-reader-container
                (:constructor epub-reader-container--create))
   "A lazily materialized EPUB archive owned by the caller."
-  source root adapter entry-table materialized materializing
-  materialized-bytes closed-p)
+  source archive source-identity root adapter entry-table materialized
+  materializing materialized-bytes reserved-bytes coordinator-mutex closed-p)
+
+(cl-defstruct (epub-reader-container-reservation
+               (:constructor epub-reader-container-reservation--create))
+  "A cumulative extraction-budget reservation for one archive member."
+  name bytes)
 
 (cl-defstruct (epub-reader-container-entry
                (:constructor epub-reader-container-entry--create))
@@ -381,9 +391,11 @@ one character at a time also avoids context-sensitive final sigma output."
       ('bsdtar (list program "-xOf" archive name)))))
 
 (defun epub-reader-container--stream-member
-    (adapter archive entry target total-counter)
+    (adapter archive entry target total-counter &optional budget-callback)
   "Stream ENTRY from ARCHIVE to TARGET and update TOTAL-COUNTER.
-Signal before writing a chunk that would cross an actual byte or time limit."
+Signal before writing a chunk that would cross an actual byte or time limit.
+When BUDGET-CALLBACK is non-nil, call it with the prospective bytes for this
+member before writing each chunk.  It may return (ERROR-SYMBOL MESSAGE)."
   (let ((entry-bytes 0)
         (failure nil)
         (stderr-text "")
@@ -416,17 +428,23 @@ Signal before writing a chunk that would cross an actual byte or time limit."
                  :filter
                  (lambda (running chunk)
                    (unless failure
-                     (let ((next-entry (+ entry-bytes (length chunk)))
-                           (next-total (+ (car total-counter)
-                                          (length chunk))))
-                       (if (or (> next-entry
+                     (let* ((next-entry (+ entry-bytes (length chunk)))
+                            (next-total (+ (car total-counter)
+                                           (length chunk)))
+                            (budget-failure
+                             (and budget-callback
+                                  (funcall budget-callback next-entry))))
+                       (if (or budget-failure
+                               (> next-entry
                                   epub-reader-container-max-entry-bytes)
                                (> next-total
                                   epub-reader-container-max-total-bytes))
                            (progn
                              (setq failure
-                                   (list 'epub-reader-archive-limit
-                                         "Actual extraction exceeded byte limit"))
+                                   (or budget-failure
+                                       (list
+                                        'epub-reader-archive-limit
+                                        "Actual extraction exceeded byte limit")))
                              (delete-process running))
                          (let ((coding-system-for-write 'no-conversion))
                            (write-region chunk nil target t 'silent))
@@ -507,6 +525,117 @@ Signal before writing a chunk that would cross an actual byte or time limit."
               (list (format "Archive member is missing: %S"
                             relative-path)))))
 
+(defun epub-reader-container--file-identity (file)
+  "Return the preflight identity fields for FILE."
+  (let ((attributes (file-attributes file 'string)))
+    (unless attributes
+      (signal 'file-missing (list "EPUB file no longer exists" file)))
+    (list :truename (file-truename file)
+          :identifier (file-attribute-file-identifier attributes)
+          :size (file-attribute-size attributes)
+          :mtime (file-attribute-modification-time attributes))))
+
+(defun epub-reader-container--verify-source-identity (container)
+  "Reject use of CONTAINER after its external source archive changed."
+  (let ((source (epub-reader-container-source container)))
+    (condition-case error-data
+        (unless (equal (epub-reader-container-source-identity container)
+                       (epub-reader-container--file-identity source))
+          (signal 'epub-reader-archive-changed
+                  (list (format "EPUB archive changed after preflight: %s"
+                                source))))
+      (epub-reader-archive-changed
+       (signal (car error-data) (cdr error-data)))
+      (file-error
+       (signal 'epub-reader-archive-changed
+               (list (format
+                      "EPUB archive changed after preflight or disappeared: %s"
+                      source)))))))
+
+(defun epub-reader-container--cached-member (container relative-path target)
+  "Return valid cached RELATIVE-PATH at TARGET, or nil."
+  (let ((cached
+         (with-mutex (epub-reader-container-coordinator-mutex container)
+           (gethash relative-path
+                    (epub-reader-container-materialized container)))))
+    (when cached
+      (unless (and (equal cached target) (file-regular-p cached))
+        (signal 'epub-reader-container-error
+                (list (format "Materialized member cache was altered: %S"
+                              relative-path))))
+      (epub-reader-container--verify-materialized-target
+       (epub-reader-container-root container) cached)
+      cached)))
+
+(defun epub-reader-container--reserve (container relative-path entry)
+  "Atomically reserve ENTRY's declared bytes in CONTAINER."
+  (with-mutex (epub-reader-container-coordinator-mutex container)
+    (when (gethash relative-path
+                   (epub-reader-container-materializing container))
+      (signal 'epub-reader-materialization-busy
+              (list (format "Archive member is being materialized: %S"
+                            relative-path))))
+    (let* ((bytes (epub-reader-container-entry-size entry))
+           (projected (+ (epub-reader-container-materialized-bytes container)
+                         (epub-reader-container-reserved-bytes container)
+                         bytes)))
+      (when (> projected epub-reader-container-max-total-bytes)
+        (signal 'epub-reader-archive-limit
+                '("Cumulative extraction reservation exceeded byte limit")))
+      (let ((reservation
+             (epub-reader-container-reservation--create
+              :name relative-path :bytes bytes)))
+        (cl-incf (epub-reader-container-reserved-bytes container) bytes)
+        (puthash relative-path reservation
+                 (epub-reader-container-materializing container))
+        reservation))))
+
+(defun epub-reader-container--grow-reservation
+    (container reservation prospective-bytes)
+  "Grow RESERVATION to PROSPECTIVE-BYTES atomically, returning an error pair."
+  (with-mutex (epub-reader-container-coordinator-mutex container)
+    (let* ((reserved (epub-reader-container-reservation-bytes reservation))
+           (growth (max 0 (- prospective-bytes reserved)))
+           (projected (+ (epub-reader-container-materialized-bytes container)
+                         (epub-reader-container-reserved-bytes container)
+                         growth)))
+      (if (> projected epub-reader-container-max-total-bytes)
+          (list 'epub-reader-archive-limit
+                "Actual cumulative extraction exceeded byte limit")
+        (when (> growth 0)
+          (cl-incf (epub-reader-container-reserved-bytes container) growth)
+          (setf (epub-reader-container-reservation-bytes reservation)
+                prospective-bytes))
+        nil))))
+
+(defun epub-reader-container--cancel-reservation (container reservation)
+  "Release RESERVATION from CONTAINER unless it was already committed."
+  (with-mutex (epub-reader-container-coordinator-mutex container)
+    (let* ((name (epub-reader-container-reservation-name reservation))
+           (current
+            (gethash name (epub-reader-container-materializing container))))
+      (when (eq current reservation)
+        (cl-decf (epub-reader-container-reserved-bytes container)
+                 (epub-reader-container-reservation-bytes reservation))
+        (remhash name (epub-reader-container-materializing container))))))
+
+(defun epub-reader-container--commit-reservation
+    (container reservation actual-bytes target)
+  "Atomically commit RESERVATION's ACTUAL-BYTES at TARGET."
+  (with-mutex (epub-reader-container-coordinator-mutex container)
+    (let* ((name (epub-reader-container-reservation-name reservation))
+           (current
+            (gethash name (epub-reader-container-materializing container))))
+      (unless (eq current reservation)
+        (signal 'epub-reader-container-error
+                (list (format "Lost materialization reservation: %S" name))))
+      (cl-decf (epub-reader-container-reserved-bytes container)
+               (epub-reader-container-reservation-bytes reservation))
+      (cl-incf (epub-reader-container-materialized-bytes container)
+               actual-bytes)
+      (puthash name target (epub-reader-container-materialized container))
+      (remhash name (epub-reader-container-materializing container)))))
+
 ;;;###autoload
 (defun epub-reader-container-member-p (container relative-path)
   "Return non-nil when live CONTAINER contains RELATIVE-PATH."
@@ -530,81 +659,111 @@ The member was already path- and size-checked during central-directory
 preflight.  Actual bytes are streamed into a private same-directory file and
 published only after all per-member and cumulative limits pass."
   (let* ((entry (epub-reader-container--live-entry container relative-path))
-         (materialized (epub-reader-container-materialized container))
-         (cached (gethash relative-path materialized))
          (root (epub-reader-container-root container))
          (target (epub-reader-container--target root relative-path)))
-    (cond
-     ((epub-reader-container-entry-directory-p entry)
+    (when (epub-reader-container-entry-directory-p entry)
       (signal 'epub-reader-container-error
               (list (format "Cannot materialize directory member: %S"
                             relative-path))))
-     (cached
-      (unless (and (equal cached target) (file-regular-p cached))
-        (signal 'epub-reader-container-error
-                (list (format "Materialized member cache was altered: %S"
-                              relative-path))))
-      (epub-reader-container--verify-materialized-target root cached)
-      cached)
-     ((gethash relative-path
-               (epub-reader-container-materializing container))
-      (signal 'epub-reader-container-error
-              (list (format "Recursive materialization of archive member: %S"
-                            relative-path))))
-     (t
-      (make-directory (file-name-directory target) t)
-      (let* ((temporary
-              (make-temp-file
-               (expand-file-name
-                (concat "." (file-name-nondirectory target) ".part-")
-                (file-name-directory target))))
-             (total-counter
-              (list (epub-reader-container-materialized-bytes container)))
-             succeeded)
-        (puthash relative-path t
-                 (epub-reader-container-materializing container))
-        (unwind-protect
-            (progn
-              (epub-reader-container--stream-member
-               (epub-reader-container-adapter container)
-               (epub-reader-container-source container)
-               entry temporary total-counter)
-              (epub-reader-container--verify-materialized-target
-               root temporary)
-              ;; A non-overwriting same-directory rename publishes only a
-              ;; complete member and makes concurrent/reentrant losers fail.
-              (rename-file temporary target)
-              (setq temporary nil
-                    succeeded t)
-              (puthash relative-path target materialized)
-              (setf (epub-reader-container-materialized-bytes container)
-                    (car total-counter))
-              target)
-          (remhash relative-path
-                   (epub-reader-container-materializing container))
-          (unless succeeded
-            (when (and temporary (file-exists-p temporary))
-              (delete-file temporary)))))))))
+    ;; The private archive snapshot owns all bytes read by adapters.  Checking
+    ;; the public path as well makes replacement explicit instead of silently
+    ;; continuing under a stale publication identity.
+    (epub-reader-container--verify-source-identity container)
+    (or (epub-reader-container--cached-member
+         container relative-path target)
+        (let ((reservation
+               (epub-reader-container--reserve container relative-path entry)))
+          ;; A materializer may have committed between the cache check and its
+          ;; reservation attempt.  In normal Emacs event-loop use this is rare;
+          ;; a real competing thread observes the committed cache here.
+          (let ((cached
+                 (epub-reader-container--cached-member
+                  container relative-path target)))
+            (when cached
+              (epub-reader-container--cancel-reservation
+               container reservation)
+              (setq reservation nil))
+            (or cached
+                (progn
+                  (make-directory (file-name-directory target) t)
+                  (let ((temporary
+                         (make-temp-file
+                          (expand-file-name
+                           (concat "." (file-name-nondirectory target) ".part-")
+                           (file-name-directory target))))
+                        (total-counter (list 0))
+                        published succeeded)
+                    (unwind-protect
+                        (let ((actual-bytes
+                               (epub-reader-container--stream-member
+                                (epub-reader-container-adapter container)
+                                (epub-reader-container-archive container)
+                                entry temporary total-counter
+                                (lambda (prospective-bytes)
+                                  (epub-reader-container--grow-reservation
+                                   container reservation
+                                   prospective-bytes)))))
+                          (epub-reader-container--verify-materialized-target
+                           root temporary)
+                          ;; A non-overwriting same-directory rename publishes
+                          ;; only a complete member.
+                          (rename-file temporary target)
+                          (setq temporary nil
+                                published t)
+                          ;; Recheck the published object itself: validating
+                          ;; only the temporary path leaves a rename-time seam.
+                          (epub-reader-container--verify-materialized-target
+                           root target)
+                          (epub-reader-container--commit-reservation
+                           container reservation actual-bytes target)
+                          (setq reservation nil
+                                succeeded t)
+                          target)
+                      (when reservation
+                        (epub-reader-container--cancel-reservation
+                         container reservation))
+                      (unless succeeded
+                        (when (and temporary (file-exists-p temporary))
+                          (delete-file temporary))
+                        (when (and published (file-exists-p target))
+                          (delete-file target))))))))))))
 
 ;;;###autoload
 (defun epub-reader-container-open (file)
   "Safely open EPUB FILE and return a lazy `epub-reader-container'.
 The caller must eventually call `epub-reader-container-close'."
-  (let ((archive (expand-file-name file)))
-    (unless (file-readable-p archive)
-      (signal 'file-missing (list "EPUB file is not readable" archive)))
+  (let ((source (expand-file-name file)))
+    (unless (file-readable-p source)
+      (signal 'file-missing (list "EPUB file is not readable" source)))
     (let ((root (make-temp-file "epub-reader-" t))
           (adapter (epub-reader-container--choose-adapter))
           succeeded)
       (unwind-protect
-          (let* ((entries (epub-reader-container--preflight archive))
+          (let* ((source-identity
+                  (epub-reader-container--file-identity source))
+                 (archive (expand-file-name ".archive.epub" root))
+                 (_copy (copy-file source archive nil t))
+                 (_mode (set-file-modes archive #o600))
+                 (_stable
+                  (unless (equal source-identity
+                                 (epub-reader-container--file-identity source))
+                    (signal 'epub-reader-archive-changed
+                            (list (format
+                                   "EPUB archive changed while taking preflight snapshot: %s"
+                                   source)))))
+                 (entries (epub-reader-container--preflight archive))
                  (container
                   (epub-reader-container--create
-                   :source archive :root root :adapter adapter
+                   :source source :archive archive
+                   :source-identity source-identity
+                   :root root :adapter adapter
                    :entry-table (epub-reader-container--entry-table entries)
                    :materialized (make-hash-table :test #'equal)
                    :materializing (make-hash-table :test #'equal)
-                   :materialized-bytes 0 :closed-p nil)))
+                   :materialized-bytes 0 :reserved-bytes 0
+                   :coordinator-mutex
+                   (make-mutex "epub-reader-container-coordinator")
+                   :closed-p nil)))
             ;; These two members are the only format bootstrap required before
             ;; the publication layer can discover the OPF path.
             (epub-reader-container-materialize-member container "mimetype")

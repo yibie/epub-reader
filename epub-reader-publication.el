@@ -71,10 +71,15 @@ is then retained on the publication object."
 (defun epub-reader-publication--book-key (container identifier)
   "Return a durable identity for CONTAINER, with IDENTIFIER as a hint only."
   (let* ((source (file-truename (epub-reader-container-source container)))
-         (attributes (file-attributes source 'string))
+         ;; Identity bytes and metadata come from the immutable archive
+         ;; snapshot that was preflighted.  The canonical external path remains
+         ;; part of the key so moving a book still creates an independent
+         ;; reading identity, as documented by the locator contract.
+         (archive (epub-reader-container-archive container))
+         (attributes (file-attributes archive 'string))
          (size (file-attribute-size attributes))
          (mtime (file-attribute-modification-time attributes))
-         (content-hash (epub-reader-publication--content-hash source))
+         (content-hash (epub-reader-publication--content-hash archive))
          (identity
           (prin1-to-string
            (list :format 1 :identifier identifier :path source

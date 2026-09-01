@@ -48,6 +48,166 @@
             (should (= calls 1))))
       (epub-reader-container-close container))))
 
+(ert-deftest epub-reader-container-rejects-source-replacement-after-preflight ()
+  (let* ((directory (make-temp-file "epub-reader-replacement-" t))
+         (source (expand-file-name "book.epub" directory))
+         (replacement (expand-file-name "replacement.epub" directory))
+         container original-size original-mtime)
+    (unwind-protect
+        (progn
+          (copy-file
+           (epub-reader-test-fixture "shared-identifier-a.epub") source)
+          (setq original-size (file-attribute-size (file-attributes source))
+                original-mtime
+                (file-attribute-modification-time (file-attributes source))
+                container (epub-reader-container-open source))
+          (copy-file
+           (epub-reader-test-fixture "shared-identifier-b.epub") replacement)
+          (set-file-times replacement original-mtime)
+          (should (= (file-attribute-size (file-attributes replacement))
+                     original-size))
+          (rename-file replacement source t)
+          (let ((error-data
+                 (should-error
+                  (epub-reader-container-materialize-member
+                   container "OEBPS/content.opf")
+                  :type 'epub-reader-archive-changed)))
+            (should (string-match-p
+                     "changed after preflight"
+                     (error-message-string error-data))))
+          (should-not
+           (file-exists-p
+            (epub-reader-container-path container "OEBPS/content.opf"))))
+      (when container
+        (epub-reader-container-close container))
+      (delete-directory directory t))))
+
+(ert-deftest epub-reader-container-reentrant-members-commit-cumulative-bytes ()
+  (let* ((container
+          (epub-reader-container-open
+           (epub-reader-test-fixture "epub2.epub")))
+         (real-stream (symbol-function 'epub-reader-container--stream-member))
+         nested)
+    (unwind-protect
+        (cl-letf (((symbol-function 'epub-reader-container--stream-member)
+                   (lambda (adapter archive entry target total-counter
+                            &optional budget-callback)
+                     (when (and (not nested)
+                                (equal
+                                 (epub-reader-container-entry-name entry)
+                                 "OEBPS/chapter1.xhtml"))
+                       (setq nested t)
+                       (epub-reader-container-materialize-member
+                        container "OEBPS/chapter2.xhtml"))
+                     (if budget-callback
+                         (funcall real-stream adapter archive entry target
+                                  total-counter budget-callback)
+                       (funcall real-stream adapter archive entry target
+                                total-counter)))))
+          (epub-reader-container-materialize-member
+           container "OEBPS/chapter1.xhtml")
+          (let ((actual
+                 (cl-loop for file being the hash-values of
+                          (epub-reader-container-materialized container)
+                          sum (file-attribute-size
+                               (file-attributes file 'string)))))
+            (should (= (epub-reader-container-materialized-bytes container)
+                       actual))))
+      (epub-reader-container-close container))))
+
+(ert-deftest epub-reader-container-reentrant-budget-reservation-is-atomic ()
+  (let* ((container
+          (epub-reader-container-open
+           (epub-reader-test-fixture "epub2.epub")))
+         (baseline (epub-reader-container-materialized-bytes container))
+         (epub-reader-container-max-total-bytes (+ baseline 544))
+         (real-stream (symbol-function 'epub-reader-container--stream-member))
+         nested-error nested)
+    (unwind-protect
+        (cl-letf (((symbol-function 'epub-reader-container--stream-member)
+                   (lambda (adapter archive entry target total-counter
+                            &optional budget-callback)
+                     (when (and (not nested)
+                                (equal
+                                 (epub-reader-container-entry-name entry)
+                                 "OEBPS/chapter1.xhtml"))
+                       (setq nested t
+                             nested-error
+                             (should-error
+                              (epub-reader-container-materialize-member
+                               container "OEBPS/chapter2.xhtml")
+                              :type 'epub-reader-archive-limit)))
+                     (if budget-callback
+                         (funcall real-stream adapter archive entry target
+                                  total-counter budget-callback)
+                       (funcall real-stream adapter archive entry target
+                                total-counter)))))
+          (epub-reader-container-materialize-member
+           container "OEBPS/chapter1.xhtml")
+          (should nested-error)
+          (should-not
+           (file-exists-p
+            (epub-reader-container-path container "OEBPS/chapter2.xhtml")))
+          (should (= (epub-reader-container-materialized-bytes container)
+                     (+ baseline 437))))
+      (epub-reader-container-close container))))
+
+(ert-deftest epub-reader-container-reentrant-same-member-retries-winner-cache ()
+  (let* ((container
+          (epub-reader-container-open
+           (epub-reader-test-fixture "epub2.epub")))
+         (real-stream (symbol-function 'epub-reader-container--stream-member))
+         nested-error nested first)
+    (unwind-protect
+        (cl-letf (((symbol-function 'epub-reader-container--stream-member)
+                   (lambda (adapter archive entry target total-counter
+                            &optional budget-callback)
+                     (when (and (not nested)
+                                (equal
+                                 (epub-reader-container-entry-name entry)
+                                 "OEBPS/chapter1.xhtml"))
+                       (setq nested t
+                             nested-error
+                             (should-error
+                              (epub-reader-container-materialize-member
+                               container "OEBPS/chapter1.xhtml")
+                              :type 'epub-reader-materialization-busy)))
+                     (if budget-callback
+                         (funcall real-stream adapter archive entry target
+                                  total-counter budget-callback)
+                       (funcall real-stream adapter archive entry target
+                                total-counter)))))
+          (setq first
+                (epub-reader-container-materialize-member
+                 container "OEBPS/chapter1.xhtml"))
+          (should nested-error)
+          (should
+           (equal first
+                  (epub-reader-container-materialize-member
+                   container "OEBPS/chapter1.xhtml"))))
+      (epub-reader-container-close container))))
+
+(ert-deftest epub-reader-container-verifies-published-final-truename ()
+  (let* ((container
+          (epub-reader-container-open
+           (epub-reader-test-fixture "epub2.epub")))
+         (real-verify
+          (symbol-function 'epub-reader-container--verify-materialized-target))
+         (final
+          (epub-reader-container-path container "OEBPS/chapter1.xhtml"))
+         verified)
+    (unwind-protect
+        (cl-letf
+            (((symbol-function 'epub-reader-container--verify-materialized-target)
+              (lambda (root target)
+                (when (and (equal target final) (file-regular-p target))
+                  (setq verified t))
+                (funcall real-verify root target))))
+          (epub-reader-container-materialize-member
+           container "OEBPS/chapter1.xhtml")
+          (should verified))
+      (epub-reader-container-close container))))
+
 (ert-deftest epub-reader-container-opens-and-cleans-up ()
   (let* ((container
           (epub-reader-container-open
