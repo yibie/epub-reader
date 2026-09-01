@@ -521,6 +521,50 @@
       (delete-directory directory t)
       (delete-file source))))
 
+(ert-deftest epub-reader-ui-restores-frozen-v0.1.0-sidecar ()
+  (let ((directory (make-temp-file "epub-reader-v010-store-" t))
+        (source (make-temp-file "epub-reader-v010-book-" nil ".epub"))
+        (epub-reader-enable-progress t)
+        publication probe reader)
+    (copy-file (epub-reader-test-fixture "epub2.epub") source t)
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (_publication
+                (setq publication (epub-reader-publication-open source)))
+               (book-key (epub-reader-publication-book-key publication))
+               (_probe (setq probe (epub-reader-store-open source book-key)))
+               (sidecar (epub-reader-store-path probe)))
+          (epub-reader-store-close probe)
+          (setq probe nil)
+          (epub-reader-publication-close publication)
+          (setq publication nil)
+          (make-directory (file-name-directory sidecar) t)
+          ;; This file is checked in as literal 0.1.0 output.  Substitute only
+          ;; the path-dependent fingerprint; do not encode it through current
+          ;; store or locator writers.
+          (with-temp-buffer
+            (insert-file-contents
+             (epub-reader-test-fixture "v0.1.0-sidecar.el"))
+            (goto-char (point-min))
+            (while (search-forward "__BOOK_KEY__" nil t)
+              (replace-match book-key t t))
+            (write-region (point-min) (point-max) sidecar nil 'silent))
+          (setq reader (epub-reader-open source))
+          (with-current-buffer reader
+            (should (= (plist-get textui-state :spine-index) 1))
+            (should (eq (plist-get textui-state :restore-quality) 'exact))
+            (let ((locator (epub-reader-ui--current-locator)))
+              (should (equal (epub-reader-locator-path locator)
+                             "OEBPS/chapter2.xhtml"))
+              (should (equal (epub-reader-locator-block locator) "id:second"))
+              (should (= (epub-reader-locator-offset locator) 0)))
+            (should (string-match-p "44\\.5%" (epub-reader-ui--header-line)))))
+      (when (buffer-live-p reader) (kill-buffer reader))
+      (when probe (epub-reader-store-close probe))
+      (when publication (epub-reader-publication-close publication))
+      (delete-directory directory t)
+      (delete-file source))))
+
 (ert-deftest epub-reader-ui-store-saves-on-idle-chapter-and-kill ()
   (let ((directory (make-temp-file "epub-reader-ui-lifecycle-store-" t))
         (source (make-temp-file "epub-reader-ui-lifecycle-book-" nil ".epub"))
