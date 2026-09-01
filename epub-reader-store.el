@@ -304,8 +304,62 @@ handle's warning; reading may continue without saved progress."
   (let ((snapshot (epub-reader-store--lock-snapshot lock)))
     (and snapshot (epub-reader-store--stale-lock-snapshot-p snapshot))))
 
-(defun epub-reader-store--reclaim-stale-lock (lock)
-  "Atomically quarantine and remove stale LOCK, returning non-nil on success."
+(defun epub-reader-store--takeover-intent-prefix (lock)
+  "Return the unique-intent filename prefix for LOCK takeover attempts."
+  (concat lock ".takeover-"))
+
+(defun epub-reader-store--takeover-intent-paths (lock)
+  "Return takeover intent directories associated with LOCK."
+  (let* ((directory (file-name-directory lock))
+         (prefix (file-name-nondirectory
+                  (epub-reader-store--takeover-intent-prefix lock))))
+    (and (file-directory-p directory)
+         (directory-files
+          directory t (concat "\\`" (regexp-quote prefix) ".+\\'")))))
+
+(defun epub-reader-store--active-takeover-intent-p (lock)
+  "Return non-nil when a live or freshly ownerless takeover intent blocks LOCK."
+  (cl-some
+   (lambda (path)
+     (let ((snapshot (epub-reader-store--lock-snapshot path)))
+       ;; A directory being created or replaced is conservatively active.
+       (or (null snapshot)
+           (not (epub-reader-store--stale-lock-snapshot-p snapshot)))))
+   (epub-reader-store--takeover-intent-paths lock)))
+
+(defun epub-reader-store--create-takeover-intent (lock)
+  "Create and return this contender's unique takeover intent for LOCK."
+  (let* ((owner (epub-reader-store--new-lock-owner))
+         (path (concat (epub-reader-store--takeover-intent-prefix lock)
+                       (plist-get owner :nonce)))
+         (temporary
+          (make-temp-file
+           (expand-file-name
+            (concat "." (file-name-nondirectory lock) ".takeover-prep-")
+            (file-name-directory lock))
+           t)))
+    (unwind-protect
+        (progn
+          (epub-reader-store--write-lock-owner temporary owner)
+          ;; Publish a fully formed intent in one same-directory rename, so
+          ;; observers never see a live intent without verifiable ownership.
+          (rename-file temporary path)
+          (setq temporary nil)
+          (list :path path :nonce (plist-get owner :nonce)))
+      (when (and temporary (file-exists-p temporary))
+        (delete-directory temporary t)))))
+
+(defun epub-reader-store--release-lock-if-owned (token)
+  "Release TOKEN's lock only if its nonce still owns the canonical pathname."
+  (let* ((path (plist-get token :path))
+         (owner (epub-reader-store--read-lock-owner path)))
+    (when (and owner
+               (equal (plist-get owner :nonce) (plist-get token :nonce)))
+      (delete-directory path t)
+      t)))
+
+(defun epub-reader-store--reclaim-under-intent (lock)
+  "Reclaim stale LOCK while this process's unique intent remains visible."
   (let ((expected (epub-reader-store--lock-snapshot lock)))
     (when (and expected
                (epub-reader-store--stale-lock-snapshot-p expected))
@@ -313,36 +367,38 @@ handle's warning; reading may continue without saved progress."
              (format "%s.stale-%s" lock
                      (substring
                       (secure-hash 'sha256
-                                   (format "%s:%s:%s" lock (emacs-pid)
-                                           (float-time)))
+                                   (format "%s:%s:%s:%s" lock (emacs-pid)
+                                           (float-time) (random)))
                       0 16)))
             renamed)
         (setq renamed
               (condition-case nil
-                  (progn
-                    ;; Atomic rename selects exactly one contender.  Identity
-                    ;; is checked again through the quarantine pathname before
-                    ;; anything is deleted, closing the stale-check/rename ABA.
-                    (rename-file lock quarantine)
-                    t)
+                  (progn (rename-file lock quarantine) t)
                 (file-error nil)))
         (when renamed
           (let ((claimed (epub-reader-store--lock-snapshot quarantine)))
-            (if (epub-reader-store--same-lock-instance-p expected claimed)
-                (progn
-                  (delete-directory quarantine t)
-                  t)
-              ;; The pathname was replaced after EXPECTED was captured.  Put
-              ;; that live lock back and report that this contender lost.
-              (condition-case error-data
-                  (rename-file quarantine lock)
-                (file-error
-                 (signal 'epub-reader-store-error
-                         (list
-                          (format
-                           "Cannot restore concurrently replaced EPUB lock %s: %s"
-                           lock (error-message-string error-data))))))
-              nil)))))))
+            ;; All compliant acquirers observe an active unique intent before
+            ;; entering a transaction.  Therefore a mismatching replacement
+            ;; moved here during the race has not become an owner and can be
+            ;; discarded without a restore window.
+            (delete-directory quarantine t)
+            (epub-reader-store--same-lock-instance-p expected claimed)))))))
+
+(defun epub-reader-store--reclaim-stale-lock (lock)
+  "Reclaim stale LOCK under a visible unique intent, returning success status."
+  (let ((intent (epub-reader-store--create-takeover-intent lock))
+        result primary-error cleanup-error)
+    (unwind-protect
+        (condition-case error-data
+            (setq result (epub-reader-store--reclaim-under-intent lock))
+          (error (setq primary-error error-data)))
+      (condition-case error-data
+          (epub-reader-store--release-lock intent)
+        (error (setq cleanup-error error-data))))
+    (cond
+     (primary-error (signal (car primary-error) (cdr primary-error)))
+     (cleanup-error (signal (car cleanup-error) (cdr cleanup-error)))
+     (t result))))
 
 (defun epub-reader-store--acquire-lock (path)
   "Acquire and return an ownership token for PATH's transaction lock."
@@ -352,26 +408,48 @@ handle's warning; reading may continue without saved progress."
          acquired)
     (make-directory (file-name-directory path) t)
     (while (not acquired)
-      (condition-case error-data
+      (if (epub-reader-store--active-takeover-intent-p lock)
           (progn
-            ;; Directory creation is the portable cross-process exclusive
-            ;; operation; only its owner may enter read/merge/write.
-            (make-directory lock)
-            (condition-case owner-error
-                (epub-reader-store--write-lock-owner lock owner)
-              (error
-               (ignore-errors (delete-directory lock t))
-               (signal (car owner-error) (cdr owner-error))))
-            (setq acquired t))
-        (file-already-exists
-         (unless (epub-reader-store--reclaim-stale-lock lock)
-           (when (>= (float-time) deadline)
-             (signal 'epub-reader-store-error
-                     (list (format
-                            "Timed out waiting for EPUB sidecar lock: %s"
-                            lock))))
-           (sleep-for 0.01)))
-        (error (signal (car error-data) (cdr error-data)))))
+            (when (>= (float-time) deadline)
+              (signal 'epub-reader-store-error
+                      (list (format
+                             "Timed out waiting for EPUB sidecar lock: %s"
+                             lock))))
+            (sleep-for 0.01))
+        (condition-case error-data
+            (progn
+              ;; Directory creation is the portable cross-process exclusive
+              ;; operation; only its owner may enter read/merge/write.
+              (make-directory lock)
+              (condition-case owner-error
+                  (epub-reader-store--write-lock-owner lock owner)
+                (error
+                 (ignore-errors (delete-directory lock t))
+                 (signal (car owner-error) (cdr owner-error))))
+              ;; Close the race where an intent appears after the precheck but
+              ;; before mkdir: back out before the transaction becomes visible.
+              (if (epub-reader-store--active-takeover-intent-p lock)
+                  (progn
+                    (epub-reader-store--release-lock-if-owned
+                     (list :path lock :nonce (plist-get owner :nonce)))
+                    (when (>= (float-time) deadline)
+                      (signal 'epub-reader-store-error
+                              (list
+                               (format
+                                "Timed out waiting for EPUB sidecar lock: %s"
+                                lock))))
+                    (sleep-for 0.01))
+                (setq acquired t)))
+          (file-already-exists
+           (unless (and (epub-reader-store--stale-lock-p lock)
+                        (epub-reader-store--reclaim-stale-lock lock))
+             (when (>= (float-time) deadline)
+               (signal 'epub-reader-store-error
+                       (list (format
+                              "Timed out waiting for EPUB sidecar lock: %s"
+                              lock))))
+             (sleep-for 0.01)))
+          (error (signal (car error-data) (cdr error-data))))))
     (list :path lock :nonce (plist-get owner :nonce))))
 
 (defun epub-reader-store--release-lock (token)

@@ -254,17 +254,16 @@
       (delete-directory directory t)
       (delete-file source))))
 
-(ert-deftest epub-reader-store-stale-reclaim-does-not-delete-aba-replacement ()
+(ert-deftest epub-reader-store-takeover-intent-serializes-two-contender-aba ()
   (let ((directory (make-temp-file "epub-reader-store-lock-aba-" t))
         (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
     (unwind-protect
         (let* ((epub-reader-store-directory directory)
                (store (epub-reader-store-open source "book"))
+               (path (epub-reader-store-path store))
                (lock (concat (epub-reader-store-path store) ".lock"))
                (real-rename (symbol-function 'rename-file))
-               (live-owner (epub-reader-store--new-lock-owner))
-               competitor-result outer-result injected)
-          (setq live-owner (plist-put live-owner :nonce "new-live-owner"))
+               competitor-result outer-result replacement-error injected)
           (make-directory lock t)
           (epub-reader-store--write-lock-owner
            lock (list :pid 99999999 :host (system-name)
@@ -276,22 +275,120 @@
                          (setq injected t)
                          ;; A nested call deterministically represents the
                          ;; other process: it wins the stale reclaim, then a
-                         ;; live owner acquires the canonical pathname before
-                         ;; the outer contender reaches rename (the ABA).
+                         ;; normal acquisition attempts to enter before the
+                         ;; outer contender reaches rename (the ABA).
                          (setq competitor-result
                                (epub-reader-store--reclaim-stale-lock lock))
-                         (make-directory lock)
-                         (epub-reader-store--write-lock-owner lock live-owner))
+                         (let ((epub-reader-store-lock-timeout 0.0))
+                           (condition-case error-data
+                               (epub-reader-store--acquire-lock path)
+                             (epub-reader-store-error
+                              (setq replacement-error error-data)))))
                        (funcall real-rename old new ok-if-already))))
             (setq outer-result
                   (epub-reader-store--reclaim-stale-lock lock)))
           (should injected)
           (should competitor-result)
           (should-not outer-result)
+          (should replacement-error)
+          (should-not (file-exists-p lock))
+          (should-not (epub-reader-store--takeover-intent-paths lock)))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-stale-reclaim-has-no-three-contender-window ()
+  (let ((directory (make-temp-file "epub-reader-store-lock-three-way-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (store (epub-reader-store-open source "book"))
+               (path (epub-reader-store-path store))
+               (lock (concat (epub-reader-store-path store) ".lock"))
+               (parent (file-name-directory lock))
+               (basename (file-name-nondirectory lock))
+               (real-rename (symbol-function 'rename-file))
+               (replacement-owner (epub-reader-store--new-lock-owner))
+               competitor-result outer-result third-token third-error
+               outer-error replacement-injected)
+          (setq replacement-owner
+                (plist-put replacement-owner :nonce "replacement-live"))
+          (make-directory lock t)
+          (epub-reader-store--write-lock-owner
+           lock (list :pid 99999999 :host (system-name)
+                      :start '(0 0 0 0) :created (float-time)
+                      :nonce "old-dead-owner"))
+          (cl-letf
+              (((symbol-function 'rename-file)
+                (lambda (old new &optional ok-if-already)
+                  (let ((outer-move-p
+                         (and (not replacement-injected) (equal old lock))))
+                    (when outer-move-p
+                      (setq replacement-injected t
+                            competitor-result
+                            (epub-reader-store--reclaim-stale-lock lock))
+                      (when competitor-result
+                        (make-directory lock)
+                        (epub-reader-store--write-lock-owner
+                         lock replacement-owner)))
+                    (let ((result
+                           (funcall real-rename old new ok-if-already)))
+                      (when outer-move-p
+                        ;; The outer contender has just made canonical empty.
+                        ;; A compliant third contender must observe the intent
+                        ;; both before and after mkdir and must not enter.
+                        (let ((epub-reader-store-lock-timeout 0.0))
+                          (condition-case error-data
+                              (setq third-token
+                                    (epub-reader-store--acquire-lock path))
+                            (epub-reader-store-error
+                             (setq third-error error-data)))))
+                      result)))))
+            (condition-case error-data
+                (setq outer-result
+                      (epub-reader-store--reclaim-stale-lock lock))
+              (error (setq outer-error error-data))))
+          (let ((live-nonces
+                 (cl-loop
+                  for candidate in (directory-files
+                                    parent t
+                                    (concat "\\`" (regexp-quote basename)
+                                            "\\(?:\\.stale-.*\\)?\\'"))
+                  for owner = (and (file-directory-p candidate)
+                                   (epub-reader-store--read-lock-owner
+                                    candidate))
+                  when (and owner
+                            (epub-reader-store--lock-owner-alive-p owner))
+                  collect (plist-get owner :nonce))))
+            (should-not outer-error)
+            (should third-error)
+            (should-not third-token)
+            (should (<= (length live-nonces) 1))
+            (should (= (length (delq nil
+                                     (list competitor-result outer-result
+                                           third-token)))
+                       1))))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-dead-takeover-intent-does-not-block-acquire ()
+  (let ((directory (make-temp-file "epub-reader-store-dead-intent-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (store (epub-reader-store-open source "book"))
+               (path (epub-reader-store-path store))
+               (lock (concat path ".lock"))
+               (intent (concat lock ".takeover-dead-process"))
+               token)
+          (make-directory intent t)
+          (epub-reader-store--write-lock-owner
+           intent (list :pid 99999999 :host (system-name)
+                        :start '(0 0 0 0) :created (float-time)
+                        :nonce "dead-intent"))
+          (setq token (epub-reader-store--acquire-lock path))
           (should (file-directory-p lock))
-          (should
-           (equal (plist-get (epub-reader-store--read-lock-owner lock) :nonce)
-                  "new-live-owner")))
+          (epub-reader-store--release-lock token)
+          (should-not (file-exists-p lock)))
       (delete-directory directory t)
       (delete-file source))))
 
