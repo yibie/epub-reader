@@ -607,5 +607,72 @@
       (delete-directory directory t)
       (delete-file source))))
 
+(ert-deftest epub-reader-store-migrates-v1-when-reader-marks-are-written ()
+  (let ((directory (make-temp-file "epub-reader-store-v1-migration-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (probe (epub-reader-store-open source "book"))
+               (path (epub-reader-store-path probe))
+               (locator (epub-reader-store-test--locator
+                         "book" "a.xhtml" "id:a" 6)))
+          (epub-reader-store-close probe)
+          (with-temp-file path
+            (prin1
+             (list :schema 1 :books
+                   (list (cons "book"
+                               (list :updated 10.0
+                                     :locator
+                                     (epub-reader-locator-to-plist locator)))))
+             (current-buffer)))
+          (let ((store (epub-reader-store-open source "book")))
+            (should (epub-reader-store-load-locator store))
+            (should-not (epub-reader-store-load-bookmarks store))
+            (epub-reader-store-stage-bookmark
+             store '(:id "bookmark-1" :name "Start"))
+            (epub-reader-store-close store))
+          (with-temp-buffer
+            (insert-file-contents path)
+            (let ((data (read (current-buffer))))
+              (should (= (plist-get data :schema) 2))
+              (should (= (length (plist-get
+                                  (cdr (assoc "book"
+                                              (plist-get data :books)))
+                                  :bookmarks))
+                         1)))))
+      (delete-directory directory t)
+      (delete-file source))))
+
+(ert-deftest epub-reader-store-merges-concurrent-annotations-per-item ()
+  (let ((directory (make-temp-file "epub-reader-store-annotations-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (first-buffer-store (epub-reader-store-open source "book"))
+               (second-buffer-store (epub-reader-store-open source "book")))
+          (epub-reader-store-stage-annotation
+           first-buffer-store '(:id "annotation-a" :quote "Alpha"))
+          (epub-reader-store-stage-annotation
+           second-buffer-store '(:id "annotation-b" :quote "Beta"))
+          (epub-reader-store-flush second-buffer-store)
+          (epub-reader-store-flush first-buffer-store)
+          (let* ((reopened (epub-reader-store-open source "book"))
+                 (values (epub-reader-store-load-annotations reopened)))
+            (should (equal (sort (mapcar (lambda (value)
+                                          (plist-get value :id))
+                                        values)
+                                 #'string<)
+                           '("annotation-a" "annotation-b")))
+            (epub-reader-store-delete-annotation reopened "annotation-a")
+            (epub-reader-store-flush reopened)
+            (should (equal (mapcar (lambda (value) (plist-get value :id))
+                                   (epub-reader-store-load-annotations reopened))
+                           '("annotation-b")))
+            (epub-reader-store-close reopened))
+          (epub-reader-store-close second-buffer-store)
+          (epub-reader-store-close first-buffer-store))
+      (delete-directory directory t)
+      (delete-file source))))
+
 (provide 'epub-reader-store-test)
 ;;; epub-reader-store-test.el ends here

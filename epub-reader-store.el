@@ -49,9 +49,9 @@ their canonical pathname becomes visible."
 (cl-defstruct (epub-reader-store
                (:constructor epub-reader-store--create))
   "One book identity's handle to a versioned sidecar."
-  path book-key pending warning closed-p)
+  path book-key pending pending-bookmarks pending-annotations warning closed-p)
 
-(defconst epub-reader-store--schema 1)
+(defconst epub-reader-store--schema 2)
 
 (defun epub-reader-store--path (file)
   "Return sidecar path for EPUB FILE under current policy."
@@ -67,6 +67,35 @@ their canonical pathname becomes visible."
   "Return an empty current-schema sidecar value."
   (list :schema epub-reader-store--schema :books nil))
 
+(defun epub-reader-store--valid-item-record-p (entry)
+  "Return non-nil when ENTRY is a valid persisted collection item."
+  (let ((record (and (consp entry) (cdr entry))))
+    (and (stringp (car-safe entry))
+         (not (string-empty-p (car entry)))
+         (listp record)
+         (numberp (plist-get record :updated))
+         (or (eq (plist-get record :deleted) t)
+             (and (null (plist-get record :deleted))
+                  (listp (plist-get record :value))
+                  (equal (plist-get (plist-get record :value) :id)
+                         (car entry)))))))
+
+(defun epub-reader-store--valid-book-record-p (record)
+  "Return non-nil when current-schema book RECORD is valid."
+  (and (listp record)
+       (let ((has-updated (plist-member record :updated))
+             (has-locator (plist-member record :locator)))
+         (and (eq (and has-updated t) (and has-locator t))
+              (or (not has-updated)
+                  (and (numberp (plist-get record :updated))
+                       (listp (plist-get record :locator))))))
+       (listp (plist-get record :bookmarks))
+       (cl-every #'epub-reader-store--valid-item-record-p
+                 (plist-get record :bookmarks))
+       (listp (plist-get record :annotations))
+       (cl-every #'epub-reader-store--valid-item-record-p
+                 (plist-get record :annotations))))
+
 (defun epub-reader-store--validate-data (data path)
   "Return DATA when it is a valid sidecar value for PATH."
   (unless (and (listp data)
@@ -74,15 +103,37 @@ their canonical pathname becomes visible."
                   epub-reader-store--schema)
                (listp (plist-get data :books))
                (cl-every
-                (lambda (entry)
+               (lambda (entry)
                   (and (consp entry) (stringp (car entry))
-                       (listp (cdr entry))
-                       (numberp (plist-get (cdr entry) :updated))
-                       (listp (plist-get (cdr entry) :locator))))
+                       (epub-reader-store--valid-book-record-p (cdr entry))))
                 (plist-get data :books)))
     (signal 'epub-reader-store-error
             (list (format "Invalid or unsupported EPUB sidecar: %s" path))))
   data)
+
+(defun epub-reader-store--migrate-v1 (data path)
+  "Return schema 1 DATA from PATH migrated to the current schema."
+  (unless
+      (and (listp (plist-get data :books))
+           (cl-every
+            (lambda (entry)
+              (and (consp entry) (stringp (car entry))
+                   (listp (cdr entry))
+                   (numberp (plist-get (cdr entry) :updated))
+                   (listp (plist-get (cdr entry) :locator))))
+            (plist-get data :books)))
+    (signal 'epub-reader-store-error
+            (list (format "Invalid legacy EPUB sidecar: %s" path))))
+  (list
+   :schema epub-reader-store--schema
+   :books
+   (mapcar
+    (lambda (entry)
+      (cons (car entry)
+            (list :updated (plist-get (cdr entry) :updated)
+                  :locator (plist-get (cdr entry) :locator)
+                  :bookmarks nil :annotations nil)))
+    (plist-get data :books))))
 
 (defun epub-reader-store--decode-data (data path)
   "Validate or explicitly reject versioned sidecar DATA from PATH."
@@ -93,6 +144,9 @@ their canonical pathname becomes visible."
               (list (format "Invalid EPUB sidecar schema: %s" path))))
      ((= schema epub-reader-store--schema)
       (epub-reader-store--validate-data data path))
+     ((= schema 1)
+      (epub-reader-store--validate-data
+       (epub-reader-store--migrate-v1 data path) path))
      ((< schema epub-reader-store--schema)
       (signal 'epub-reader-store-error
               (list (format
@@ -151,6 +205,25 @@ handle's warning; reading may continue without saved progress."
                          (error-message-string error-data)))
            nil))))))
 
+(defun epub-reader-store--load-items (store key)
+  "Return STORE's active persisted item values under collection KEY."
+  (unless (or (epub-reader-store-closed-p store)
+              (epub-reader-store-warning store))
+    (let* ((data (epub-reader-store--read (epub-reader-store-path store)))
+           (entry (assoc (epub-reader-store-book-key store)
+                         (plist-get data :books))))
+      (cl-loop for item in (and entry (plist-get (cdr entry) key))
+               unless (plist-get (cdr item) :deleted)
+               collect (copy-tree (plist-get (cdr item) :value))))))
+
+(defun epub-reader-store-load-bookmarks (store)
+  "Return STORE's active bookmark values as plain plists."
+  (epub-reader-store--load-items store :bookmarks))
+
+(defun epub-reader-store-load-annotations (store)
+  "Return STORE's active annotation values as plain plists."
+  (epub-reader-store--load-items store :annotations))
+
 (defun epub-reader-store-stage (store locator)
   "Stage LOCATOR as STORE's next durable reading position."
   (when (epub-reader-store-closed-p store)
@@ -163,6 +236,55 @@ handle's warning; reading may continue without saved progress."
         (list :updated (float-time)
               :locator (epub-reader-locator-to-plist locator)))
   store)
+
+(defun epub-reader-store--stage-item (store slot id value deleted)
+  "Stage one STORE collection item in SLOT.
+ID identifies the item.  VALUE is its plain plist, or nil when DELETED."
+  (when (epub-reader-store-closed-p store)
+    (signal 'epub-reader-store-error '("EPUB store is closed")))
+  (unless (and (stringp id) (not (string-empty-p id))
+               (or deleted
+                   (and (listp value) (equal (plist-get value :id) id))))
+    (signal 'epub-reader-store-error '("Invalid EPUB sidecar item")))
+  (let* ((pending
+          (copy-tree
+           (pcase slot
+             ('bookmarks (epub-reader-store-pending-bookmarks store))
+             ('annotations (epub-reader-store-pending-annotations store)))))
+         (existing (assoc id pending))
+         (record (list :updated (float-time) :deleted (and deleted t)
+                       :value (and (not deleted) value))))
+    (if existing
+        (setcdr existing record)
+      (push (cons id record) pending))
+    (pcase slot
+      ('bookmarks
+       (setf (epub-reader-store-pending-bookmarks store) pending))
+      ('annotations
+       (setf (epub-reader-store-pending-annotations store) pending))))
+  store)
+
+(defun epub-reader-store-stage-bookmark (store value)
+  "Stage plain bookmark VALUE for STORE."
+  (epub-reader-store--stage-item
+   store 'bookmarks
+   (plist-get value :id) value nil))
+
+(defun epub-reader-store-delete-bookmark (store id)
+  "Stage deletion of bookmark ID for STORE."
+  (epub-reader-store--stage-item
+   store 'bookmarks id nil t))
+
+(defun epub-reader-store-stage-annotation (store value)
+  "Stage plain annotation VALUE for STORE."
+  (epub-reader-store--stage-item
+   store 'annotations
+   (plist-get value :id) value nil))
+
+(defun epub-reader-store-delete-annotation (store id)
+  "Stage deletion of annotation ID for STORE."
+  (epub-reader-store--stage-item
+   store 'annotations id nil t))
 
 (defconst epub-reader-store--lock-owner-file "owner.el")
 
@@ -556,12 +678,60 @@ won the canonical pathname."
       (when (and temporary (file-exists-p temporary))
         (delete-file temporary)))))
 
+(defun epub-reader-store--merge-item-records (disk pending)
+  "Merge PENDING item records into DISK by item-level update timestamp."
+  (let ((result (copy-tree disk)))
+    (dolist (item pending)
+      (let* ((id (car item))
+             (incoming (cdr item))
+             (existing (assoc id result)))
+        (unless (and existing
+                     (>= (plist-get (cdr existing) :updated)
+                         (plist-get incoming :updated)))
+          (if existing
+              (setcdr existing (copy-tree incoming))
+            (push (copy-tree item) result)))))
+    result))
+
+(defun epub-reader-store--merge-book-record
+    (disk progress bookmarks annotations)
+  "Merge pending PROGRESS, BOOKMARKS, and ANNOTATIONS into DISK record."
+  (let ((record (copy-tree (or disk '(:bookmarks nil :annotations nil)))))
+    (unless (plist-member record :bookmarks)
+      (setq record (plist-put record :bookmarks nil)))
+    (unless (plist-member record :annotations)
+      (setq record (plist-put record :annotations nil)))
+    (when progress
+      (let ((disk-updated (and (plist-member record :updated)
+                               (plist-get record :updated))))
+        (unless (and disk-updated
+                     (>= disk-updated (plist-get progress :updated)))
+          (setq record
+                (plist-put record :updated (plist-get progress :updated)))
+          (setq record
+                (plist-put record :locator (plist-get progress :locator))))))
+    (when bookmarks
+      (setq record
+            (plist-put
+             record :bookmarks
+             (epub-reader-store--merge-item-records
+              (plist-get record :bookmarks) bookmarks))))
+    (when annotations
+      (setq record
+            (plist-put
+             record :annotations
+             (epub-reader-store--merge-item-records
+              (plist-get record :annotations) annotations))))
+    record))
+
 (defun epub-reader-store-flush (store)
-  "Merge and atomically flush STORE's staged locator."
+  "Merge and atomically flush STORE's staged progress and reader marks."
   (when (epub-reader-store-closed-p store)
     (signal 'epub-reader-store-error '("EPUB store is closed")))
-  (let ((pending (epub-reader-store-pending store)))
-    (when pending
+  (let ((pending (epub-reader-store-pending store))
+        (pending-bookmarks (epub-reader-store-pending-bookmarks store))
+        (pending-annotations (epub-reader-store-pending-annotations store)))
+    (when (or pending pending-bookmarks pending-annotations)
       (when (epub-reader-store-warning store)
         (signal 'epub-reader-store-error
                 (list (epub-reader-store-warning store))))
@@ -573,25 +743,21 @@ won the canonical pathname."
            (let* ((data (epub-reader-store--read path))
                   (books (copy-tree (plist-get data :books)))
                   (existing (assoc book-key books))
-                  (existing-record (and existing (cdr existing)))
-                  (existing-updated
-                   (and existing-record
-                        (plist-get existing-record :updated)))
-                  (pending-record
-                   (list :updated (plist-get pending :updated)
-                         :locator (plist-get pending :locator))))
-             ;; The disk value is reread under the lock.  Position capture
-             ;; time, rather than close order, determines the per-book winner;
-             ;; a newer disk record is never replaced by an older snapshot.
-             (unless (and existing-updated
-                          (>= existing-updated
-                              (plist-get pending :updated)))
-               (if existing
-                   (setcdr existing pending-record)
-                 (push (cons book-key pending-record) books))
-               (setq data (plist-put data :books books))
-               (epub-reader-store--write-atomic path data)))))
-        (setf (epub-reader-store-pending store) nil))))
+                  (merged
+                   (epub-reader-store--merge-book-record
+                    (and existing (cdr existing)) pending
+                    pending-bookmarks pending-annotations)))
+             ;; Disk is reread under the lock.  Progress and every bookmark or
+             ;; annotation then choose their own newest captured version, so
+             ;; independent readers cannot erase each other's additions.
+             (if existing
+                 (setcdr existing merged)
+               (push (cons book-key merged) books))
+             (setq data (plist-put data :books books))
+             (epub-reader-store--write-atomic path data))))
+        (setf (epub-reader-store-pending store) nil
+              (epub-reader-store-pending-bookmarks store) nil
+              (epub-reader-store-pending-annotations store) nil))))
   store)
 
 (defun epub-reader-store-close (store)
