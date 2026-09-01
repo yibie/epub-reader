@@ -194,7 +194,7 @@
                              'keymap epub-reader-render-link-map)
                        result))
                     result))
-                 ("br" "\n")
+                 ("br" (propertize "\n" 'epub-reader-hard-break t))
                  ((or "img" "image") "")
                  ((or "ul" "ol" "table") "")
                  (_ text)))
@@ -207,14 +207,94 @@
          rendered))))
    (cddr node) ""))
 
+(defun epub-reader-render--xml-whitespace-p (character)
+  "Return non-nil when CHARACTER is collapsible XML whitespace."
+  (memq character '(?\s ?\t ?\r ?\n)))
+
+(defun epub-reader-render--cjk-context-p (character)
+  "Return non-nil when CHARACTER participates in CJK line joining."
+  (and character
+       (> character 127)
+       (or (and (>= character #x2e80) (<= character #x9fff))
+           (and (>= character #xac00) (<= character #xd7af))
+           (and (>= character #xf900) (<= character #xfaff))
+           (and (>= character #xff00) (<= character #xffef))
+           (let ((categories (char-category-set character)))
+             (or (aref categories ?c)
+                 (aref categories ?h)
+                 (aref categories ?j))))))
+
+(defun epub-reader-render--previous-content-character ()
+  "Return the previous non-anchor character in the current buffer."
+  (save-excursion
+    (let ((position (1- (point)))
+          character)
+      (while (and (>= position (point-min)) (null character))
+        (let ((candidate (char-after position)))
+          (unless (= candidate #x2060)
+            (setq character candidate)))
+        (setq position (1- position)))
+      character)))
+
+(defun epub-reader-render--next-content-character (string position)
+  "Return STRING's next non-anchor character at or after POSITION."
+  (let ((length (length string))
+        character)
+    (while (and (< position length) (null character))
+      (let ((candidate (aref string position)))
+        (unless (= candidate #x2060)
+          (setq character candidate)))
+      (setq position (1+ position)))
+    character))
+
 (defun epub-reader-render--normalize-inline (string)
-  "Collapse horizontal/XML indentation whitespace in attributed STRING."
+  "Normalize XML whitespace in attributed STRING.
+
+Explicit spaces collapse to one space.  A source segment break between CJK
+characters (including full-width punctuation) disappears, while a segment
+break between non-CJK words becomes one space.  Newlines carrying the
+`epub-reader-hard-break' property are preserved exactly."
   (with-temp-buffer
-    (insert string)
-    (goto-char (point-min))
-    (while (re-search-forward "[ \t\r\n]+" nil t)
-      (replace-match " " t t))
-    (string-trim (buffer-string))))
+    (let ((position 0)
+          (length (length string)))
+      (while (< position length)
+        (let ((character (aref string position)))
+          (cond
+           ((get-text-property position 'epub-reader-hard-break string)
+            (insert (substring string position (1+ position)))
+            (setq position (1+ position)))
+           ((epub-reader-render--xml-whitespace-p character)
+            (let ((start position)
+                  segment-break)
+              (while (and (< position length)
+                          (epub-reader-render--xml-whitespace-p
+                           (aref string position))
+                          (not (get-text-property
+                                position 'epub-reader-hard-break string)))
+                (when (memq (aref string position) '(?\r ?\n))
+                  (setq segment-break t))
+                (setq position (1+ position)))
+              (let ((previous
+                     (epub-reader-render--previous-content-character))
+                    (next
+                     (epub-reader-render--next-content-character
+                      string position)))
+                (when (and previous next
+                           (not (= previous ?\n))
+                           (not (get-text-property
+                                 position 'epub-reader-hard-break string))
+                           (not (and segment-break
+                                     (epub-reader-render--cjk-context-p
+                                      previous)
+                                     (epub-reader-render--cjk-context-p
+                                      next))))
+                  (insert
+                   (apply #'propertize " "
+                          (text-properties-at start string)))))))
+           (t
+            (insert (substring string position (1+ position)))
+            (setq position (1+ position)))))))
+    (buffer-string)))
 
 (defun epub-reader-render--heading-level (tag)
   "Return numeric heading level for TAG."

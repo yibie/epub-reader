@@ -171,6 +171,63 @@
                    "page-1")))
       (epub-reader-publication-close publication))))
 
+(ert-deftest epub-reader-render-normalizes-cjk-source-segment-breaks ()
+  (let ((publication
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "epub3-edge.epub"))))
+    (unwind-protect
+        (let* ((blocks (epub-reader-render-chapter publication 0))
+               (cjk
+                (cl-find "cjk-break" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+               (latin
+                (cl-find "latin-break" blocks
+                         :key #'epub-reader-block-element-id :test #'equal)))
+          (should (equal (substring-no-properties
+                          (epub-reader-block-text cjk))
+                         "中文，继续 甲（乙） 中 文"))
+          (should (equal (substring-no-properties
+                          (epub-reader-block-text latin))
+                         "Hello world")))
+      (epub-reader-publication-close publication))))
+
+(ert-deftest epub-reader-render-preserves-br-as-attributed-hard-break ()
+  (let ((publication
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "epub3-edge.epub"))))
+    (unwind-protect
+        (let* ((blocks (epub-reader-render-chapter publication 0))
+               (block
+                (cl-find "hard-break" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+               (text (epub-reader-block-text block)))
+          (should (equal (substring-no-properties text) "甲\n\n乙"))
+          (should (get-text-property 1 'epub-reader-hard-break text))
+          (should (get-text-property 2 'epub-reader-hard-break text))
+          (should (memq 'epub-reader-strong-face
+                        (ensure-list (get-text-property 3 'face text))))
+          (dotimes (position (length text))
+            (should (epub-reader-locator-source-p
+                     (get-text-property position 'epub-reader-source text))))
+          (let* ((buffer-name
+                  (generate-new-buffer-name " *epub-br-render-test*"))
+                 (buffer
+                  (textui-open buffer-name #'epub-reader-render-test--frame
+                               (list :width 40 :blocks (list block)))))
+            (unwind-protect
+                (with-current-buffer buffer
+                  (goto-char (point-min))
+                  (should (search-forward "甲" nil t))
+                  (let ((first-line (line-number-at-pos)))
+                    (should (search-forward "乙" nil t))
+                    (should (= (line-number-at-pos) (+ first-line 2)))
+                    (should (epub-reader-locator-source-p
+                             (get-text-property
+                              (1- (point)) 'epub-reader-source)))))
+              (when (buffer-live-p buffer)
+                (kill-buffer buffer)))))
+      (epub-reader-publication-close publication))))
+
 (ert-deftest epub-reader-locator-reports-degraded-resolution-quality ()
   (with-temp-buffer
     (insert (epub-reader-locator-attach-source
