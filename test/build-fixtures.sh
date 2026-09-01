@@ -18,6 +18,7 @@ build_epub() {
   mkdir -p "$staging_dir"
   cp -R "$content_dir"/. "$staging_dir"/
   printf '%s' 'application/epub+zip' >"$staging_dir/mimetype"
+  find "$staging_dir" -exec touch -t 202001010000 {} +
   rm -f "$archive"
   (cd "$staging_dir" && zip -X0q "$archive" mimetype)
   (cd "$staging_dir" && zip -X9qrD "$archive" META-INF)
@@ -35,6 +36,7 @@ build_epub epub3 "$source_dir/epub3"
 malicious_dir="$work_dir/malicious"
 mkdir -p "$malicious_dir/nested"
 printf '%s' 'escape' >"$malicious_dir/escape.txt"
+touch -t 202001010000 "$malicious_dir/escape.txt"
 rm -f "$output_dir/malicious-path.epub"
 (cd "$malicious_dir/nested" &&
   zip -Xq "$output_dir/malicious-path.epub" ../escape.txt)

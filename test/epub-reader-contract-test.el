@@ -7,14 +7,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'textui)
-
-(defconst epub-reader-test--directory
-  (file-name-directory (or load-file-name buffer-file-name)))
-
-(defun epub-reader-test-fixture (name)
-  "Return absolute fixture path for NAME."
-  (expand-file-name name
-                    (expand-file-name "fixtures" epub-reader-test--directory)))
+(require 'epub-reader-test-helper)
 
 (defun epub-reader-contract-test--archive-entries (file)
   "Return FILE's member names using the fixture-building unzip tool."
