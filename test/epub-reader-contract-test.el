@@ -81,5 +81,36 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest epub-reader-contract-private-symbols-do-not-cross-modules ()
+  (let* ((project-directory
+          (expand-file-name ".." epub-reader-test--directory))
+         (files
+          (directory-files project-directory t "\\`epub-reader.*\\.el\\'"))
+         (owners (make-hash-table :test #'equal))
+         violations)
+    (dolist (file files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (while (re-search-forward
+                "(\\(?::constructor\\|defun\\|defmacro\\|defsubst\\|defvar\\|defconst\\)\\s-+\\(epub-reader-[[:alnum:]-]+--[[:alnum:]-]+\\)"
+                nil t)
+          (puthash (match-string 1) file owners))))
+    (dolist (file files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (should-not (re-search-forward "\\_<textui--[[:alnum:]-]+\\_>" nil t))
+        (goto-char (point-min))
+        (while (re-search-forward
+                "\\_<epub-reader-[[:alnum:]-]+--[[:alnum:]-]+\\_>" nil t)
+          (let* ((symbol (match-string 0))
+                 (owner (gethash symbol owners)))
+            (when (and owner (not (equal owner file)))
+              (push (list (file-name-nondirectory file) symbol
+                          (file-name-nondirectory owner))
+                    violations))))))
+    (should-not violations)))
+
 (provide 'epub-reader-contract-test)
 ;;; epub-reader-contract-test.el ends here

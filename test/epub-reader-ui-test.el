@@ -59,6 +59,9 @@
            (epub-reader-ui-test--href-position
             "chapter2.xhtml#second")))
       (should position)
+      (should (eq (lookup-key
+                   (get-text-property position 'keymap) (kbd "RET"))
+                  #'epub-reader-follow-link))
       (goto-char position)
       (epub-reader-follow-link)
       (should (= (plist-get textui-state :spine-index) 1))

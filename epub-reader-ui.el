@@ -43,6 +43,13 @@
   "RET" #'epub-reader-follow-link
   "q" #'epub-reader-quit)
 
+(defvar epub-reader-ui-link-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'epub-reader-follow-link)
+    (define-key map [mouse-1] #'epub-reader-follow-link-mouse)
+    map)
+  "Keymap installed by the UI on rendered EPUB hyperlink runs.")
+
 (define-minor-mode epub-reader-ui-mode
   "Minor mode adding EPUB reader commands to a TextUI buffer."
   :init-value nil
@@ -82,6 +89,25 @@
                 "n 下一章  ·  p 上一章  ·  RET 打开链接  ·  q 关闭"
                 'face 'epub-reader-footer-face 'epub-reader-chrome t)))
 
+(defun epub-reader-ui--attach-link-actions (&optional buffer)
+  "Install UI-owned interaction properties on hyperlink runs in BUFFER."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((position (point-min))
+          (inhibit-read-only t))
+      (while (< position (point-max))
+        (let* ((href (get-text-property position 'epub-reader-href))
+               (end
+                (or (next-single-property-change
+                     position 'epub-reader-href nil (point-max))
+                    (point-max))))
+          (when href
+            (add-text-properties
+             position end
+             (list 'help-echo href 'mouse-face 'highlight 'follow-link t
+                   'keymap epub-reader-ui-link-map)))
+          (setq position end)))))
+  nil)
+
 (defun epub-reader-ui-frame (available-width)
   "Return the complete reader frame for AVAILABLE-WIDTH."
   (let* ((publication (plist-get textui-state :publication))
@@ -104,9 +130,10 @@
                  (list (epub-reader-ui--footer)))))
          children)
     (textui-effect
-     'epub-reader-image-locators (list index available-width)
+     'epub-reader-post-render (list index available-width)
      (lambda ()
-       (epub-reader-locator-tag-image-runs (current-buffer))))
+       (epub-reader-locator-tag-image-runs (current-buffer))
+       (epub-reader-ui--attach-link-actions (current-buffer))))
     (when (> left 0)
       (push (epub-reader-ui--spacer left) children))
     (push column children)
@@ -159,13 +186,10 @@
 
 (defun epub-reader-ui--goto-start (&optional fragment)
   "Move to current chapter's FRAGMENT or first source position."
-  (let* ((index (epub-reader-ui--state-value :spine-index))
-         (publication (epub-reader-ui--state-value :publication))
-         (resource
-          (epub-reader-publication-spine-resource publication index))
+  (let* ((section (epub-reader-ui--state-value :section))
          (position
           (or (epub-reader-ui--fragment-position
-               (epub-reader-resource-path resource) fragment)
+               (epub-reader-section-path section) fragment)
               (epub-reader-ui--first-source-position)
               (point-min))))
     (goto-char position)
@@ -178,12 +202,15 @@
          (count (length (epub-reader-publication-spine publication))))
     (unless (and (>= index 0) (< index count))
       (user-error "No chapter in that direction"))
-    (let ((blocks (epub-reader-render-chapter publication index)))
+    (let* ((section
+            (epub-reader-publication-load-section publication index))
+           (blocks (epub-reader-render-section publication section)))
       (textui-update
        buffer
        (lambda (state)
          (let ((next (copy-sequence state)))
            (setq next (plist-put next :spine-index index))
+           (setq next (plist-put next :section section))
            (plist-put next :blocks blocks))))
       (textui-refresh buffer)
       (epub-reader-ui--goto-start fragment)
@@ -225,12 +252,10 @@
       (user-error "No EPUB link at point"))
     (let* ((publication (epub-reader-ui--state-value :publication))
            (current-index (epub-reader-ui--state-value :spine-index))
-           (resource
-            (epub-reader-publication-spine-resource
-             publication current-index))
+           (section (epub-reader-ui--state-value :section))
            (target
-            (epub-reader-publication-resolve-href
-             publication (epub-reader-resource-path resource) href)))
+            (epub-reader-publication-resolve-resource
+             publication section href)))
       (if (epub-reader-link-target-external-p target)
           (browse-url (epub-reader-link-target-uri target))
         (let ((index
@@ -270,7 +295,10 @@
     (unwind-protect
         (progn
           (setq publication (epub-reader-publication-open file))
-          (let* ((blocks (epub-reader-render-chapter publication 0))
+          (let* ((section
+                  (epub-reader-publication-load-section publication 0))
+                 (blocks
+                  (epub-reader-render-section publication section))
                  (name
                   (generate-new-buffer-name
                    (format "*EPUB: %s*"
@@ -280,6 +308,7 @@
                    name #'epub-reader-ui-frame
                    (list :publication publication
                          :spine-index 0
+                         :section section
                          :blocks blocks
                          :file (expand-file-name file)))))
           (with-current-buffer buffer

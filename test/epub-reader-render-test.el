@@ -55,10 +55,9 @@
                'epub-reader-href "chapter2.xhtml#second"
                (epub-reader-block-text last))))
         (should link-position)
-        (should
-         (keymapp
-          (get-text-property link-position 'keymap
-                             (epub-reader-block-text last)))))
+        (should-not
+         (get-text-property link-position 'keymap
+                            (epub-reader-block-text last))))
       (dolist (block blocks)
         (let ((source
                (get-text-property 0 'epub-reader-source

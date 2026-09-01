@@ -158,5 +158,23 @@
       (should (equal (epub-reader-toc-entry-fragment chapter) "章一"))
       (should (equal (epub-reader-toc-entry-label appendix) "附录")))))
 
+(ert-deftest epub-reader-publication-loads-sections-behind-public-seam ()
+  (epub-reader-publication-test--with "epub3-edge.epub" publication
+    (let* ((section
+            (epub-reader-publication-load-section publication 0))
+           (target
+            (epub-reader-publication-resolve-resource
+             publication section "target.xhtml#base-target")))
+      (should (epub-reader-section-p section))
+      (should (equal (epub-reader-section-path section)
+                     "EPUB/text/a b.xhtml"))
+      (should (equal (epub-reader-section-base-path section)
+                     "EPUB/assets/"))
+      (should (consp (epub-reader-section-document section)))
+      (should (equal (epub-reader-link-target-path target)
+                     "EPUB/assets/target.xhtml"))
+      (should (equal (epub-reader-link-target-fragment target)
+                     "base-target")))))
+
 (provide 'epub-reader-publication-test)
 ;;; epub-reader-publication-test.el ends here

@@ -19,9 +19,6 @@
 (require 'epub-reader-locator)
 (require 'epub-reader-publication)
 
-(declare-function epub-reader-follow-link "epub-reader-ui" ())
-(declare-function epub-reader-follow-link-mouse "epub-reader-ui" (event))
-
 (defcustom epub-reader-image-rows 16
   "Number of text rows allocated to an EPUB image in the first release."
   :type 'integer
@@ -76,13 +73,6 @@
   '((t (:inherit shadow :slant italic)))
   "Face for image alternative text."
   :group 'epub-reader)
-
-(defvar epub-reader-render-link-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'epub-reader-follow-link)
-    (define-key map [mouse-1] #'epub-reader-follow-link-mouse)
-    map)
-  "Text-property keymap attached to rendered EPUB links.")
 
 (cl-defstruct (epub-reader-block
                (:constructor epub-reader-block--create))
@@ -187,11 +177,7 @@
                     (when (and href (> (length result) 0))
                       (add-text-properties
                        0 (length result)
-                       (list 'epub-reader-href href
-                             'help-echo href
-                             'mouse-face 'highlight
-                             'follow-link t
-                             'keymap epub-reader-render-link-map)
+                       (list 'epub-reader-href href)
                        result))
                     result))
                  ("br" (propertize "\n" 'epub-reader-hard-break t))
@@ -308,8 +294,8 @@ break between non-CJK words becomes one space.  Newlines carrying the
         ((= level 2) 'epub-reader-heading-2-face)
         (t 'epub-reader-heading-3-face)))
 
-(defun epub-reader-render--image-data (publication document-path node)
-  "Return (FILE ALT) for image NODE in DOCUMENT-PATH of PUBLICATION."
+(defun epub-reader-render--image-data (publication section node)
+  "Return (FILE ALT) for image NODE in SECTION of PUBLICATION."
   (let ((source (or (epub-reader-render--attribute node "src")
                     (epub-reader-render--attribute node "href")))
         (alt (or (epub-reader-render--attribute node "alt") "Image")))
@@ -317,8 +303,8 @@ break between non-CJK words becomes one space.  Newlines carrying the
         (list nil alt)
       (condition-case nil
           (let ((target
-                 (epub-reader-publication-resolve-href
-                  publication document-path source)))
+                 (epub-reader-publication-resolve-resource
+                  publication section source)))
             (list (and (not (epub-reader-link-target-external-p target))
                        (file-readable-p (epub-reader-link-target-file target))
                        (epub-reader-link-target-file target))
@@ -340,20 +326,12 @@ break between non-CJK words becomes one space.  Newlines carrying the
       " | "))
    (epub-reader-render--descendants node "tr") "\n"))
 
-(defun epub-reader-render--document-dom (resource)
-  "Parse XHTML RESOURCE and return its document element."
-  (epub-reader-publication--parse-file (epub-reader-resource-file resource)))
-
-(defun epub-reader-render-chapter (publication spine-index)
-  "Return semantic blocks for PUBLICATION at zero-based SPINE-INDEX."
-  (let ((resource
-         (epub-reader-publication-spine-resource publication spine-index)))
-    (unless resource
-      (signal 'args-out-of-range
-              (list spine-index
-                    (length (epub-reader-publication-spine publication)))))
-    (let* ((document-path (epub-reader-resource-path resource))
-           (root (epub-reader-render--document-dom resource))
+(defun epub-reader-render-section (publication section)
+  "Return semantic blocks for parsed SECTION in PUBLICATION."
+  (unless (epub-reader-section-p section)
+    (signal 'wrong-type-argument (list 'epub-reader-section-p section)))
+  (let* ((document-path (epub-reader-section-path section))
+           (root (epub-reader-section-document section))
            (body (or (epub-reader-render--descendant root "body") root))
            blocks)
       (cl-labels
@@ -388,7 +366,7 @@ break between non-CJK words becomes one space.  Newlines carrying the
            (emit-image (node path)
              (pcase-let ((`(,file ,alt)
                            (epub-reader-render--image-data
-                            publication document-path node)))
+                            publication section node)))
                (emit 'image node (format "[%s]" alt) path nil file alt)))
            (walk-children (node context path)
              (cl-loop
@@ -453,7 +431,13 @@ break between non-CJK words becomes one space.  Newlines carrying the
                    (emit 'anchor node "" path))
                  (walk-children node context path))))))
         (walk-children body nil "body"))
-      (nreverse blocks))))
+    (nreverse blocks)))
+
+(defun epub-reader-render-chapter (publication spine-index)
+  "Load and return semantic blocks at PUBLICATION's SPINE-INDEX."
+  (epub-reader-render-section
+   publication
+   (epub-reader-publication-load-section publication spine-index)))
 
 (defun epub-reader-render--text-element (value)
   "Return a width-aware TextUI prose element for VALUE."

@@ -42,6 +42,11 @@
   "A resolved internal or external hyperlink."
   external-p uri path file fragment)
 
+(cl-defstruct (epub-reader-section
+               (:constructor epub-reader-section--create))
+  "One parsed spine section with its effective resource base."
+  spine-index resource path base-path document)
+
 (cl-defstruct (epub-reader-publication
                (:constructor epub-reader-publication--create))
   "A normalized EPUB publication owned by the caller."
@@ -705,6 +710,67 @@ uppercase percent escapes so they cannot become path separators."
                              (epub-reader-publication-spine publication)))
                    (aref (epub-reader-publication-spine publication) index))))
     (and item (epub-reader-spine-item-resource item))))
+
+(defun epub-reader-publication-load-section (publication spine-index)
+  "Parse and return PUBLICATION's section at zero-based SPINE-INDEX.
+
+This is the public boundary that owns spine resource validation, temporary
+container paths, XML parsing, and the XHTML `base' element."
+  (when (epub-reader-publication-closed-p publication)
+    (signal 'epub-reader-publication-error
+            '("Cannot load a section from a closed publication")))
+  (let ((resource
+         (epub-reader-publication-spine-resource publication spine-index)))
+    (unless resource
+      (signal 'args-out-of-range
+              (list spine-index
+                    (length (epub-reader-publication-spine publication)))))
+    (when (epub-reader-resource-remote-p resource)
+      (signal 'epub-reader-publication-error
+              '("Cannot parse a remote spine section")))
+    (let ((file (epub-reader-resource-file resource)))
+      (unless (and file (file-readable-p file))
+        (signal 'epub-reader-publication-error
+                (list (format "Spine section is missing: %s"
+                              (epub-reader-resource-path resource)))))
+      (let* ((document (epub-reader-publication--parse-file file))
+             (path (epub-reader-resource-path resource))
+             (head
+              (epub-reader-publication--descendant
+               document "head" epub-reader-publication--xhtml-namespace))
+             (base-node
+              (and head
+                   (epub-reader-publication--child
+                    head "base" epub-reader-publication--xhtml-namespace)))
+             (base-href
+              (and base-node
+                   (epub-reader-publication--attribute base-node "href")))
+             (base-target
+              (and base-href
+                   (epub-reader-publication-resolve-href
+                    publication path base-href))))
+        (when (and base-target
+                   (epub-reader-link-target-external-p base-target))
+          (signal 'epub-reader-publication-error
+                  (list (format "Remote XHTML base is unsupported: %s"
+                                base-href))))
+        (when (and base-target (epub-reader-link-target-fragment base-target))
+          (signal 'epub-reader-publication-error
+                  (list (format "XHTML base cannot contain a fragment: %s"
+                                base-href))))
+        (epub-reader-section--create
+         :spine-index spine-index :resource resource :path path
+         :base-path (if base-target
+                        (epub-reader-link-target-path base-target)
+                      path)
+         :document document)))))
+
+(defun epub-reader-publication-resolve-resource (publication section href)
+  "Resolve HREF relative to parsed SECTION in PUBLICATION."
+  (unless (epub-reader-section-p section)
+    (signal 'wrong-type-argument (list 'epub-reader-section-p section)))
+  (epub-reader-publication-resolve-href
+   publication (epub-reader-section-base-path section) href))
 
 (provide 'epub-reader-publication)
 ;;; epub-reader-publication.el ends here
