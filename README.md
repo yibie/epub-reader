@@ -81,8 +81,10 @@ Open a book with:
 M-x epub-reader-open RET /path/to/book.epub RET
 ```
 
-The reader opens in a centered column. Resizing the window or changing text
-scale reflows the visible content while keeping the same semantic position.
+The reader takes over the frame and shows the book in a centered column;
+`q` closes it and brings the previous windows back. Resizing the window or
+changing text scale reflows the visible content while keeping the same
+semantic position.
 
 Progress saving is enabled by default. Unless
 `epub-reader-store-directory` is set, reading progress, bookmarks, highlights,
@@ -108,7 +110,7 @@ itself is never modified.
 | `e` | View or edit the note on the highlight at point |
 | `a` | Open the highlights and notes list |
 | `RET` | Follow the internal link at point, or an allowed external link |
-| `q` | Save progress and close the reader |
+| `q` | Save progress, close the reader, and restore the previous window layout |
 
 ### Table of contents
 
@@ -143,6 +145,7 @@ The settings most readers are likely to change are:
 | Purpose | Options |
 |---|---|
 | Reading column and images | `epub-reader-reading-width`, `epub-reader-image-rows`, `epub-reader-text-wrap-strategy` |
+| Window layout | `epub-reader-open-full-frame` |
 | Initial chapter paint | `epub-reader-first-paint-max-blocks`, `epub-reader-first-paint-max-characters` |
 | Cold scrolling | `epub-reader-scroll-chunk-max-blocks`, `epub-reader-scroll-chunk-max-characters` |
 | Background work | `epub-reader-background-idle-delay` |

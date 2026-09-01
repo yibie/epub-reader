@@ -18,6 +18,8 @@
 
 ### Changed
 
+- 打开书后阅读 buffer 独占当前 frame，`q` 退出时恢复原来的窗口布局；新增
+  `epub-reader-open-full-frame` 开关（默认开启）。
 - 容器改为中央目录 preflight 后按需 materialize；启动只展开格式元数据、恢复章节和当前
   viewport 图片，spine 权重直接读取 ZIP 中央目录的未压缩 size。
 - 图片解压移到 active chunk 的 TextUI leaf 生产阶段，并缓存已 materialize 成员。
@@ -31,6 +33,11 @@
 - 惰性容器绑定 preflight 时创建的只读归档快照；materialize 前检测外部归档替换，并以容器级
   原子 reservation/commit 维护累计解压预算。
 - publication 将暂态 materialize busy 转译为资源层错误，renderer 不再依赖 container 异常。
+
+### Fixed
+
+- 在阅读 buffer 里再打开另一本书时不再报 "EPUB reader session is unavailable"：
+  新 buffer 在首次渲染前就持有自己的 session。
 
 ### Performance
 

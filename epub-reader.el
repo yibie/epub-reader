@@ -20,7 +20,7 @@
 (defun epub-reader-open (file)
   "Open EPUB FILE in a width-aware TextUI reader."
   (interactive "fOpen EPUB: ")
-  (epub-reader-ui-open file))
+  (epub-reader-ui-open-and-display file))
 
 (provide 'epub-reader)
 ;;; epub-reader.el ends here

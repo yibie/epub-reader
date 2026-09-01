@@ -1378,5 +1378,57 @@
       (when (buffer-live-p reader) (kill-buffer reader))
       (delete-directory directory t))))
 
+(ert-deftest epub-reader-ui-open-takes-over-frame-and-quit-restores-layout ()
+  (let ((epub-reader-open-full-frame t)
+        buffer)
+    (save-window-excursion
+      (delete-other-windows)
+      (split-window-right)
+      (should (= (length (window-list nil 'no-minibuffer)) 2))
+      (setq buffer (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
+      (unwind-protect
+          (progn
+            (should (= (length (window-list nil 'no-minibuffer)) 1))
+            (should (eq (window-buffer (selected-window)) buffer))
+            (with-current-buffer buffer
+              (epub-reader-quit))
+            (should-not (buffer-live-p buffer))
+            (should (= (length (window-list nil 'no-minibuffer)) 2)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest epub-reader-ui-open-keeps-layout-when-full-frame-is-disabled ()
+  (let ((epub-reader-open-full-frame nil)
+        buffer)
+    (save-window-excursion
+      (delete-other-windows)
+      (split-window-right)
+      (setq buffer (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
+      (unwind-protect
+          (progn
+            (should (get-buffer-window buffer))
+            (should (>= (length (window-list nil 'no-minibuffer)) 2))
+            (with-current-buffer buffer
+              (should-not epub-reader-ui--window-configuration)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest epub-reader-ui-opens-second-book-from-inside-a-reader ()
+  (let ((epub-reader-enable-progress nil)
+        first second)
+    (unwind-protect
+        (progn
+          (setq first (epub-reader-open (epub-reader-test-fixture "epub2.epub")))
+          (with-current-buffer first
+            (setq second
+                  (epub-reader-open (epub-reader-test-fixture "epub3.epub"))))
+          (should (buffer-live-p second))
+          (with-current-buffer second
+            (should (epub-reader-session-p epub-reader-ui--session))
+            (should (> (buffer-size) 0))))
+      (dolist (buffer (list first second))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (provide 'epub-reader-ui-test)
 ;;; epub-reader-ui-test.el ends here

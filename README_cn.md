@@ -70,7 +70,8 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 M-x epub-reader-open RET /path/to/book.epub RET
 ```
 
-阅读 buffer 会显示居中的正文栏；调整窗口宽度时，TextUI 会重新排版并尽量保持当前语义位置。
+打开后阅读 buffer 独占整个 frame，显示居中的正文栏，按 `q` 关闭并恢复原来的窗口布局；
+调整窗口宽度时，TextUI 会重新排版并尽量保持当前语义位置。
 默认启用进度保存。阅读进度、书签、高亮和笔记写在 EPUB 旁边的
 `BOOK.epub.epub-reader`，可通过 `epub-reader-store-directory` 改到集中目录；原 EPUB
 文件不会被修改。
@@ -92,7 +93,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | `e` | 查看或编辑光标所在高亮的笔记 |
 | `a` | 打开高亮与笔记列表 |
 | `RET` | 打开 point 所在的内部或允许的外部链接 |
-| `q` | 保存进度并关闭阅读 buffer |
+| `q` | 保存进度、关闭阅读 buffer 并恢复之前的窗口布局 |
 
 目录 buffer 中，`RET` 跳转（无目标的分组则折叠/展开），`TAB` 折叠/展开当前分组，`q`
 隐藏目录。目录重开后会恢复先前选中的行。
@@ -117,6 +118,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | 用途             | 变量                                                                                                                                                                                                                                                                                                                                                                |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 正文与图片       | epub-reader-reading-width、epub-reader-image-rows、epub-reader-text-wrap-strategy                                                                                                                                                                                                                                                                                   |
+| 窗口布局         | epub-reader-open-full-frame |
 | 交互首绘         | epub-reader-first-paint-max-blocks、epub-reader-first-paint-max-characters                                                                                                                                                                                                                                                                                          |
 | 冷滚动 chunk     | epub-reader-scroll-chunk-max-blocks、epub-reader-scroll-chunk-max-characters                                                                                                                                                                                                                                                                                        |
 | 后台预取         | epub-reader-background-idle-delay                                                                                                                                                                                                                                                                                                                                   |

@@ -29,6 +29,15 @@
   :type 'integer
   :group 'epub-reader)
 
+(defcustom epub-reader-open-full-frame t
+  "Non-nil means an opened book takes over the whole frame.
+`epub-reader-open' then shows the reader in the selected window and hides
+every other window, and `epub-reader-quit' restores the window layout that
+was in place before the book was opened.  When nil, the reader buffer is only
+displayed through `display-buffer' and the existing windows stay as they are."
+  :type 'boolean
+  :group 'epub-reader)
+
 (defcustom epub-reader-chunk-max-blocks 64
   "Maximum semantic blocks materialized in one chapter chunk."
   :type 'integer
@@ -135,6 +144,10 @@ A single larger block is still materialized by itself."
                (:constructor epub-reader-toc-row--create))
   "One flattened visible TOC row."
   key entry depth expanded-p current-p)
+
+(defvar-local epub-reader-ui--window-configuration nil
+  "Window configuration to restore when this reader buffer is quit.
+Set only when the book took over the frame on opening.")
 
 (defvar-local epub-reader-ui--session nil
   "Domain session owned by the current EPUB reader buffer.")
@@ -2312,9 +2325,34 @@ window rows; TextUI's internal focus identity is not an EPUB position."
   (epub-reader-follow-link))
 
 (defun epub-reader-quit ()
-  "Close the current EPUB reader buffer and release its publication."
+  "Close the current EPUB reader buffer and release its publication.
+When the book took over the frame on opening, bring back the window layout
+that was in place before it was opened."
   (interactive)
-  (kill-buffer (current-buffer)))
+  (let ((configuration epub-reader-ui--window-configuration))
+    (when (and (kill-buffer (current-buffer))
+               (window-configuration-p configuration)
+               (frame-live-p (window-configuration-frame configuration)))
+      (set-window-configuration configuration))))
+
+(defun epub-reader-ui-open-and-display (file)
+  "Open EPUB FILE, display its reader buffer, and return that buffer.
+With `epub-reader-open-full-frame' non-nil the reader fills the selected frame
+and remembers the previous window layout for `epub-reader-quit'."
+  (let* ((configuration (and epub-reader-open-full-frame
+                             (current-window-configuration)))
+         (buffer (epub-reader-ui-open file)))
+    (when configuration
+      (pop-to-buffer-same-window buffer)
+      (let ((window (get-buffer-window buffer)))
+        (when window
+          (condition-case nil
+              (delete-other-windows window)
+            (error nil))
+          (select-window window)))
+      (with-current-buffer buffer
+        (setq epub-reader-ui--window-configuration configuration)))
+    buffer))
 
 (defun epub-reader-ui-open (file)
   "Open EPUB FILE in a new TextUI reader buffer and return that buffer."
@@ -2370,17 +2408,21 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                   (generate-new-buffer-name
                    (format "*EPUB: %s*"
                            (epub-reader-publication-title publication)))))
-            ;; Supply the session to the initial render, then install the same
-            ;; object as the buffer-local owner immediately after `textui-open'.
-            (let ((epub-reader-ui--session session))
-              (setq buffer
-                    (textui-open
-                     name #'epub-reader-ui-frame
-                     (list :spine-index saved-index :chunk-start (car range)
-                           :chunk-end (cadr range)
-                           :loading nil :error nil
-                           :pending-locator saved-locator
-                           :restore-quality nil)))))
+            ;; Create the TextUI buffer first so the session is its buffer-local
+            ;; owner before the initial render.  A dynamic `let' of the
+            ;; buffer-local variable would only bind the value of whichever
+            ;; reader buffer happens to be current when a second book opens.
+            (setq buffer (get-buffer-create name))
+            (with-current-buffer buffer
+              (textui-mode)
+              (setq-local epub-reader-ui--session session))
+            (textui-open
+             name #'epub-reader-ui-frame
+             (list :spine-index saved-index :chunk-start (car range)
+                   :chunk-end (cadr range)
+                   :loading nil :error nil
+                   :pending-locator saved-locator
+                   :restore-quality nil)))
           (with-current-buffer buffer
             (setq-local epub-reader-ui--session session)
             (epub-reader-ui-mode 1)
