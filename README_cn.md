@@ -12,6 +12,10 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 
 当前版本为 0.1.0，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
 
+![epub-reader 的目录、正文阅读栏和高亮列表](screenshots/reader-toc-highlights.png)
+
+左侧为目录，中间为正文阅读栏，右侧为高亮列表。
+
 ## 与 nov.el 的比较
 
 `nov.el` 是成熟、打包广、经过更多书籍验证的选择；`epub-reader` 还很年轻，但它不是

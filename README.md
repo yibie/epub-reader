@@ -15,6 +15,11 @@ and reading positions that survive changes in window width and text scale.
 Version 0.1.0 requires Emacs 29.1 or later. It does not support DRM or
 fixed-layout EPUBs.
 
+![epub-reader showing the table of contents, the reading column, and the highlights list](screenshots/reader-toc-highlights.png)
+
+Table of contents on the left, reading column in the centre, highlights list
+on the right.
+
 ## How it differs from nov.el
 
 `nov.el` is established, widely packaged, and tested against a much larger
