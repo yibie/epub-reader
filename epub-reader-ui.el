@@ -118,7 +118,8 @@ A single larger block is still materialized by itself."
 (cl-defstruct (epub-reader-chapter-data
                (:constructor epub-reader-chapter-data--create))
   "Cached parsed and normalized data for one spine document."
-  section blocks block-index anchor-index character-count character-prefixes)
+  section blocks block-index anchor-index character-count character-prefixes
+  locator-index)
 
 (cl-defstruct (epub-reader-viewport
                (:constructor epub-reader-viewport--create))
@@ -371,13 +372,17 @@ A single larger block is still materialized by itself."
               (epub-reader-publication-load-section publication index))
              (blocks
               (vconcat (epub-reader-render-section publication section)))
-             (indices (epub-reader-ui--index-blocks blocks)))
+             (indices (epub-reader-ui--index-blocks blocks))
+             (locator-index
+              (epub-reader-locator-build-chapter-index
+               (epub-reader-ui--locator-records blocks))))
         (setq chapter
               (epub-reader-chapter-data--create
                :section section :blocks blocks
                :block-index (nth 0 indices) :anchor-index (nth 1 indices)
                :character-count (nth 2 indices)
-               :character-prefixes (nth 3 indices)))
+               :character-prefixes (nth 3 indices)
+               :locator-index locator-index))
         (puthash key chapter cache)))
     chapter))
 
@@ -868,9 +873,10 @@ remap does not leave image slices measured in unscaled frame rows."
                  (epub-reader-block-key block)
                  (substring-no-properties (epub-reader-block-text block)))))
 
-(defun epub-reader-ui--annotation-spans-by-block (session blocks)
-  "Resolve SESSION annotations against BLOCKS and index their source spans."
-  (let ((records (epub-reader-ui--locator-records blocks))
+(defun epub-reader-ui--annotation-spans-by-block (session chapter)
+  "Resolve SESSION annotations against CHAPTER and index their source spans."
+  (let ((blocks (epub-reader-chapter-data-blocks chapter))
+        (locator-index (epub-reader-chapter-data-locator-index chapter))
         (table (make-hash-table :test #'equal)))
     (dolist (annotation (epub-reader-session-annotations session))
       (let* ((range (epub-reader-annotation-range annotation))
@@ -880,7 +886,7 @@ remap does not leave image slices measured in unscaled frame rows."
                    (epub-reader-block-document-path (aref blocks 0)))))
         (when (equal (epub-reader-locator-path start) section-path)
           (let* ((resolution
-                  (epub-reader-locator-range-resolve range records))
+                  (epub-reader-locator-range-resolve range locator-index))
                  (quality
                   (epub-reader-locator-range-resolution-quality resolution)))
             (setf (epub-reader-annotation-quality annotation) quality)
@@ -898,12 +904,13 @@ remap does not leave image slices measured in unscaled frame rows."
 (defun epub-reader-ui--chapter-elements (available-width)
   "Return the current budgeted chapter region at AVAILABLE-WIDTH."
   (let* ((session (epub-reader-ui--current-session))
-         (blocks (epub-reader-ui--current-blocks session))
+         (chapter (epub-reader-ui--current-chapter session))
+         (blocks (epub-reader-chapter-data-blocks chapter))
          (start (or (plist-get textui-state :chunk-start) 0))
          (end (or (plist-get textui-state :chunk-end) (length blocks)))
          (image-rows (epub-reader-ui--image-row-budget))
          (highlights (epub-reader-ui--annotation-spans-by-block
-                      session blocks))
+                      session chapter))
          elements)
     (cl-loop for index from start below (min end (length blocks))
              do (push (epub-reader-render-block-element
@@ -1910,7 +1917,10 @@ window rows; TextUI's internal focus identity is not an EPUB position."
     (user-error "Select EPUB text before adding a highlight"))
   (let* ((session (epub-reader-ui--current-session))
          (range (epub-reader-locator-range-capture
-                 start end (epub-reader-ui--state-value :spine-index)))
+                 start end (epub-reader-ui--state-value :spine-index)
+                 nil
+                 (epub-reader-chapter-data-locator-index
+                  (epub-reader-ui--current-chapter session))))
          (annotation
           (epub-reader-annotation-create
            (epub-reader-publication-book-key
@@ -1997,7 +2007,9 @@ window rows; TextUI's internal focus identity is not an EPUB position."
     (let* ((blocks (epub-reader-ui--current-blocks session))
            (resolution
             (epub-reader-locator-range-resolve
-             range (epub-reader-ui--locator-records blocks)))
+             range
+             (epub-reader-chapter-data-locator-index
+              (epub-reader-ui--current-chapter session))))
            (span (car (epub-reader-locator-range-resolution-spans resolution))))
       (unless span (user-error "Annotation text could not be found"))
       (setf (epub-reader-annotation-quality annotation)

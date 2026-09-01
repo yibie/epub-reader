@@ -52,6 +52,11 @@ PATH is the durable normalized spine href; SPINE-INDEX is a session hint."
 Each span is (BLOCK START END), with END exclusive."
   spans quality)
 
+(cl-defstruct (epub-reader-locator-chapter-index
+               (:constructor epub-reader-locator-chapter-index--create))
+  "Canonical source text and offset mapping for one spine document."
+  records text mapping)
+
 (defvar-local epub-reader-locator--source-block-cache nil
   "Cached source block records for the current rendered buffer.")
 
@@ -125,10 +130,18 @@ Each span is (BLOCK START END), with END exclusive."
                   (plist-get data :start)))
           (end (epub-reader-locator-from-plist
                 (plist-get data :end))))
-      (unless (and (equal (epub-reader-locator-book-key start)
+      (unless (and (= (epub-reader-locator-schema start) 3)
+                   (= (epub-reader-locator-schema end) 3)
+                   (equal (epub-reader-locator-book-key start)
                           (epub-reader-locator-book-key end))
                    (equal (epub-reader-locator-path start)
-                          (epub-reader-locator-path end)))
+                          (epub-reader-locator-path end))
+                   (= (epub-reader-locator-spine-index start)
+                      (epub-reader-locator-spine-index end))
+                   (or (not (equal (epub-reader-locator-block start)
+                                   (epub-reader-locator-block end)))
+                       (<= (epub-reader-locator-offset start)
+                           (epub-reader-locator-offset end))))
         (error "EPUB locator range crosses publication or spine identity"))
       (epub-reader-locator-range--create
        :schema schema :start start :end end :exact exact
@@ -368,10 +381,12 @@ Each record is (POSITION SOURCE BOOK-KEY SPINE-INDEX CHARACTER)."
                            (char-after position)))))
 
 (defun epub-reader-locator-range-capture
-    (start end spine-index &optional buffer)
+    (start end spine-index &optional buffer canonical-source)
   "Capture source text in the buffer region START through END.
 END is exclusive.  Synthetic TextUI cells are ignored.  The selected source
-must belong to one publication and one spine item."
+must belong to one publication and one spine item.  CANONICAL-SOURCE, when
+non-nil, is a chapter index or ordered source records; it supplies characters
+that layout did not paint, such as a Latin word-separator at a visual wrap."
   (with-current-buffer (or buffer (current-buffer))
     (let* ((from (min start end))
            (to (max start end))
@@ -404,27 +419,73 @@ must belong to one publication and one spine item."
                    (and (equal (nth 2 record) book-key)
                         (equal (aref (nth 1 record) 0) path)))
                  all))
-               (first-index (cl-position first same-source :test #'eq))
-               (last-index (cl-position last same-source :test #'eq))
+               (display-first-index
+                (cl-position first same-source :test #'eq))
+               (display-last-index
+                (cl-position last same-source :test #'eq))
+               (index
+                (and canonical-source
+                     (if (epub-reader-locator-chapter-index-p canonical-source)
+                         canonical-source
+                       (epub-reader-locator-build-chapter-index
+                        canonical-source))))
+               (mapping (and index
+                             (epub-reader-locator-chapter-index-mapping index)))
+               (canonical-text
+                (and index (epub-reader-locator-chapter-index-text index)))
+               (first-locator
+                (epub-reader-locator-at-point
+                 effective-spine-index (nth 0 first) (current-buffer)))
+               (last-locator
+                (epub-reader-locator-at-point
+                 effective-spine-index (nth 0 last) (current-buffer)))
+               (mapped-first-index
+                (and mapping
+                     (epub-reader-locator--range-map-index
+                      mapping first-locator)))
+               (mapped-last-index
+                (and mapping
+                     (epub-reader-locator--range-map-index
+                      mapping last-locator)))
+               (first-index (or mapped-first-index display-first-index))
+               (last-index (or mapped-last-index display-last-index))
                (prefix-start (max 0 (- first-index 24)))
-               (suffix-end (min (length same-source) (+ last-index 25))))
+               (source-length (if canonical-text
+                                  (length canonical-text)
+                                (length same-source)))
+               (suffix-end (min source-length (+ last-index 25))))
+          (unless (and first-index last-index (<= first-index last-index)
+                       (or (null canonical-text)
+                           (and mapped-first-index mapped-last-index)))
+            (setq first-index display-first-index
+                  last-index display-last-index
+                  canonical-text nil
+                  prefix-start (max 0 (- display-first-index 24))
+                  source-length (length same-source)
+                  suffix-end (min (length same-source)
+                                  (+ display-last-index 25))))
           (epub-reader-locator-range--create
            :schema 1
-           :start (epub-reader-locator-at-point
-                   effective-spine-index (nth 0 first) (current-buffer))
-           :end (epub-reader-locator-at-point
-                 effective-spine-index (nth 0 last) (current-buffer))
-           :exact (apply #'string (mapcar (lambda (record) (nth 4 record))
-                                           selected))
+           :start first-locator
+           :end last-locator
+           :exact
+           (if canonical-text
+               (substring canonical-text first-index (1+ last-index))
+             (apply #'string (mapcar (lambda (record) (nth 4 record))
+                                     selected)))
            :prefix
-           (apply #'string
-                  (mapcar (lambda (record) (nth 4 record))
-                          (cl-subseq same-source prefix-start first-index)))
+           (if canonical-text
+               (substring canonical-text prefix-start first-index)
+             (apply #'string
+                    (mapcar (lambda (record) (nth 4 record))
+                            (cl-subseq same-source prefix-start first-index))))
            :suffix
-           (apply #'string
-                  (mapcar (lambda (record) (nth 4 record))
-                          (cl-subseq same-source (1+ last-index)
-                                     suffix-end)))))))))
+           (if canonical-text
+               (substring canonical-text (1+ last-index) suffix-end)
+             (apply #'string
+                    (mapcar (lambda (record) (nth 4 record))
+                            (cl-subseq same-source (1+ last-index)
+                                       suffix-end))))))))))
 
 (defun epub-reader-locator--range-flat-source (records)
   "Return (TEXT MAP) for source RECORDS.
@@ -439,6 +500,13 @@ Each input record is (BOOK-KEY SPINE-INDEX PATH BLOCK TEXT); MAP entries are
           (push (list block offset) mapping))))
     (list (apply #'string (nreverse characters))
           (vconcat (nreverse mapping)))))
+
+(defun epub-reader-locator-build-chapter-index (records)
+  "Build a reusable canonical source index from ordered RECORDS."
+  (pcase-let ((`(,text ,mapping)
+               (epub-reader-locator--range-flat-source records)))
+    (epub-reader-locator-chapter-index--create
+     :records records :text text :mapping mapping)))
 
 (defun epub-reader-locator--range-map-index (mapping locator)
   "Return index in MAPPING matching LOCATOR's block and offset."
@@ -468,38 +536,80 @@ Each input record is (BOOK-KEY SPINE-INDEX PATH BLOCK TEXT); MAP entries are
       (push (list current-block current-start (1+ previous-offset)) spans))
     (nreverse spans)))
 
+(defun epub-reader-locator--common-prefix-length (left right)
+  "Return the number of equal characters at the start of LEFT and RIGHT."
+  (cl-loop for index from 0 below (min (length left) (length right))
+           while (= (aref left index) (aref right index))
+           finally return index))
+
+(defun epub-reader-locator--common-suffix-length (left right)
+  "Return the number of equal characters at the end of LEFT and RIGHT."
+  (cl-loop for index from 1 to (min (length left) (length right))
+           while (= (aref left (- (length left) index))
+                    (aref right (- (length right) index)))
+           finally return (1- index)))
+
 (defun epub-reader-locator--range-context-score
     (text start end prefix suffix)
   "Return a context match score around TEXT indexes START and END."
-  (+ (if (string-suffix-p
-          prefix (substring text (max 0 (- start (length prefix))) start))
-         (length prefix) 0)
-     (if (string-prefix-p
-          suffix (substring text end (min (length text)
-                                          (+ end (length suffix)))))
-         (length suffix) 0)))
+  (+ (epub-reader-locator--common-suffix-length
+      prefix (substring text (max 0 (- start (length prefix))) start))
+     (epub-reader-locator--common-prefix-length
+      suffix (substring text end (min (length text)
+                                      (+ end (length suffix)))))))
 
-(defun epub-reader-locator--range-quote-index (text exact prefix suffix)
-  "Return best START index of EXACT in TEXT using PREFIX and SUFFIX context."
+(defun epub-reader-locator--rank-greater-p (left right)
+  "Return non-nil when lexicographic numeric rank LEFT exceeds RIGHT."
+  (catch 'result
+    (cl-mapc (lambda (a b)
+               (cond ((> a b) (throw 'result t))
+                     ((< a b) (throw 'result nil))))
+             left right)
+    nil))
+
+(defun epub-reader-locator--range-quote-match
+    (text mapping locator exact prefix suffix)
+  "Return the unique best quote match in TEXT, or an ambiguous result.
+MAPPING connects flat source positions to block offsets.  LOCATOR supplies the
+original block and offset used after textual context to break stable ties."
   (let ((regexp (regexp-quote exact))
         (cursor 0)
-        best best-score)
+        best best-rank ambiguous)
     (while (and (<= cursor (length text))
                 (string-match regexp text cursor))
       (let* ((start (match-beginning 0))
              (end (match-end 0))
-             (score (epub-reader-locator--range-context-score
-                     text start end prefix suffix)))
-        (when (or (null best-score) (> score best-score))
-          (setq best start best-score score))
+             (entry (aref mapping start))
+             (same-block
+              (equal (car entry) (epub-reader-locator-block locator)))
+             (distance (if same-block
+                           (abs (- (cadr entry)
+                                   (epub-reader-locator-offset locator)))
+                         most-positive-fixnum))
+             (rank
+              (list (epub-reader-locator--range-context-score
+                     text start end prefix suffix)
+                    (if same-block 1 0)
+                    (- distance))))
+        (cond
+         ((or (null best-rank)
+              (epub-reader-locator--rank-greater-p rank best-rank))
+          (setq best start best-rank rank ambiguous nil))
+         ((equal rank best-rank)
+          (setq ambiguous t)))
         (setq cursor (max (1+ start) end))))
-    best))
+    (list :index best :ambiguous ambiguous)))
 
-(defun epub-reader-locator-range-resolve (range records)
+(defun epub-reader-locator-range-resolve (range source)
   "Resolve RANGE against canonical source RECORDS.
-RECORDS are ordered (BOOK-KEY SPINE-INDEX PATH BLOCK TEXT) values.  Return
-source spans whose end offsets are exclusive."
-  (let* ((start-locator (epub-reader-locator-range-start range))
+SOURCE is either ordered (BOOK-KEY SPINE-INDEX PATH BLOCK TEXT) values or a
+chapter index built from them.  Return source spans whose end offsets are
+exclusive."
+  (let* ((records (if (epub-reader-locator-chapter-index-p source)
+                      (epub-reader-locator-chapter-index-records source)
+                    source))
+         (start-locator (epub-reader-locator-range-start range))
+         (end-locator (epub-reader-locator-range-end range))
          (book-key (epub-reader-locator-book-key start-locator))
          (path (epub-reader-locator-path start-locator))
          (matching
@@ -512,6 +622,19 @@ source spans whose end offsets are exclusive."
      ((not (= (or (epub-reader-locator-range-schema range) 0) 1))
       (epub-reader-locator-range-resolution--create
        :spans nil :quality 'unsupported-schema))
+     ((or (not (epub-reader-locator-p start-locator))
+          (not (epub-reader-locator-p end-locator))
+          (/= (or (epub-reader-locator-schema start-locator) 0) 3)
+          (/= (or (epub-reader-locator-schema end-locator) 0) 3))
+      (epub-reader-locator-range-resolution--create
+       :spans nil :quality 'unsupported-schema))
+     ((or (not (equal book-key
+                      (epub-reader-locator-book-key end-locator)))
+          (not (equal path (epub-reader-locator-path end-locator)))
+          (/= (epub-reader-locator-spine-index start-locator)
+              (epub-reader-locator-spine-index end-locator)))
+      (epub-reader-locator-range-resolution--create
+       :spans nil :quality 'invalid-range))
      ((and records (null matching))
       (epub-reader-locator-range-resolution--create
        :spans nil :quality 'identity-mismatch))
@@ -519,8 +642,13 @@ source spans whose end offsets are exclusive."
       (epub-reader-locator-range-resolution--create
        :spans nil :quality 'none))
      (t
-      (pcase-let* ((`(,text ,mapping)
-                     (epub-reader-locator--range-flat-source matching))
+      (pcase-let* ((index
+                    (if (and (epub-reader-locator-chapter-index-p source)
+                             (equal matching records))
+                        source
+                      (epub-reader-locator-build-chapter-index matching)))
+                   (text (epub-reader-locator-chapter-index-text index))
+                   (mapping (epub-reader-locator-chapter-index-mapping index))
                     (start-index
                      (epub-reader-locator--range-map-index
                       mapping (epub-reader-locator-range-start range)))
@@ -535,17 +663,22 @@ source spans whose end offsets are exclusive."
            :spans (epub-reader-locator--range-spans
                    mapping start-index end-index)
            :quality 'exact))
-         ((let ((quote-index
-                 (epub-reader-locator--range-quote-index
-                  text exact
-                  (epub-reader-locator-range-prefix range)
-                  (epub-reader-locator-range-suffix range))))
-            (when quote-index
+         ((let* ((match
+                  (epub-reader-locator--range-quote-match
+                   text mapping start-locator exact
+                   (epub-reader-locator-range-prefix range)
+                   (epub-reader-locator-range-suffix range)))
+                 (quote-index (plist-get match :index)))
+            (cond
+             ((plist-get match :ambiguous)
+              (epub-reader-locator-range-resolution--create
+               :spans nil :quality 'ambiguous))
+             (quote-index
               (epub-reader-locator-range-resolution--create
                :spans (epub-reader-locator--range-spans
                        mapping quote-index
                        (1- (+ quote-index (length exact))))
-               :quality 'quote))) )
+               :quality 'quote)))))
          (t
           (epub-reader-locator-range-resolution--create
            :spans nil :quality 'none))))))))
