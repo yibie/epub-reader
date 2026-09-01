@@ -17,37 +17,44 @@
 限制说明五个修复提交。复核重新执行 `./test/run-tests.sh`：**70/70 通过，0 unexpected**，
 并另跑五条 P1 的独立运行时探针。
 
+末次复核基线为 `c524584...b885c71`，严格只检查 S-01/S-04。新增相关 ERT
+**4/4 通过，0 unexpected**；未重跑或重新裁决其他模块。两个独立对抗探针分别覆盖
+“两个 reader 都发生过位置变化但逆序保存”以及“stale 判定后、rename 前锁已被新活 owner
+替换”的窗口。
+
 ## 结论先行
 
-**最终 Gate 仍未解除，不建议进入下一阶段。** 原 5 个 P1 中 V-01、V-02、T-01、
-G-01 已解决；S-01 只解决了 sidecar 的文件事务，没有解决两个真实 reader buffer 对同书
-位置的 stale overwrite。并发修复还引入一个 crash 后遗留 `.lock` 会永久阻塞后续保存的
-S-04（P1）。V-04 可作为明确的软预算限制接受；S-03 不能按“只有额外 I/O”的已知限制接受，
-因为无 dirty state 的重复捕获/保存正是 S-01 仍可复现的组成部分。
+**末次 Gate 仍未解除，不建议进入下一阶段。** 原 5 个 P1 中 V-01、V-02、T-01、
+G-01 已解决；S-01 的“未移动旧 reader 晚关闭”已修，但 capture timestamp 仍在 save/close
+时生成，所以“先移动、后关闭”的旧 reader 仍能覆盖更新位置。S-04 的普通死 owner 接管已修，
+但 stale check 与 rename 之间存在 ABA，新活 owner 的锁仍可能被误删。两项均为**部分解决的
+P1**。本轮没有重新审计 V-03/V-04/S-03 等既有 P2。
 
 | 最终状态 | 数量 | Finding |
 |---|---:|---|
 | P0 阻断 | 0 | 无 |
 | 原 P1 已解决 | 4 | V-01、V-02、T-01、G-01 |
-| 原 P1 部分解决 | 1 | S-01 |
-| 新发现 P1 | 1 | S-04（stale lock） |
+| 原 P1 部分解决 | 1 | S-01（dirty old reader 逆序保存） |
+| 新发现 P1 部分解决 | 1 | S-04（lock reclaim ABA） |
 | P2 已解决 | 3 | S-02、X-01、X-02 |
 | P2 部分解决 | 1 | V-03 |
-| P2 已知限制 | 2 | V-04 接受；S-03 的“纯非阻断”定性不接受 |
+| P2（沿用上轮结论） | 2 | V-04、S-03；本轮未复核 |
 
-## 最终复核探针摘要
+## 累计复核探针摘要
 
 | 目标 | 最终实测 | 判定 |
 |---|---|---|
 | V-01 视觉行恢复 | 两个 window 的 locator block/offset 均相同；长段 shift 前后 visual row `6 -> 6` | 已解决 |
 | V-02 locator 属性预算 | chunk `(0 21)` 外无 `epub-reader-source`；canonical blocks 的 source-property 数为 0；当前 rendered slice 有属性 | 已解决 |
 | S-01 文件事务 | 人为交错时锁覆盖 read/merge/write，竞争方 pending 保留；两个 book-key 均存活，无残留锁 | 低层事务已解决 |
-| S-01 真实双 reader | B 前进到第 2 章并关闭，旧 A 后关闭；重开预期 spine 1，实际 spine 0 | **部分解决，仍阻断** |
+| S-01 未移动旧 reader | B 前进到第 2 章并关闭，未移动的旧 A 后关闭；重开 spine 1 | 已解决 |
+| S-01 已移动旧 reader | A 先移动但不保存；B 后到第 2 章并先保存；A 后关闭；重开预期 spine 1，实际 spine 0 | **未解决，仍阻断** |
 | T-01 TOC 重开 | 选中 `0/0/0` 后隐藏/重开，buffer point 与 window point 的 key 都是 `0/0/0` | 已解决 |
 | G-01 书末百分比 | 书首 `0.0`，同一长块内 `0.0 -> 9.091098`，书末 `100.0` | 已解决 |
 | V-04 单巨块 | 字符预算 2,000，50,000 字符块仍形成 `(0 1)` | 限制属实，接受 |
-| S-03 timer | `run-with-idle-timer` 的 repeat 参数仍为 `t` | 限制属实，但定性不接受 |
-| S-04 crash lock | 预置 `.lock` 后 flush 超时；lock 仍在且 pending 保留 | **新 P1** |
+| S-03 timer（上轮） | `b885c71` 前 repeat 参数为 `t`；本轮未独立复核其新实现 | 本轮不裁决 |
+| S-04 普通孤儿锁 | 同主机 dead PID owner 可接管，locator 持久化，lock 无残留 | 已解决 |
+| S-04 ABA | stale check 后把旧锁替换为有效 live-owner 锁；原 contender 仍成功 flush，新活锁被删除 | **未解决，仍阻断** |
 
 ## 初审独立探针摘要（修复前）
 
@@ -157,6 +164,15 @@ S-04（P1）。V-04 可作为明确的软预算限制接受；S-03 不能按“�
   更晚时间戳。`test/epub-reader-store-test.el:51-73` 人工让旧 locator 先 stage，因此没有覆盖
   生产反例。修复应以“最后一次真实位置变化”的时间/版本为准，并让未 dirty 的 buffer 在
   idle/kill 时只 flush 已有 pending，不重新 stage。
+- **末次复核结果：仍是部分解决，P1 未关闭。** `b885c71` 引入 progress key、dirty state 和
+  one-shot debounce；未移动的旧 reader 晚关闭探针现正确恢复 spine 1。但
+  `epub-reader-ui.el:420-466` 在位置变化时只保存 key/dirty，真正调用
+  `epub-reader-store-stage` 时才由 `epub-reader-store.el:153-163` 生成 `float-time`。
+  对抗探针让 A 先移动但不触发 timer，B 后移动到第 2 章并先关闭，A 最后关闭；A 确认
+  `dirty=t`，重开却从预期 spine 1 回到 spine 0。时间戳仍代表保存顺序而非位置变化顺序。
+  `test/epub-reader-store-test.el:77-102` 只覆盖 A 从未移动。应在 observe 时捕获 locator 与
+  timestamp（或等价单调 revision），后续 idle/kill 仅 flush 该 snapshot，并新增两个 reader
+  都 dirty、逆序 flush 的回归。
 
 ### S-04 — P1 应修：目录锁在进程崩溃后永久阻塞 store
 
@@ -170,6 +186,15 @@ S-04（P1）。V-04 可作为明确的软预算限制接受；S-03 不能按“�
 - **修复建议：** 使用有 owner metadata 的 lock（PID、host、进程启动标识/nonce），仅在可证明
   owner 已死亡或租约超时后安全回收；或者改用 OS 会在进程退出时释放的 advisory lock。必须加
   crash/stale-lock 回归，不能无条件删除一个仍可能被活进程持有的锁。
+- **末次复核结果：部分解决，P1 未关闭。** `epub-reader-store.el:166-324` 增加 PID、host、
+  process start、nonce、ownerless grace 和 quarantine rename；普通同主机 dead PID 探针能接管、
+  持久化且无 lock 残留，live-owner 顺序测试也会拒绝接管。可是
+  `--reclaim-stale-lock` 在 `:269` 先判断旧 lock stale，随后到 `:281` 才按 pathname rename；
+  两步没有绑定读到的 owner nonce。确定性 ABA 探针在两步之间移走旧孤儿锁并安装有效的
+  live-owner 锁，原 contender 仍将新锁 rename/delete、成功 flush，`new-live-lock-survived=nil`。
+  现有 `test/epub-reader-store-test.el:151-221` 都是顺序场景。接管必须通过能把回收动作原子绑定
+  到原 owner identity 的锁/lease/CAS 机制；补双 contender 交错测试。异主机 owner 当前永久
+  视作 alive（`:227-248`）也意味着共享目录上的远端宿主崩溃仍无法自动恢复。
 
 ### S-02 — P2 建议：有 schema 检查，但没有 migration 路由
 
@@ -263,20 +288,21 @@ S-04（P1）。V-04 可作为明确的软预算限制接受；S-03 不能按“�
 
 ## Standards
 
-最终标准轴复核：V-02、X-01、X-02 已关闭，生产代码仍只使用 TextUI 公开 API。剩余硬偏差有
-两项：`architecture.md:246` 要求 idle debounce，而 `epub-reader-ui.el:588-605` 仍是周期 timer；
-`architecture.md:52,230,272` 把 progression 归 Locator，`epub-reader-ui.el:339-380` 却在 UI
-计算。后者目前记 P2 架构债，不阻断本次 endpoint Gate。`--index-blocks` 的四元素 list/`nth`
-是低风险 judgment-only Data Clumps smell。
+末次 Standards 轴只复核 S-01/S-04。S-01 的 one-shot debounce/session 生命周期方向符合
+`architecture.md:246`，但 dirty 只记布尔值、capture timestamp 延迟到保存，仍不能表达真正的
+位置先后。S-04 的 stale check/rename ABA 可破坏 `architecture.md:247` 要求的事务互斥，是硬
+违反。owner/token 以 plist 在多函数间传播属于低风险 Data Clumps/Primitive Obsession
+judgment call。其他标准项沿用上轮结论，本轮不重排。
 
 ## Spec
 
-最终规格轴复核：V-01、V-02、S-02、T-01 和 G-01 的既定验收均通过；V-04 符合蓝图明确的
-软预算语义；V-03 只修了比较符，没有实现实际 block 数的对称。S-01 的低层事务满足规格，
-但 UI lifecycle 仍能制造更新时间更晚的 stale locator，故端到端规格未满足；S-04 是锁实现的
-新 crash-recovery 缺口。最严重项仍为 S-01/S-04，均会破坏持久进度的可靠性。
+末次 Spec 轴只复核 S-01/S-04。S-01 满足“未移动旧 reader 不覆盖”，但不满足审计文档要求的
+“更新时间代表最后一次真实位置变化”；两个 reader 都移动的逆序保存仍失败。S-04 满足顺序的
+同主机死 owner/ownerless 接管和 live owner 拒绝，但不满足“不能误删活 owner”：ABA 窗口可删
+掉刚建立的新锁；异主机崩溃后的 owner 也永久被视作 alive。未发现这两项之外的 scope creep。
 
-双轴摘要：无 P0；四条原 P1 已关闭，一条原 P1 部分关闭，新增一条 P1。
+双轴摘要：Standards 2 个 High、1 个 Low smell；Spec 2 个 High；最严重项分别为 lock ABA 与
+S-01/S-04 的端到端规格未满足。
 
 ## 已验证通过
 
@@ -285,6 +311,8 @@ S-04（P1）。V-04 可作为明确的软预算限制接受；S-03 不能按“�
 - sidecar temp 与目标同目录，写前 mode 0600，rename 后没有残留 `.tmp-*`；corrupt/newer 文件
   会保留，不会被静默覆盖。
 - 正常进程内竞争时，sidecar lock 覆盖完整 read/merge/write/rename 事务；失败方 pending 可重试。
+- 未移动的旧 reader 晚关闭不会再覆盖新位置；同主机 dead PID 和过期 ownerless lock 的顺序
+  接管可完成，已有有效 live owner 的顺序场景会拒绝接管。
 - exact 与 degraded restore 都写入 `:restore-quality` 并分别用 message/warning 提示；
   `test/epub-reader-store-test.el:73-120` 的端到端路径通过。
 - TOC 多级 flatten/fold、collapsed state、当前章节 face、跨 spine 跳转以及 `q`/重开选中行通过；
@@ -298,23 +326,24 @@ S-04（P1）。V-04 可作为明确的软预算限制接受；S-03 不能按“�
 
 ## 测试质量
 
-70 个测试较原 62 个有实质提升：新增视觉折行/双 window、chunk 外属性、effect dependency、
-guard 等号、store lock 范围、人工 capture timestamp 顺序、schema 0 policy、真实 TOC 重开和
-progress 0/块内/100 endpoint。仍有三个关键缺口：
+实现者报告 74/74；末次复核按用户限定只运行 S-01/S-04 相关新增 ERT，**4/4 通过**。新增测试
+覆盖未移动旧 reader、同主机 dead owner、过期 ownerless lock 和顺序 live owner，仍漏两条决定
+Gate 的交错路径：
 
-- store 的“旧 handle”测试先固定旧 capture time，再让新 handle capture，未走 UI 在每次
-  idle/kill 重新 stage 的生产路径；应新增两个真实 reader buffer 的端到端测试；
-- lock 测试只验证正常返回后清理，没有模拟 owner crash/stale lock 与安全回收；
-- guard 测试名称声称 symmetric，却把 exclusive-end 导致的 9/8 与 guard=0 单侧行为写成预期；
-  progress 测试也没有锁定跨章节权重究竟是文件 bytes 还是规范 source characters。
+- `test/epub-reader-store-test.el:77-102` 没有让旧 reader 先真实移动并保持 dirty，再让较新的
+  reader 先保存；
+- `test/epub-reader-store-test.el:151-221` 没有在 stale 判定与 rename 之间安装一个新 live-owner
+  lock，也没有覆盖异主机 owner 的 crash-recovery policy。
+
+其他 70 个测试的覆盖评价沿用上轮，本次没有扩大验证范围。
 
 ## Gate 结论
 
-**Gate 未解除，不可进入下一阶段。** V-01、V-02、T-01、G-01 已关单；阻断项剩两条：
+**Gate 未解除，不可进入下一阶段。** 本轮只裁决的两项都仍是部分解决：
 
-1. 关闭 S-01：保存时间必须代表最后一次真实位置变化，未 dirty 的 reader 在 idle/kill 时不得
-   重新 stage stale locator；增加“双 reader，新的先关闭、旧的后关闭、重开仍为新位置”回归。
-2. 关闭 S-04：锁 owner 异常退出后必须能安全识别并恢复 stale lock，且不能误删活 owner 的锁。
+1. S-01：在位置变化时捕获 locator + timestamp/revision；idle/kill 只能 flush 该 snapshot。
+   必须通过“两个 reader 都移动，较新位置先保存、旧 reader 后关闭”的回归。
+2. S-04：stale 判定和接管必须原子绑定同一个 owner identity，不能仅按 pathname rename；必须
+   通过双 contender ABA 回归，并明确异主机 orphan 的安全恢复 policy。
 
-S-03 在与 S-01 解耦前不能仅记作性能限制。V-03、V-04 和 progression owner/权重语义可保留为
-明确 P2，不单独阻断 Gate。
+其他 finding 本轮未复核，也不影响这两个 P1 已足以维持 Gate。
