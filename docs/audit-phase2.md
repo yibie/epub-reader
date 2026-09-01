@@ -31,22 +31,27 @@ Gate 终审基线为 `a9fcfe0...98ae9a7`，只复核 S-04 intent 协议。实现
 交错，再让真实短命子 Emacs 留下 intent 后由父进程 acquire。随后沿同一 S-04 协议补测
 canonical lock 的 `mkdir -> owner.el` 发布窗口。
 
+最终裁决基线为 `4cac853...25fc712`，严格只复核 S-04 canonical owner 的原子发布。实现者
+报告 **79/79**；本审计重跑新增定向 ERT **1/1 通过**，并以独立探针重放原 ownerless ABA：
+同时监视旧 `canonical mkdir -> owner.el` 注入点，并在新 protocol 的 publication rename 前
+让 B 抢先 acquire。
+
 ## 结论先行
 
-**最终 Gate 仍未解除，不可进入下一阶段。** 原三方 intent 反例与真实 dead-intent crash
-探针都通过；但 canonical lock 的普通 acquire 仍先 `mkdir`、再非原子写 `owner.el`。A 在两步间
-暂停超过 ownerless grace 时，B 可用 intent 回收并完成 acquire；A 恢复后按旧 pathname 覆写
-B 的 owner，postcheck 又看不到已释放的 intent。确定性交错得到 `outer=t nested=t`，两个正常
-caller 都拿到 token。因此 S-04 仍为**部分解决的 P1**。本轮没有重新审计其他 finding。
+**最终 Gate 已解除，可以进入下一阶段。** `25fc712` 已把普通 acquire 和 reclaim 的 canonical
+owner 发布统一为“同目录私有目录内完整写好 `owner.el`，再以单次不覆盖 `rename-file` 发布”。
+原 ownerless ABA 探针得到 `legacy-ownerless-window=nil`、`candidate-complete=t`、
+`ownerless-canonical-observed=nil`、`outer=nil nested=t`；恰有一个 token，canonical nonce 属于
+赢家。S-04 的 P1 已关闭；本轮没有重新审计其他 finding。
 
 | 最终状态 | 数量 | Finding |
 |---|---:|---|
 | P0 阻断 | 0 | 无 |
-| 原 P1 已解决 | 5 | V-01、V-02、S-01、T-01、G-01 |
-| 新发现 P1 部分解决 | 1 | S-04（canonical owner 发布 ABA） |
+| 原 P1 已解决 | 6 | V-01、V-02、S-01、S-04、T-01、G-01 |
+| 未解决 P1 | 0 | 无 |
 | P2 已解决 | 3 | S-02、X-01、X-02 |
 | P2 部分解决 | 1 | V-03 |
-| P2（沿用上轮结论） | 2 | V-04、S-03；本轮未复核 |
+| 非阻断已知限制 | 3 类 | V-04、S-03，以及 S-04 的特殊文件系统/清理/极窄争用限制 |
 
 ## 累计复核探针摘要
 
@@ -66,7 +71,7 @@ caller 都拿到 token。因此 S-04 仍为**部分解决的 P1**。本轮没有
 | S-04 inode 重用 | 相同 file-identifier 但 owner nonce 或 ownerless mtime 不同 | 均判为不同 instance |
 | S-04 intent 三方 | competitor 接管成功，outer 返回 nil；第三方 acquire 被 intent 阻止，无 live lock/intent 残留 | 已解决 |
 | S-04 crash intent | 真实子 Emacs 发布 intent 后退出；父进程确认 owner 已死并成功 acquire | 已解决 |
-| S-04 owner 发布 | A 在 mkdir/owner 写入间超时，B 接管并 acquire，A 恢复；outer/nested 均返回 token | **未解决，仍阻断** |
+| S-04 owner 发布 | 旧 ownerless 注入点未触发；发布前 candidate 已有 owner；B 抢先后 A 失败，恰有一个 token 且 canonical nonce 属于 B | **已解决** |
 
 ## 初审独立探针摘要（修复前）
 
@@ -237,6 +242,20 @@ caller 都拿到 token。因此 S-04 仍为**部分解决的 P1**。本轮没有
   `--acquire-lock` 得到 token，违反事务互斥。应把完整 canonical owner 也通过临时目录 + 原子
   rename 发布，或在写入前后用 directory instance/nonce 校验且绝不覆盖 replacement，并补该
   回归。残余 P2 仍包括 dead intent 不清理造成的无界扫描，以及异主机永久保守阻塞策略。
+- **最终裁决结果：已解决，P1 关闭。** `epub-reader-store.el:332-355` 的
+  `--prepare-owned-directory` 在 canonical 的同目录私有目录中先完整写入 `owner.el`，
+  `--publish-owned-directory` 再以一次不覆盖的 `rename-file` 发布；canonical 不再经历 ownerless
+  中间态。普通 acquire 在 `:471-509` 只走该发布函数；stale reclaim 在 `:386-469` 先把旧实例
+  rename 到 quarantine，再在 visible intent 下走同一个发布函数。独立探针同时保留旧
+  `--write-lock-owner(target=canonical)` 注入钩子，并在 A 的 publication rename 前让 B acquire，
+  实测为 `legacy-ownerless-window=nil publish-injected=t candidate-complete=t
+  ownerless-canonical-observed=nil outer-token=nil nested-token=t exactly-one-token=t
+  winner-owner-match=t`。回归 `test/epub-reader-store-test.el:395-451` 定向运行 **1/1 通过**。
+
+  接受以下非阻断限制：尚无真实多进程压力测试；非常规文件系统若不提供同目录 directory rename
+  的预期原子/不覆盖语义，不在当前保证内；崩溃可遗留私有候选、quarantine 或 dead intent，且
+  同时发起的 reclaimer 可能退化为 timeout/retry。再深的同用户多进程微秒级特定交错，即使只
+  造成一次 sidecar 合并偏差，按本项目实际威胁模型记为已知限制，不再作为 Gate 阻断项。
 
 ### S-02 — P2 建议：有 schema 检查，但没有 migration 路由
 
@@ -330,20 +349,19 @@ caller 都拿到 token。因此 S-04 仍为**部分解决的 P1**。本轮没有
 
 ## Standards
 
-Gate 终审 Standards 轴只复核 S-04。intent 的 acquire 前后检查已关闭原三 contender 空窗；
-但 `epub-reader-store.el:423-431` 的 canonical `mkdir -> owner.el` 发布仍可让两个正常 acquire
-返回 token，硬违反 `architecture.md:247` 的事务互斥。Low judgment calls：dead intent 从不
-清理会造成无界目录/扫描；`:411-456` 三处 timeout/sleep/error 逻辑属于 Duplicated Code。
+最终裁决 Standards 轴无 finding。`epub-reader-store.el:332-355` 先在目标同目录完整写入
+`owner.el`，再单次 rename 发布 canonical owner；`:444-469` 的 reclaim 先 quarantine，再沿
+同一原子发布路径，已满足 `docs/architecture.md:247` 的事务互斥边界。测试目前以函数注入模拟
+确定性交错，未做真实多进程压力测试；这是测试深度限制，不阻断 Gate。
 
 ## Spec
 
-Gate 终审 Spec 轴只复核 S-04。三 contender intent 与 dead-intent crash 规格均满足；active
-intent 下手工写 replacement 绕过 acquire，不能算事务 owner，原严格措辞据此撤回。但 normal
-acquire 的 ownerless publication window 仍使 A/B 双方返回 token，属于 High 未满足。异主机
-dead intent 永久 active 是 Low policy 缺口。未发现 scope creep。
+最终裁决 Spec 轴无 finding。普通 acquire 与 reclaim 均满足“完整私有 owner 目录 -> 单次
+canonical rename”规格；A/B publication 反例被精确覆盖，断言最多一个 token 且 canonical
+nonce 属于赢家。无 missing、partial 或 scope creep。特殊文件系统语义、真实多进程压力及更深
+微秒级交错按本轮明确的威胁模型归为 Low/已知限制。
 
-双轴摘要：Standards 1 个 High、2 个 Low judgment calls；Spec 1 个 High、1 个 Low policy
-缺口；最严重项均为 S-04 的 canonical owner 发布 ABA。
+双轴摘要：Standards 0 个 finding；Spec 0 个 finding；S-04 canonical owner 发布 ABA 已关闭。
 
 ## 已验证通过
 
@@ -358,6 +376,8 @@ dead intent 永久 active 是 Low policy 缺口。未发现 scope creep。
   会按 nonce/file-identifier 被识别并恢复，inode 重用 guard 的独立比较探针通过。
 - takeover intent 能阻止原三方注入点的第三 acquire；真实死进程遗留 intent 不阻塞后续
   canonical acquire。
+- canonical owner 只由完整的同目录私有候选单次 rename 发布；原 ownerless ABA 中 B 抢先后
+  A 不会覆盖 B，且只有 B 获得 token。
 - exact 与 degraded restore 都写入 `:restore-quality` 并分别用 message/warning 提示；
   `test/epub-reader-store-test.el:73-120` 的端到端路径通过。
 - TOC 多级 flatten/fold、collapsed state、当前章节 face、跨 spine 跳转以及 `q`/重开选中行通过；
@@ -371,20 +391,21 @@ dead intent 永久 active 是 Low policy 缺口。未发现 scope creep。
 
 ## 测试质量
 
-实现者报告 78/78；Gate 终审运行三 contender 与 dead-intent 两条新增 ERT，**2/2 通过**。
-两条测试准确覆盖 intent 三方序列化与 crash 后不阻塞；仍漏一个决定 Gate 的 normal API 交错：
+实现者报告 **79/79**；最终裁决运行新增 owner-publication ERT，**1/1 通过**。该测试在 A 的
+单次 publication rename 前注入 B acquire，并断言最多一个 token、canonical nonce 属于赢家。
+独立探针额外监视旧 `mkdir -> owner.el` 窗口，确认 canonical 从未以 ownerless 形式暴露，且 A
+在 B 抢先后得到 timeout/error 而非第二个 token。
 
-- A 在 `make-directory lock` 后、`--write-lock-owner` 前停顿超过 grace；B 回收并 acquire；A
-  恢复。应断言最多一个 token，且 A 不能覆写 B 的 owner。当前独立探针实际为 outer/nested
-  均有 token。
+仍缺真实多进程压力、特殊/网络文件系统矩阵，以及 crash 后私有候选/quarantine 的垃圾回收测试；
+这些不否定单一原子 rename 的协议收敛，按当前威胁模型记为已知限制。
 
 其他测试本轮未重跑或重新评价。
 
 ## Gate 结论
 
-**Gate 未解除，不可进入下一阶段。** S-01 已关闭；S-04 的 intent 三方空窗也已关闭，但
-canonical lock 必须以完整 owner 原子发布，或在写 owner 前后验证 directory instance/nonce 且
-绝不覆盖 replacement。修复后必须通过 owner-publication 回归：A/B 只能一个获得 token，胜者的
-owner record 不能被败者覆盖。异主机 orphan policy 和 stale-intent 清理可作为 P2 后续处理。
+**Gate 已解除，可以进入下一阶段。** S-04 已收敛为单一原子 rename 发布：发布前 canonical
+不可见，发布时 owner 已完整；reclaim 由 intent 协调、quarantine 旧实例后复用同一发布路径。
+原 ownerless ABA 反例和新增回归均证明 A/B 只能一个获得 token，败者不能覆盖胜者 owner。
 
-其他 finding 本轮未复核；S-04 一个 P1 已足以维持 Gate。
+异主机 orphan policy、残留临时目录/intent 的清理、真实多进程压力和非常规文件系统语义保留为
+P2/已知限制；符合本轮给定的实际威胁模型，不再阻断 Gate。其他 finding 本轮未复核。
