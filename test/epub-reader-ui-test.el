@@ -490,9 +490,11 @@
 
 (ert-deftest epub-reader-ui-long-chapter-materializes-only-budgeted-chunk ()
   (let ((epub-reader-first-paint-max-blocks 32)
-        (epub-reader-first-paint-max-characters 2000)
+        (epub-reader-first-paint-max-characters 4000)
+        (epub-reader-scroll-chunk-max-blocks 32)
+        (epub-reader-scroll-chunk-max-characters 4000)
         (epub-reader-chunk-max-blocks 32)
-        (epub-reader-chunk-max-characters 2000)
+        (epub-reader-chunk-max-characters 4000)
         (rendered-leaves 0)
         buffer)
     (setq buffer
@@ -527,7 +529,7 @@
              finally
              (should (<= characters epub-reader-chunk-max-characters))))
           (let* ((old-start (plist-get textui-state :chunk-start))
-                 (edge-index (- (plist-get textui-state :chunk-end) 2))
+                 (edge-index (1- (plist-get textui-state :chunk-end)))
                  (edge-key
                   (epub-reader-block-key
                    (aref (epub-reader-ui--current-blocks)
