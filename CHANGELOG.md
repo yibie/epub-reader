@@ -27,7 +27,10 @@
 - 章节首绘缩到约一屏，完整 viewport 与下一章 DOM/blocks 移到 idle；图片先显示固定尺寸占位，
   只在 idle 路径 materialize，再以 TextUI region refresh 替换。滚入新 chunk 会继续排队图片。
 - EPUB 正文默认使用 TextUI 的 kinsoku-aware greedy 布局，并复用有界 attributed paragraph
-  cache；balanced Knuth--Plass 保留为可选策略。locator source 扫描也按 buffer generation 缓存。
+  cache；greedy 与可选 balanced Knuth--Plass 都保持非末行两端对齐。cache=0 直接规划，解析后
+  face 及 theme/font generation 参与失效。locator source 扫描也按 buffer generation 缓存。
+- 所有 source-order chunk refresh 都以 reader locator/viewport 为真值恢复；guard 不再执行只
+  丢弃上下文却不增加覆盖的 shift，避免滚动改变 locator、视觉行与持久进度。
 - 财新杂志普通章节 batch 换章由 1.067 s 降到 0.125 s；图形帧在下一章预取命中时由
   3.362 s 降到 0.050 s。连续图形滚动 p95 为 0.039 s，详见 `docs/perf-notes.md`。
 

@@ -79,10 +79,12 @@ chunk 内实际进入 `:image` leaf 的图片。
 
 1. 章节首绘同步预算缩到 2 blocks / 4,000 source chars；冷滚动 chunk 为 1 block / 3,000
    chars。首屏提交后，用生命周期绑定的 idle job 扩展到完整 viewport 预算。
-2. TextUI 新增 `:text :wrap greedy`：继续使用相同 token、像素宽度和 CJK kinsoku 约束，但以
-   线性 ragged-right 规划替代段落级 KP 全局优化。`balanced` KP 仍可通过 Customize 选回。
+2. TextUI 新增 `:text :wrap greedy`：继续使用相同 token、像素宽度、CJK kinsoku 与非末行
+   两端对齐，只以线性最远合法断点替代段落级 KP 全局选点。`balanced` KP 仍可通过 Customize
+   选回。
 3. TextUI 对 attributed paragraph 的布局结果做 buffer-local 有界缓存；key 包含正文、text
-   properties、像素宽度、wrap 策略、face remap 与 frame 字体几何。它等价覆盖
+   properties、像素宽度、wrap 策略、解析后 named-face、face remap、frame 字体几何与
+   theme/font generation。它等价覆盖
    `(book, href, width, scale)` 回看场景，同时避免 reader 缓存脱离 source properties。
 4. reader 在 idle 时预取下一 spine 的成员、DOM 与 blocks，且不改变当前 chapter/session。
    正常阅读命中预取后，换章不再走 parse/block 冷路径。

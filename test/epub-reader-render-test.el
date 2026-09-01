@@ -77,6 +77,18 @@
           (should (epub-reader-locator-source-p source))
           (should (equal (aref source 0) "OEBPS/chapter1.xhtml")))))))
 
+(ert-deftest epub-reader-render-default-prose-selects-greedy-breaks ()
+  "Reader defaults to TextUI's fast, still-justified break strategy."
+  (should (eq (default-value 'epub-reader-text-wrap-strategy) 'greedy))
+  (epub-reader-render-test--with-publication publication
+    (let* ((block
+            (cl-find 'paragraph
+                     (epub-reader-render-chapter publication 0)
+                     :key #'epub-reader-block-kind))
+           (element (epub-reader-render-block-element block)))
+      (should (eq (plist-get element :type) :text))
+      (should (eq (plist-get element :wrap) 'greedy)))))
+
 (ert-deftest epub-reader-render-maps-images-to-image-leaves-with-anchor ()
   (epub-reader-render-test--with-publication publication
     (let* ((section

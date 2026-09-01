@@ -126,7 +126,11 @@ TextUI 没有 `max-width`/`justify-content:center`，renderer 用 render functio
 
 所有 face 由本包定义并允许 Customize：body、六级 heading、quote、code、link、caption、muted、error。Publisher CSS 在 MVP 只提供少量语义提示，不控制盒模型、字体文件或页面背景。
 
-注意当前 `:text` 会对非末行做像素级两端对齐；它没有 `:justify nil`。正文先接受这一行为。若长标题或代码 prototype 证明对齐造成明显问题，应在 TextUI 通过 capability prototype 增加通用的 ragged text 选项，不能在本包 advice `textui-kp-core`。
+当前 `:text :wrap` 只选择断点算法：reader 默认 `greedy` 以线性策略选择最远合法断点，用户可切回
+`balanced` 的 Knuth--Plass 全段优化；两者随后都对可行的非末行做像素级两端对齐。它没有
+`:justify nil`。若长标题或代码 prototype 证明需要 ragged alignment，应在 TextUI 另加正交的
+alignment capability，不能复用 `:wrap` 含混表达，也不能在本包 advice `textui-kp-core`。决策见
+TextUI ADR 0036。
 
 ### 4.4 图片行数
 
@@ -159,7 +163,9 @@ rendered chunk:              [start .... end)
 - 普通滚动完全使用 Emacs buffer，不刷新；point 接近 chunk 前后 guard（约一屏）时，按块扩展/滑动窗口。
 - chunk shift 更新应用 state，然后用 `textui-update :region 'chapter :producer ...` 或 `textui-refresh-region` 只替换 chapter region。
 - 窗口宽度变化由 TextUI full refresh 处理，但它只重排当前 chunk，而不是全章。
-- DOM、block 和 materialized resource 缓存按 `(book-key, spine-href)`；TextUI 的像素折行结果暂不跨宽度缓存。
+- DOM、block 和 materialized resource 缓存按 `(book-key, spine-href)`；TextUI 在单个 reader
+  buffer 内按 attributed text、像素宽度、wrap 策略、解析后 face/font 与 display generation
+  缓存段落布局，不跨不兼容的宽度、主题或字体复用。
 
 ### 5.2 Viewport 与 point
 
@@ -177,7 +183,7 @@ TextUI `:text` **不读取** `word-wrap-by-category`，也不调用 Emacs `kinso
 
 ```text
 textui--wrap-text
-  -> textui-kp-core-justify-lines
+  -> textui-kp-core-greedy-lines / textui-kp-core-justify-lines
   -> textui-kp-core--split-boxes / --break-forbidden-p
 ```
 
@@ -186,7 +192,8 @@ textui--wrap-text
 - 把 Latin word、CJK character、space 分 box；
 - 用 Unicode general category/char syntax 识别常见开闭标点；
 - 用固定 `no-line-start`/`no-line-end` 表和 NBSP/word-joiner 表禁止部分断点；
-- 在 CJK/Latin gap 插入 display-only glue，并用 Knuth–Plass 全段选断点。
+- `greedy` 线性选择最远合法断点，`balanced` 用 Knuth--Plass 全段选断点；两者在 CJK/Latin
+  gap 插入同一套 display-only glue，对非末行两端对齐。
 
 所以第一版 CJK 折行由 **TextUI core** 负责；设置 `visual-line-mode`、`word-wrap-by-category` 或 `kinsoku` 对已经由 `:text` 产出的硬行不起作用，也不应叠加第二套折行。
 
