@@ -41,6 +41,27 @@ perl -0pi -e 's/urn:fixture:epub2/urn:fixture:shared-identifier/' \
 build_epub shared-identifier-a "$shared_identifier_source"
 build_epub shared-identifier-b "$shared_identifier_source"
 
+long_chapter_source="$work_dir/long-chapter-source"
+cp -R "$source_dir/epub2" "$long_chapter_source"
+python3 -c '
+import pathlib, sys
+target = pathlib.Path(sys.argv[1])
+paragraphs = "\n".join(
+    f"    <p id=\"p{index:05d}\">第 {index:05d} 段：长章节 viewport 基准文本。</p>"
+    for index in range(10000)
+)
+target.write_text(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<html xmlns=\"http://www.w3.org/1999/xhtml\">\n"
+    "  <head><title>10k 段</title></head>\n"
+    "  <body>\n    <h1 id=\"first\">10k 段长章</h1>\n"
+    + paragraphs
+    + "\n  </body>\n</html>\n",
+    encoding="utf-8",
+)
+' "$long_chapter_source/OEBPS/chapter1.xhtml"
+build_epub long-chapter "$long_chapter_source"
+
 missing_media_source="$work_dir/epub3-missing-media-source"
 cp -R "$source_dir/epub3-edge" "$missing_media_source"
 perl -0pi -e 's/ id="chapter" href="text\/a%20b.xhtml" media-type="application\/xhtml\+xml"/ id="chapter" href="text\/a%20b.xhtml"/' \
