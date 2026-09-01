@@ -26,19 +26,25 @@ TextUI 上游 `f6b3a06...0a89825`。本地重跑 reader **93/93**、当前 TextU
 image diff 判断。另以 Emacs 31 图形帧重放 native CJK/locator/像素探针，并加 letterbox 与 combining
 mark 反例。
 
+第三阶段最终裁决固定 reader diff 为 `git diff 9f91505...7b432ea`，图片修复位于 `4117069`；
+同时审查 TextUI `0a89825...1075b6d`。独立重跑 reader batch 共 96 项：**94 通过、2 项因 batch
+环境跳过**；这两个图形用例在 Emacs 31.0.91 图形帧中直接执行为 **2/2 通过**。当前 TextUI
+worktree **111/111 通过**，其中仍含与图片无关、未纳入本轮 diff 判断的 focus/position 用户改动。
+另重放三个原始反例探针，不以新增 ERT 自证。
+
 ## 结论先行
 
-**Gate 仍不解除。** 最终修复关闭了 V-03 的“普通 CJK alt 写入 unibyte/属性全丢”主路径：fixture
-可在 native GUI 渲染，3 个 anchor run、48 个 tagged row 与图片 locator 均存在。但 V-01 的核心
-像素目标仍失败；V-03 也残留两个可构造的现实输入漏洞：letterboxed 图片从实际 slice 行而非 leaf
-第 0 行开始 anchor，导致 caption 被误标；combining/variation 类 alt 可因字符数超过列槽触发
-`args-out-of-range`。两套 ERT 全绿未覆盖这些边界。
+**Gate 解除，第三阶段可以完成。** 三个原始阻断反例均已由独立探针关闭：真实 native 图片行在
+reader 行距策略下与无行距基线同为 14px，正文仍为 26px；letterbox 后的独立 caption 不再带
+`epub-reader-image-slice`；`"a" + 20×U+0301` 在 10 列 leaf 中不崩溃并保留 source property。
+V-01、V-03 由 P1 未关闭转为已关闭。剩余一项 mode-toggle 属性清理是 P2，不影响正常 reader
+session、locator 或本轮三个显示/Unicode验收条件。
 
 | 严重级别 | 未关闭 | 已关闭 | Finding |
 |---|---:|---:|---|
 | P0 阻断 | 0 | 0 | 无 |
-| P1 应修 | 2 | 3 | 未关闭：V-01、V-03；已关闭：C-01、C-02、V-02 |
-| P2 建议 | 2 | 3 | 未关闭：D-01、D-02；已关闭：C-03、P-01、R-01 |
+| P1 应修 | 0 | 5 | 已关闭：C-01、C-02、V-01、V-02、V-03 |
+| P2 建议 | 1 | 5 | 未关闭：D-03；已关闭：C-03、P-01、R-01、D-01、D-02 |
 
 ## 安全与并发探针摘要
 
@@ -142,6 +148,14 @@ extra spacing 清零。现有 ERT 仍只检查 `line-height=t` 属性存在。�
 该 property 加到 caption newline。必须找到可在图形 redisplay 中实际满足 `17 -> 14` 的公开方案，
 并用“继承正行距 vs nil”的同一 native row 像素对照作为 Gate 测试。
 
+**第三阶段最终裁决：已解决。** `4117069` 不再试图用单个图片 newline 覆盖已经累积的 buffer
+spacing，而是在 mode 启用时保存用户的 local/inherited 值、将 reader buffer 基线置 0，再只给
+非图片 newline 回填该值；图片 newline 保持 `line-height=t`。原图形探针用 default
+`line-spacing=0.25` 打开真实 fixture，得到 `line-spacing=0 (local=t)`、保存的 prose spacing
+`0.25`；同一 native slice 在生产策略和临时 nil baseline 下均为 **14px**，正文为 **26px**。
+caption/prose tag 均为 nil。reader 新增的像素 ERT 与 letterbox ERT 在图形帧直接执行 **2/2**，
+因此原 `17 != 14` 反例已关闭。
+
 ### V-02 — P1 应修：text-scale 后不重排，图片度量也不跟随 face remap
 
 - **位置：** `epub-reader-ui.el:143-163,764-838`；TextUI sibling checkout
@@ -202,6 +216,14 @@ font height `14 -> 20`，四个 image block 的传入预算均由 `16 -> 12`，�
 应把 anchor 固定在 image leaf 第 0 行或提供公开的精确 leaf range；splice 同时受显示宽度和可用字符
 槽约束，并保留最终字符边界的 properties。补 letterbox+caption 与 combining/VS/ZWJ 回归后再关闭。
 
+**第三阶段最终裁决：已解决。** TextUI `1075b6d` 将带 source property 的 carrier 固定到 image
+leaf 第 0 行；实际 slice 因 `top>0` 后移时，只在 slice 内放无 property 的 alt 字符，reader 因而
+能从 leaf 首行精确标记固定行数。独立真实 GUI fixture 得到 48 个 image row、3 个 anchor run，
+图片 locator 仍解析到 `OEBPS/chapter2.xhtml`，独立 `[测试封面]` caption 与后续 prose 均无
+`epub-reader-image-slice`。原 combining 探针 `chars=21, display-width=1, columns=10` 现返回
+`PASS anchor=0`，没有 `args-out-of-range`；TextUI 同时覆盖 U+0301 与 variation selector。简单 CJK
+property/locator 主路径也未回归。reader 生产代码继续没有 `textui--*` 私有调用。
+
 ### C-03 — P2 建议：验证的是 private part，不是 rename 后 final truename
 
 - **位置：** `epub-reader-container.el:464-477,555-576`；
@@ -253,6 +275,11 @@ image unibyte/property-loss。待 V-01/V-03 修复后必须同步改正文档与
 TextUI `0a89825`，但又把 newline `line-height=t` 描述成会忽略继承正行距；上述像素探针反证该结论。
 文档也未写 letterbox anchor range 与 combining/VS 长字符序列限制，需随 V-01/V-03 再修订。
 
+**第三阶段最终裁决：已解决。** `docs/textui-issues.md` 现明确记录 newline-only 方案为何失败、
+reader 的“zero baseline + prose newline 回填”像素级方案，以及 TextUI `1075b6d` 对 leaf row-0
+carrier 和 Unicode 字符槽的修复。文档给出的 14px 图片/17px 测试正文数据与新增 GUI ERT 一致；
+独立探针因所选 prose 行内容不同得到 14px/26px，但验证的相对契约相同。
+
 ### R-01 — P2 建议：图片状态已形成位置参数 data clump
 
 - **位置：** `epub-reader-render.el:417-459`。
@@ -272,6 +299,22 @@ TextUI `0a89825`，但又把 newline `line-height=t` 描述成会忽略继承正
   的 I/O 已进入打开路径，旧的 69.6%/3.29 倍结论不能直接外推。
 - **修复建议：** 在同一机器、同一样书重跑 5 次，单列 snapshot copy/preflight/首帧耗时；在新数据
   前把该表标为 `e525eef` 基线。此项是文档/性能可信度 P2，不单独阻 Gate。
+
+**第三阶段最终裁决：已解决。** `docs/perf-notes.md` 已把 0.351302 秒标为 `e525eef` 历史基线，
+当前 HEAD 五次中位数为 **0.284497 秒**；snapshot I/O 五次中位数单列为 **0.016526 秒**，其余
+open→首帧中位数为 0.267973 秒。表格与 75.4%/4.06× 算术一致，也明确禁止把跨轮次差值解释为
+snapshot 的负开销。本轮未重复运行依赖仓库外真实杂志样书的性能采样，只核对记录、口径和计算。
+
+### D-03 — P2 建议：关闭 mode 后遗留 reader-owned newline properties
+
+- **位置：** `epub-reader-ui.el:186-196,668-700`。
+- **问题：** mode 关闭会恢复 `line-spacing` buffer 变量的 local/inherited 状态，但不会移除 reader
+  写入的 newline `line-height`/`line-spacing` properties。如果用户在同一 buffer 关闭 mode 后再改变
+  frame/default line spacing，旧 prose property 仍可能钉在启用时的值。正常 reader session、再次
+  render/启用 mode 以及本轮三个 gate 反例均不受影响，因此不升级为 P1。
+- **修复建议：** 标记 reader-owned 行距 property；mode 关闭时仅清理这些 property，或恢复原属性，
+  并补 enable→disable→修改 default 的 toggle 回归。函数 `--disable-image-line-spacing` 现已同时重建
+  prose/image 策略，可顺便改名为 `--apply-line-spacing-policy` 以匹配职责。
 
 ## 视觉探针
 
@@ -307,6 +350,15 @@ geometry 下有效；它不能替代图形帧的 variable-pitch、line-spacing �
 | letterboxed image range | `[测试封面]` caption 被标 `image-slice=t` | **失败** |
 | combining alt | chars=21、display width=1、10 列 → `args-out-of-range` | **失败** |
 
+第三阶段最终裁决：
+
+| 探针 | 结果 | 判定 |
+|---|---|---|
+| V-01 同一 native row | 生产策略=`14px`，临时 nil baseline=`14px`；正文=`26px` | **通过** |
+| letterboxed image range | caption/prose `image-slice=nil`；48 image rows、3 anchor runs | **通过** |
+| combining alt | chars=21、display width=1、10 列 → `PASS anchor=0` | **通过** |
+| CJK/locator 回归 | native 渲染成功，locator=`path:body/3:p/image:0` | **通过** |
+
 ## 测试质量
 
 当前 93 项已经新增 source replacement、different/same key reentry、累计 reservation、final
@@ -328,6 +380,13 @@ round-trip、line-spacing 像素高度与 scale 0/±2。
 smoke 证明常见大图主路径，但不能覆盖小图 `top>0` 的 range 语义、buffer spacing 的像素差异，或
 字符数远大于显示宽度的 Unicode 序列。这正是上述反例能穿过两套测试的原因。
 
+最终裁决已补齐上述缺口：reader batch 的 **94 项通过、2 项按预期图形 skip**，同两项在图形帧
+直接执行 **2/2**；测试按实际 pixel y 坐标比较 native row，并用 letterboxed fixture 检查 caption
+边界。TextUI 当前 **111/111**，新增用例分别固定 leaf row-0 carrier 与 combining/variation 字符槽。
+独立探针没有调用这些 ERT helper，仍复现同样的 14/14px、caption nil、combining property 结果。
+非阻断残余是 combining 用例没有单列 reader locator ERT，但同一 property carrier 和既有 native
+CJK locator 链路均已独立通过。
+
 ## Standards
 
 - **Medium（hard violation）：** `epub-reader-ui.el:663-667`、`docs/textui-issues.md:23-30`：
@@ -348,6 +407,15 @@ smoke 证明常见大图主路径，但不能覆盖小图 `top>0` 的 range 语�
 - 其余静态规范未发现新增违反：reader 的 newline `line-height=t` 写法符合 Emacs documented form，
   正文变量未覆盖，生产代码仍只用 TextUI 公共 API；但其实际像素效果由独立探针判定失败。
 
+第三阶段最终裁决（reader `9f91505...7b432ea` + TextUI `0a89825...1075b6d`）：
+
+- **Medium（hard，非 Gate）：** mode 关闭只恢复 buffer 变量，未清理 reader-owned newline
+  properties，见 D-03；这是 toggle 后设置变化的状态清理缺口，不推翻正常 session 的像素验收。
+- **Low（judgement，Mysterious Name）：** `epub-reader-ui--disable-image-line-spacing` 现会重建全部
+  prose/image 行距策略，名称窄于职责，建议改名。
+- 其余无发现：TextUI 的显示宽度/字符槽双限与 row-0 letterbox carrier 闭合；生产 reader 仍只用
+  TextUI 公开 API。
+
 ## Spec
 
 - **Medium：** V-01/D-01 只部分完成：正文继承已恢复，但图片行 effective spacing 未清零，文档
@@ -365,22 +433,26 @@ smoke 证明常见大图主路径，但不能覆盖小图 `top>0` 的 range 语�
 - **Medium：** V-03 的 multibyte-safe 不完整；combining/ZWJ alt 的字符数可大于列数并击穿 splice。
 - 普通 CJK alt/property、documented `line-height=t` 形式、无 reader 私有 API 均已实现；无 scope creep。
 
+第三阶段最终裁决：**无 Spec finding。** V-01 像素契约、V-03 letterbox range 与 combining alt
+三项均满足；`057eb84` 只在 publication seam 翻译 transient error，虽不属于显示 Gate，也没有形成
+有害 scope creep。combining 尚无 reader locator 专项 ERT 是非阻断测试增强项。
+
 双轴摘要：Standards 3 个 finding，最严重为 V-01 文档/实现契约不成立与性能基线过时；Spec 2 个
 finding，最严重为 V-01/D-01 只部分完成。独立图形探针另新增 V-03 P1。
 
 最终双轴摘要：Standards 1 个 finding，最严重为 Unicode alt splice 越界；Spec 2 个 finding，
 最严重为 letterbox range 污染 locator/line-height。独立像素探针另确认 V-01 effective spacing 未关闭。
 
+第三阶段最终双轴摘要：Standards 1 个非阻断状态清理 finding（另有 1 个命名 judgement）；Spec
+0 个 finding。三个原始 Gate 反例全部由独立探针关闭。
+
 ## Gate 结论
 
-**Gate 不解除，第三阶段仍不可视为完成。** 常见 CJK native image/locator 冒烟已经从失败变为
-通过，值得保留；但不能据此关闭两个 P1。剩余 Gate 条件都是可重复的现实显示/Unicode输入，不属于
-同用户微秒级理论竞态：
+**Gate 解除，第三阶段可进入完成状态。** 三个条件的最终实测分别为：
 
-1. V-01：在继承正 `line-spacing` 下，同一 native image row 的像素高度必须与 buffer spacing=nil
-   相同；目前是 `17 != 14`。
-2. V-03 range：letterboxed image 的 source/image-slice/line-height 必须严格落在 leaf 行内，caption
-   与后续 prose 不得被覆盖。
-3. V-03 Unicode：combining/VS/ZWJ alt 不得越界，CJK alt 的 properties/locator 仍须 round-trip。
+1. V-01：同一 native image row 为 `14px == 14px`，正文为 26px；
+2. V-03 range：letterboxed image 的 caption/prose 均无 image-slice 标记，CJK image locator 保持；
+3. V-03 Unicode：`a + 20×U+0301` 不越界且 source property 保留。
 
-D-01/D-02 仍是非阻断文档 P2。完成上述三个回归并重跑真实 graphical fixture 后，才可解除 Gate。
+reader batch 94 项、GUI 2 项与 TextUI 111 项均通过。D-01/D-02 随实现文档关闭；D-03 是 mode-toggle
+清理建议，按实际威胁与功能范围保留为 P2，不延长 Gate。
