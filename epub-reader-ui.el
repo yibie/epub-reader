@@ -20,6 +20,7 @@
 (require 'epub-reader-locator)
 (require 'epub-reader-publication)
 (require 'epub-reader-render)
+(require 'epub-reader-store)
 
 (defcustom epub-reader-reading-width 76
   "Preferred width in character cells of the centered reading column."
@@ -45,6 +46,16 @@ A single larger block is still materialized by itself."
 (defcustom epub-reader-chunk-overscan-screens 3
   "Approximate screen heights kept around the active semantic block."
   :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-enable-progress t
+  "Whether reader buffers restore and persist versioned progress sidecars."
+  :type 'boolean
+  :group 'epub-reader)
+
+(defcustom epub-reader-save-idle-delay 2.0
+  "Idle seconds before the current semantic position is flushed."
+  :type 'number
   :group 'epub-reader)
 
 (defface epub-reader-header-face
@@ -326,6 +337,67 @@ A single larger block is still materialized by itself."
             (epub-reader-ui--chapter-title)
             (epub-reader-ui--progress-percent))))
 
+(defun epub-reader-ui--save-progress (&optional flush)
+  "Stage the current locator and, when FLUSH is non-nil, persist it now."
+  (let* ((session (epub-reader-ui--current-session))
+         (store (epub-reader-session-store session))
+         (locator (and store (epub-reader-ui--current-locator))))
+    (when locator
+      (epub-reader-store-stage store locator)
+      (when flush (epub-reader-store-flush store)))
+    locator))
+
+(defun epub-reader-ui--save-progress-safely (&optional flush)
+  "Save progress like `epub-reader-ui--save-progress' without blocking reading."
+  (condition-case error-data
+      (epub-reader-ui--save-progress flush)
+    (error
+     (message "EPUB progress save failed: %s"
+              (error-message-string error-data))
+     nil)))
+
+(defun epub-reader-ui--restore-target-index (session locator)
+  "Return SESSION block index most likely to resolve LOCATOR."
+  (or (gethash (epub-reader-locator-block locator)
+               (epub-reader-session-block-index session))
+      (let ((quote (concat (or (epub-reader-locator-prefix locator) "")
+                           (or (epub-reader-locator-suffix locator) ""))))
+        (and (not (string-empty-p quote))
+             (cl-loop for block across (epub-reader-session-blocks session)
+                      for index from 0
+                      when (string-match-p
+                            (regexp-quote quote)
+                            (epub-reader-block-text block))
+                      return index)))
+      0))
+
+(defun epub-reader-ui--restore-progress ()
+  "Resolve pending saved progress and report exact or degraded quality."
+  (let ((locator (plist-get textui-state :pending-locator)))
+    (when locator
+      (let* ((target
+              (epub-reader-ui--restore-target-index
+               (epub-reader-ui--current-session) locator))
+             (_visible (epub-reader-ui--ensure-block-visible target))
+             (resolution (epub-reader-locator-goto locator))
+             (quality (epub-reader-locator-resolution-quality resolution)))
+        (setq textui-state
+              (plist-put
+               (plist-put (copy-sequence textui-state)
+                          :pending-locator nil)
+               :restore-quality quality))
+        (cond
+         ((eq quality 'exact)
+          (message "EPUB progress restored exactly"))
+         ((epub-reader-locator-resolution-position resolution)
+          (message "EPUB progress restored with degraded match: %s" quality))
+         (t
+          (display-warning
+           'epub-reader
+           (format "Saved EPUB progress could not be restored: %s" quality)
+           :warning)))
+        resolution))))
+
 (defun epub-reader-ui--spacer (width)
   "Return a fixed native spacer element of WIDTH cells."
   (list :type 'item :format "%v"
@@ -464,6 +536,24 @@ A single larger block is still materialized by itself."
      'epub-reader-post-render (list index start end available-width)
      (lambda ()
        (epub-reader-ui--post-render (current-buffer))))
+    (when (epub-reader-session-store session)
+      (textui-effect
+       'epub-reader-progress-save
+       (list (epub-reader-store-book-key
+              (epub-reader-session-store session)))
+       (lambda ()
+         (let* ((callback
+                 (textui-async-callback
+                  (lambda ()
+                    (condition-case error-data
+                        (epub-reader-ui--save-progress t)
+                      (error
+                       (message "EPUB progress save failed: %s"
+                                (error-message-string error-data)))))))
+                (timer
+                 (run-with-idle-timer
+                  epub-reader-save-idle-delay t callback)))
+           (lambda () (when (timerp timer) (cancel-timer timer)))))))
     (list
      (list
       :type :flex :direction :column :gap 1
@@ -680,6 +770,7 @@ A single larger block is still materialized by itself."
          (count (length (epub-reader-publication-spine publication))))
     (unless (and (>= index 0) (< index count))
       (user-error "No chapter in that direction"))
+    (epub-reader-ui--save-progress-safely t)
     (unless no-history
       (epub-reader-ui--record-history))
     (let* ((_chapter (epub-reader-ui--load-chapter session index))
@@ -1074,20 +1165,38 @@ A single larger block is still materialized by itself."
     (unwind-protect
         (progn
           (setq publication (epub-reader-publication-open file))
-          (let* ((weights (epub-reader-ui--spine-weights publication))
+          (let* ((store
+                  (and epub-reader-enable-progress
+                       (epub-reader-store-open
+                        file (epub-reader-publication-book-key publication))))
+                 (saved-locator
+                  (and store (epub-reader-store-load-locator store)))
+                 (saved-index
+                  (or (and saved-locator
+                           (epub-reader-ui--spine-index-for-path
+                            publication
+                            (epub-reader-locator-path saved-locator)))
+                      0))
+                 (weights (epub-reader-ui--spine-weights publication))
                  (_session
                   (setq session
                         (epub-reader-session--create
                          :publication publication
                          :dom-cache (make-hash-table :test #'equal)
-                         :store nil :history-back nil :history-forward nil
+                         :store store :history-back nil :history-forward nil
                          :spine-weights weights
                          :total-weight
                          (cl-loop for weight across weights sum weight))))
-                 (_chapter (epub-reader-ui--load-chapter session 0))
+                 (_chapter
+                  (epub-reader-ui--load-chapter session saved-index))
+                 (target
+                  (if saved-locator
+                      (epub-reader-ui--restore-target-index
+                       session saved-locator)
+                    0))
                  (range
                   (epub-reader-ui--chunk-range
-                   (epub-reader-session-blocks session) 0))
+                   (epub-reader-session-blocks session) target))
                  (name
                   (generate-new-buffer-name
                    (format "*EPUB: %s*"
@@ -1098,10 +1207,11 @@ A single larger block is still materialized by itself."
               (setq buffer
                     (textui-open
                      name #'epub-reader-ui-frame
-                     (list :spine-index 0 :chunk-start (car range)
+                     (list :spine-index saved-index :chunk-start (car range)
                            :chunk-end (cadr range)
                            :loading nil :error nil
-                           :pending-locator nil)))))
+                           :pending-locator saved-locator
+                           :restore-quality nil)))))
           (with-current-buffer buffer
             (setq-local epub-reader-ui--session session)
             (epub-reader-ui-mode 1)
@@ -1110,6 +1220,11 @@ A single larger block is still materialized by itself."
                         '(:eval (epub-reader-ui--header-line)))
             (setq-local default-directory
                         (file-name-directory (expand-file-name file))))
+          (when (and (epub-reader-session-store session)
+                     (epub-reader-store-warning
+                      (epub-reader-session-store session)))
+            (message "%s" (epub-reader-store-warning
+                            (epub-reader-session-store session))))
           (textui-register-cleanup
            buffer
            (lambda ()
@@ -1118,9 +1233,21 @@ A single larger block is still materialized by itself."
                          (epub-reader-session-toc-buffer session))))
                (when (buffer-live-p toc-buffer)
                  (kill-buffer toc-buffer)))
-             (epub-reader-publication-close publication)))
+             (unwind-protect
+                 (when (epub-reader-session-store session)
+                   (condition-case error-data
+                       (progn
+                         (epub-reader-ui--save-progress)
+                         (epub-reader-store-close
+                          (epub-reader-session-store session)))
+                     (error
+                      (message "EPUB final progress save failed: %s"
+                               (error-message-string error-data)))))
+               (epub-reader-publication-close publication))))
           (with-current-buffer buffer
-            (epub-reader-ui--goto-start))
+            (if (plist-get textui-state :pending-locator)
+                (epub-reader-ui--restore-progress)
+              (epub-reader-ui--goto-start)))
           (setq succeeded t)
           buffer)
       (unless succeeded

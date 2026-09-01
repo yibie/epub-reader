@@ -41,6 +41,43 @@ PATH is the durable normalized spine href; SPINE-INDEX is a session hint."
   "Resolved buffer position and its degradation QUALITY."
   position quality)
 
+(defun epub-reader-locator-to-plist (locator)
+  "Return a plain, versioned plist representation of LOCATOR."
+  (unless (epub-reader-locator-p locator)
+    (signal 'wrong-type-argument (list 'epub-reader-locator-p locator)))
+  (list :schema (epub-reader-locator-schema locator)
+        :book-key (epub-reader-locator-book-key locator)
+        :spine-index (epub-reader-locator-spine-index locator)
+        :path (epub-reader-locator-path locator)
+        :block (epub-reader-locator-block locator)
+        :offset (epub-reader-locator-offset locator)
+        :prefix (epub-reader-locator-prefix locator)
+        :suffix (epub-reader-locator-suffix locator)
+        :context (epub-reader-locator-context locator)))
+
+(defun epub-reader-locator-from-plist (data)
+  "Return a validated locator decoded from plain plist DATA."
+  (let ((schema (plist-get data :schema))
+        (book-key (plist-get data :book-key))
+        (spine-index (plist-get data :spine-index))
+        (path (plist-get data :path))
+        (block (plist-get data :block))
+        (offset (plist-get data :offset))
+        (prefix (plist-get data :prefix))
+        (suffix (plist-get data :suffix))
+        (context (plist-get data :context)))
+    (unless (and (listp data) (integerp schema)
+                 (stringp book-key) (natnump spine-index)
+                 (stringp path) (stringp block) (natnump offset)
+                 (or (null prefix) (stringp prefix))
+                 (or (null suffix) (stringp suffix))
+                 (or (null context) (stringp context)))
+      (error "Invalid persisted EPUB locator: %S" data))
+    (epub-reader-locator--create
+     :schema schema :book-key book-key :spine-index spine-index
+     :path path :block block :offset offset
+     :prefix prefix :suffix suffix :context context)))
+
 (defun epub-reader-locator-source (path block offset)
   "Create a source-property value for PATH, BLOCK, and character OFFSET."
   (vector path block offset))
