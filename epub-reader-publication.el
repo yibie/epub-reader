@@ -16,7 +16,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'xml)
-(require 'url-util)
+(require 'url-parse)
 (require 'epub-reader-container)
 
 (define-error 'epub-reader-publication-error
@@ -40,7 +40,7 @@
 (cl-defstruct (epub-reader-link-target
                (:constructor epub-reader-link-target--create))
   "A resolved internal or external hyperlink."
-  external-p uri path file fragment)
+  external-p uri path file fragment resource-key)
 
 (cl-defstruct (epub-reader-section
                (:constructor epub-reader-section--create))
@@ -259,8 +259,61 @@ uppercase percent escapes so they cannot become path separators."
   (or (string-prefix-p "//" href)
       (string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*:" href)))
 
+(defun epub-reader-publication--canonicalize-percent-escapes (url)
+  "Return URL with unreserved escapes decoded and other escapes uppercased."
+  (let ((position 0)
+        (length (length url))
+        parts)
+    (while (< position length)
+      (if (/= (aref url position) ?%)
+          (progn
+            (push (substring url position (1+ position)) parts)
+            (setq position (1+ position)))
+        (let ((byte (epub-reader-publication--hex-byte url position)))
+          (push (if (or (and (>= byte ?A) (<= byte ?Z))
+                        (and (>= byte ?a) (<= byte ?z))
+                        (and (>= byte ?0) (<= byte ?9))
+                        (memq byte '(?- ?. ?_ ?~)))
+                    (char-to-string byte)
+                  (format "%%%02X" byte))
+                parts)
+          (setq position (+ position 3)))))
+    (apply #'concat (nreverse parts))))
+
+(defun epub-reader-publication--external-target (href)
+  "Parse external HREF into a normalized link target."
+  (let* ((hash (string-match "#" href))
+         (resource-uri (if hash (substring href 0 hash) href))
+         (raw-fragment (and hash (substring href (1+ hash))))
+         (_percent-check
+          (epub-reader-publication--decode-url-part resource-uri t))
+         (parsed
+          (condition-case error-data
+              (url-generic-parse-url resource-uri)
+            (error
+             (signal 'epub-reader-publication-error
+                     (list (format "Invalid external URL %S: %s" href
+                                   (error-message-string error-data)))))))
+         (canonical
+          (epub-reader-publication--canonicalize-percent-escapes
+           (url-recreate-url parsed)))
+         (fragment
+          (and raw-fragment
+               (epub-reader-publication--decode-url-part raw-fragment))))
+    (epub-reader-link-target--create
+     :external-p t
+     :uri (if raw-fragment
+              (concat canonical "#"
+                      (epub-reader-publication--canonicalize-percent-escapes
+                       raw-fragment))
+            canonical)
+     :fragment fragment :resource-key canonical)))
+
 (defun epub-reader-publication--normalize-url-path (base-path raw-path)
   "Resolve URL RAW-PATH against archive document BASE-PATH."
+  (when (string-prefix-p "/" raw-path)
+    (signal 'epub-reader-publication-error
+            (list (format "OCF URL cannot be root-relative: %S" raw-path))))
   (let* ((directory-reference-p (string-suffix-p "/" raw-path))
          (path-for-splitting
           (if directory-reference-p
@@ -268,17 +321,16 @@ uppercase percent escapes so they cannot become path separators."
             raw-path))
          (components
          (append
-          (unless (string-prefix-p "/" raw-path)
-            (split-string
-             (if (string-suffix-p "/" base-path)
-                 base-path
-               (or (file-name-directory base-path) ""))
-             "/" t))
+          (split-string
+           (if (string-suffix-p "/" base-path)
+               base-path
+             (or (file-name-directory base-path) ""))
+           "/" t)
           (mapcar
            (lambda (segment)
              (epub-reader-publication--decode-url-part segment t))
            (split-string
-            (string-remove-prefix "/" path-for-splitting) "/" nil))))
+            path-for-splitting "/" nil))))
         stack)
     (dolist (component components)
       (cond
@@ -299,7 +351,7 @@ uppercase percent escapes so they cannot become path separators."
 (defun epub-reader-publication-resolve-href (publication base-path href)
   "Resolve HREF against archive-relative document BASE-PATH in PUBLICATION."
   (if (epub-reader-publication--external-href-p href)
-      (epub-reader-link-target--create :external-p t :uri href)
+      (epub-reader-publication--external-target href)
     (pcase-let* ((`(,raw-path ,fragment)
                   (epub-reader-publication--split-href href))
                  (effective-path
@@ -312,13 +364,17 @@ uppercase percent escapes so they cannot become path separators."
        :path effective-path
        :file (epub-reader-container-path
               (epub-reader-publication-container publication) effective-path)
-       :fragment fragment))))
+       :fragment fragment :resource-key effective-path))))
 
 (defun epub-reader-publication--required-attribute (node name context)
   "Return NODE attribute NAME or signal an error naming CONTEXT."
-  (or (epub-reader-publication--attribute node name)
+  (let ((value (epub-reader-publication--attribute node name)))
+    (if (and value
+             (not (string-match-p "\\`[[:space:]]*\\'" value)))
+        value
       (signal 'epub-reader-publication-error
-              (list (format "%s has no %s attribute" context name)))))
+              (list (format "%s has no non-empty %s attribute"
+                            context name))))))
 
 (defun epub-reader-publication--package-path (container)
   "Return the OPF package path declared by CONTAINER."
@@ -411,7 +467,8 @@ uppercase percent escapes so they cannot become path separators."
              (path (and (not remote-p)
                         (epub-reader-link-target-path target)))
              (url-key (if remote-p
-                          (concat "remote:" (epub-reader-link-target-uri target))
+                          (concat "remote:"
+                                  (epub-reader-link-target-resource-key target))
                         (concat "local:" path))))
         (when (epub-reader-link-target-fragment target)
           (signal 'epub-reader-publication-error
@@ -643,7 +700,7 @@ uppercase percent escapes so they cannot become path separators."
            (version (epub-reader-publication--required-attribute
                      package "version" "Package"))
            (_version-check
-            (unless (string-match-p "\\`[23]\\(?:\\.\\|\\'\\)" version)
+            (unless (member version '("2.0" "3.0"))
               (signal 'epub-reader-publication-error
                       (list (format "Unsupported package version: %s"
                                     version)))))

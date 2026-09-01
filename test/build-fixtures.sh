@@ -52,6 +52,36 @@ perl -0pi -e 's/<itemref idref="chapter"\/>/<itemref idref="remote"\/>/' \
   "$remote_spine_source/EPUB/package.opf"
 build_epub epub3-remote-spine "$remote_spine_source"
 
+root_relative_source="$work_dir/epub3-root-relative-source"
+cp -R "$source_dir/epub3-edge" "$root_relative_source"
+perl -0pi -e 's|href="text/a%20b.xhtml"|href="/EPUB/text/a%20b.xhtml"|' \
+  "$root_relative_source/EPUB/package.opf"
+build_epub epub3-root-relative "$root_relative_source"
+
+empty_required_source="$work_dir/epub3-empty-required-source"
+cp -R "$source_dir/epub3-edge" "$empty_required_source"
+perl -0pi -e 's|media-type="audio/mpeg"|media-type=""|' \
+  "$empty_required_source/EPUB/package.opf"
+build_epub epub3-empty-required "$empty_required_source"
+
+bad_version_source="$work_dir/epub3-bad-version-source"
+cp -R "$source_dir/epub3-edge" "$bad_version_source"
+perl -0pi -e 's/version="3.0"/version="3.bad"/' \
+  "$bad_version_source/EPUB/package.opf"
+build_epub epub3-bad-version "$bad_version_source"
+
+remote_fragment_source="$work_dir/epub3-remote-fragment-source"
+cp -R "$source_dir/epub3-edge" "$remote_fragment_source"
+perl -0pi -e 's|audio.mp3"|audio.mp3#track"|' \
+  "$remote_fragment_source/EPUB/package.opf"
+build_epub epub3-remote-fragment "$remote_fragment_source"
+
+remote_duplicate_source="$work_dir/epub3-remote-duplicate-source"
+cp -R "$source_dir/epub3-edge" "$remote_duplicate_source"
+perl -0pi -e 's|(<item id="remote"[^>]*/>)|$1\n    <item id="remote-duplicate" href="https://EXAMPLE.com:443/audio%2Emp3" media-type="audio/mpeg"/>|' \
+  "$remote_duplicate_source/EPUB/package.opf"
+build_epub epub3-remote-duplicate "$remote_duplicate_source"
+
 malicious_dir="$work_dir/malicious"
 mkdir -p "$malicious_dir/nested"
 printf '%s' 'application/epub+zip' >"$malicious_dir/mimetype"

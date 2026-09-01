@@ -118,6 +118,8 @@
       (should-error (funcall resolve "%FF.xhtml")
                     :type 'epub-reader-publication-error)
       (should-error (funcall resolve "../../../escape.xhtml")
+                    :type 'epub-reader-publication-error)
+      (should-error (funcall resolve "/EPUB/text/a%20b.xhtml")
                     :type 'epub-reader-publication-error))))
 
 (ert-deftest epub-reader-publication-enforces-namespaces-and-required-fields ()
@@ -131,6 +133,32 @@
     (should-error
      (epub-reader-publication-open (epub-reader-test-fixture fixture))
      :type 'epub-reader-publication-error)))
+
+(ert-deftest epub-reader-publication-rejects-malformed-ocf-and-opf-values ()
+  (dolist (fixture '("epub3-root-relative.epub"
+                     "epub3-empty-required.epub"
+                     "epub3-bad-version.epub"
+                     "epub3-remote-fragment.epub"
+                     "epub3-remote-duplicate.epub"))
+    (should-error
+     (epub-reader-publication-open (epub-reader-test-fixture fixture))
+     :type 'epub-reader-publication-error)))
+
+(ert-deftest epub-reader-publication-normalizes-remote-resource-keys ()
+  (epub-reader-publication-test--with "epub3-edge.epub" publication
+    (let ((upper
+           (epub-reader-publication-resolve-href
+            publication "EPUB/package.opf"
+            "https://EXAMPLE.com:443/audio%2Emp3#track"))
+          (lower
+           (epub-reader-publication-resolve-href
+            publication "EPUB/package.opf"
+            "https://example.com/audio.mp3")))
+      (should (equal (epub-reader-link-target-resource-key upper)
+                     (epub-reader-link-target-resource-key lower)))
+      (should (equal (epub-reader-link-target-fragment upper) "track"))
+      (should (string-suffix-p "#track"
+                               (epub-reader-link-target-uri upper))))))
 
 (ert-deftest epub-reader-publication-records-remote-non-spine-resource ()
   (epub-reader-publication-test--with "epub3-edge.epub" publication
