@@ -139,7 +139,9 @@
                      "epub3-empty-required.epub"
                      "epub3-bad-version.epub"
                      "epub3-remote-fragment.epub"
-                     "epub3-remote-duplicate.epub"))
+                     "epub3-remote-duplicate.epub"
+                     "epub3-remote-dot-duplicate.epub"
+                     "epub3-remote-encoded-dot-duplicate.epub"))
     (should-error
      (epub-reader-publication-open (epub-reader-test-fixture fixture))
      :type 'epub-reader-publication-error)))
@@ -153,8 +155,20 @@
           (lower
            (epub-reader-publication-resolve-href
             publication "EPUB/package.opf"
-            "https://example.com/audio.mp3")))
+            "https://example.com/audio.mp3"))
+          (literal-dot
+           (epub-reader-publication-resolve-href
+            publication "EPUB/package.opf"
+            "https://example.com/a/../audio.mp3"))
+          (encoded-dot
+           (epub-reader-publication-resolve-href
+            publication "EPUB/package.opf"
+            "https://example.com/a/%2e%2E/audio.mp3")))
       (should (equal (epub-reader-link-target-resource-key upper)
+                     (epub-reader-link-target-resource-key lower)))
+      (should (equal (epub-reader-link-target-resource-key literal-dot)
+                     (epub-reader-link-target-resource-key lower)))
+      (should (equal (epub-reader-link-target-resource-key encoded-dot)
                      (epub-reader-link-target-resource-key lower)))
       (should (equal (epub-reader-link-target-fragment upper) "track"))
       (should (string-suffix-p "#track"

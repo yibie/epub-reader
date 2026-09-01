@@ -82,6 +82,18 @@ perl -0pi -e 's|(<item id="remote"[^>]*/>)|$1\n    <item id="remote-duplicate" h
   "$remote_duplicate_source/EPUB/package.opf"
 build_epub epub3-remote-duplicate "$remote_duplicate_source"
 
+remote_dot_duplicate_source="$work_dir/epub3-remote-dot-duplicate-source"
+cp -R "$source_dir/epub3-edge" "$remote_dot_duplicate_source"
+perl -0pi -e 's|(<item id="remote"[^>]*/>)|$1\n    <item id="remote-dot-duplicate" href="https://example.com/a/../audio.mp3" media-type="audio/mpeg"/>|' \
+  "$remote_dot_duplicate_source/EPUB/package.opf"
+build_epub epub3-remote-dot-duplicate "$remote_dot_duplicate_source"
+
+remote_encoded_dot_duplicate_source="$work_dir/epub3-remote-encoded-dot-duplicate-source"
+cp -R "$source_dir/epub3-edge" "$remote_encoded_dot_duplicate_source"
+perl -0pi -e 's|(<item id="remote"[^>]*/>)|$1\n    <item id="remote-encoded-dot-duplicate" href="https://example.com/a/%2e%2e/audio.mp3" media-type="audio/mpeg"/>|' \
+  "$remote_encoded_dot_duplicate_source/EPUB/package.opf"
+build_epub epub3-remote-encoded-dot-duplicate "$remote_encoded_dot_duplicate_source"
+
 malicious_dir="$work_dir/malicious"
 mkdir -p "$malicious_dir/nested"
 printf '%s' 'application/epub+zip' >"$malicious_dir/mimetype"

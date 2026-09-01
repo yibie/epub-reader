@@ -280,6 +280,70 @@ uppercase percent escapes so they cannot become path separators."
           (setq position (+ position 3)))))
     (apply #'concat (nreverse parts))))
 
+(defun epub-reader-publication--remove-last-url-segment (path)
+  "Remove the last segment from RFC 3986 output PATH."
+  (if (string-match "/[^/]*\\'" path)
+      (substring path 0 (match-beginning 0))
+    ""))
+
+(defun epub-reader-publication--remove-dot-segments (path)
+  "Remove dot segments from URL PATH according to RFC 3986 section 5.2.4."
+  (let ((input path)
+        (output ""))
+    (while (not (string-empty-p input))
+      (cond
+       ((string-prefix-p "../" input)
+        (setq input (substring input 3)))
+       ((string-prefix-p "./" input)
+        (setq input (substring input 2)))
+       ((string-prefix-p "/./" input)
+        (setq input (substring input 2)))
+       ((equal input "/.")
+        (setq input "/"))
+       ((string-prefix-p "/../" input)
+        (setq input (substring input 3)
+              output
+              (epub-reader-publication--remove-last-url-segment output)))
+       ((equal input "/..")
+        (setq input "/"
+              output
+              (epub-reader-publication--remove-last-url-segment output)))
+       ((member input '("." ".."))
+        (setq input ""))
+       (t
+        (let* ((search-start (if (string-prefix-p "/" input) 1 0))
+               (next-slash (string-match "/" input search-start))
+               (end (or next-slash (length input))))
+          (setq output (concat output (substring input 0 end))
+                input (substring input end))))))
+    output))
+
+(defun epub-reader-publication--normalize-external-url (parsed)
+  "Return a canonical resource URL represented by PARSED.
+
+For hierarchical URLs, percent-encoded unreserved characters are decoded
+before RFC 3986 dot-segment removal.  The query remains part of the resource
+key, but is not interpreted as a path."
+  (let* ((filename (or (url-filename parsed) ""))
+         (query-start (string-match "?" filename))
+         (raw-path (if query-start
+                       (substring filename 0 query-start)
+                     filename))
+         (query (and query-start (substring filename query-start)))
+         (canonical-path
+          (epub-reader-publication--canonicalize-percent-escapes raw-path)))
+    (when (or (url-host parsed) (string-prefix-p "/" canonical-path))
+      (setq canonical-path
+            (epub-reader-publication--remove-dot-segments canonical-path)))
+    (setf (url-filename parsed)
+          (concat canonical-path
+                  (if query
+                      (epub-reader-publication--canonicalize-percent-escapes
+                       query)
+                    "")))
+    (epub-reader-publication--canonicalize-percent-escapes
+     (url-recreate-url parsed))))
+
 (defun epub-reader-publication--external-target (href)
   "Parse external HREF into a normalized link target."
   (let* ((hash (string-match "#" href))
@@ -294,9 +358,7 @@ uppercase percent escapes so they cannot become path separators."
              (signal 'epub-reader-publication-error
                      (list (format "Invalid external URL %S: %s" href
                                    (error-message-string error-data)))))))
-         (canonical
-          (epub-reader-publication--canonicalize-percent-escapes
-           (url-recreate-url parsed)))
+         (canonical (epub-reader-publication--normalize-external-url parsed))
          (fragment
           (and raw-fragment
                (epub-reader-publication--decode-url-part raw-fragment))))
