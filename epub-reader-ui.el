@@ -1789,6 +1789,7 @@ window rows; TextUI's internal focus identity is not an EPUB position."
        (epub-reader-bookmark-to-plist bookmark))
       (push bookmark (epub-reader-session-bookmarks session))
       (epub-reader-ui--flush-reader-marks session)
+      (epub-reader-ui--refresh-live-bookmark-list session)
       (message "Bookmark saved: %s" (epub-reader-bookmark-name bookmark))
       bookmark)))
 
@@ -1857,6 +1858,14 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                     return cursor)))
       (when position (goto-char position)))))
 
+(defun epub-reader-ui--refresh-live-bookmark-list
+    (session &optional selected-id)
+  "Refresh SESSION's live bookmark list, preserving SELECTED-ID."
+  (let ((buffer (epub-reader-session-bookmark-buffer session)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (epub-reader-bookmark-list--refresh selected-id)))))
+
 (defun epub-reader-bookmark-list-activate ()
   "Jump to the bookmark at point."
   (interactive)
@@ -1895,7 +1904,13 @@ window rows; TextUI's internal focus identity is not an EPUB position."
          (session (epub-reader-ui--current-session))
          (existing (epub-reader-session-bookmark-buffer session)))
     (if (buffer-live-p existing)
-        (progn (display-buffer existing) existing)
+        (let ((selected
+               (with-current-buffer existing
+                 (epub-reader-bookmark-list--at-point))))
+          (epub-reader-ui--refresh-live-bookmark-list
+           session (and selected (epub-reader-bookmark-id selected)))
+          (display-buffer existing)
+          existing)
       (let* ((epub-reader-bookmark-list--reader-buffer reader)
              (buffer
               (textui-open
@@ -1935,6 +1950,7 @@ window rows; TextUI's internal focus identity is not an EPUB position."
     (epub-reader-ui--refresh-chunk
      (plist-get textui-state :chunk-start)
      (plist-get textui-state :chunk-end))
+    (epub-reader-ui--refresh-live-annotation-list session)
     (message "Highlight saved")
     annotation))
 
@@ -1990,7 +2006,29 @@ window rows; TextUI's internal focus identity is not an EPUB position."
     (epub-reader-ui--refresh-chunk
      (plist-get textui-state :chunk-start)
      (plist-get textui-state :chunk-end))
+    (epub-reader-ui--refresh-live-annotation-list
+     session (epub-reader-annotation-id annotation))
     (message "Highlight note saved")))
+
+(defun epub-reader-ui--resolve-annotation (session annotation)
+  "Resolve ANNOTATION against its canonical chapter in SESSION."
+  (let* ((range (epub-reader-annotation-range annotation))
+         (start (epub-reader-locator-range-start range))
+         (index
+          (epub-reader-ui--spine-index-for-path
+           (epub-reader-session-publication session)
+           (epub-reader-locator-path start)))
+         (resolution
+          (if index
+              (epub-reader-locator-range-resolve
+               range
+               (epub-reader-chapter-data-locator-index
+                (epub-reader-ui--chapter-data session index)))
+            (epub-reader-locator-range-resolution--create
+             :spans nil :quality 'identity-mismatch))))
+    (setf (epub-reader-annotation-quality annotation)
+          (epub-reader-locator-range-resolution-quality resolution))
+    resolution))
 
 (defun epub-reader-ui--goto-annotation (annotation)
   "Navigate the current reader to ANNOTATION and return its resolution."
@@ -2004,16 +2042,12 @@ window rows; TextUI's internal focus identity is not an EPUB position."
     (if (= index (epub-reader-ui--state-value :spine-index))
         (epub-reader-ui--record-history)
       (epub-reader-ui--switch-chapter index))
-    (let* ((blocks (epub-reader-ui--current-blocks session))
-           (resolution
-            (epub-reader-locator-range-resolve
-             range
-             (epub-reader-chapter-data-locator-index
-              (epub-reader-ui--current-chapter session))))
+    (let* ((resolution (epub-reader-ui--resolve-annotation
+                        session annotation))
            (span (car (epub-reader-locator-range-resolution-spans resolution))))
+      (epub-reader-ui--refresh-live-annotation-list
+       session (epub-reader-annotation-id annotation))
       (unless span (user-error "Annotation text could not be found"))
-      (setf (epub-reader-annotation-quality annotation)
-            (epub-reader-locator-range-resolution-quality resolution))
       (let ((block-index
              (gethash (car span) (epub-reader-ui--current-block-index session))))
         (unless block-index (user-error "Annotation block could not be found"))
@@ -2081,6 +2115,7 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                        'face 'epub-reader-header-face))))
          previous-index)
     (dolist (annotation annotations)
+      (epub-reader-ui--resolve-annotation session annotation)
       (let* ((range (epub-reader-annotation-range annotation))
              (index (epub-reader-locator-spine-index
                      (epub-reader-locator-range-start range))))
@@ -2095,8 +2130,8 @@ window rows; TextUI's internal focus identity is not an EPUB position."
           (setq previous-index index))
         (let* ((note (epub-reader-annotation-note annotation))
                (warning
-                (if (memq (epub-reader-annotation-quality annotation)
-                          '(quote none identity-mismatch))
+                (if (not (eq (epub-reader-annotation-quality annotation)
+                             'exact))
                     "⚠ " ""))
                (value
                 (propertize
@@ -2139,6 +2174,14 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                                      selected-id))
                     return cursor)))
       (when position (goto-char position)))))
+
+(defun epub-reader-ui--refresh-live-annotation-list
+    (session &optional selected-id)
+  "Refresh SESSION's live annotation list, preserving SELECTED-ID."
+  (let ((buffer (epub-reader-session-annotation-buffer session)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (epub-reader-annotation-list--refresh selected-id)))))
 
 (defun epub-reader-annotation-list-activate ()
   "Jump to the annotation at point."
@@ -2200,7 +2243,13 @@ window rows; TextUI's internal focus identity is not an EPUB position."
          (session (epub-reader-ui--current-session))
          (existing (epub-reader-session-annotation-buffer session)))
     (if (buffer-live-p existing)
-        (progn (display-buffer existing) existing)
+        (let ((selected
+               (with-current-buffer existing
+                 (epub-reader-annotation-list--at-point))))
+          (epub-reader-ui--refresh-live-annotation-list
+           session (and selected (epub-reader-annotation-id selected)))
+          (display-buffer existing)
+          existing)
       (let* ((epub-reader-annotation-list--reader-buffer reader)
              (buffer
               (textui-open
