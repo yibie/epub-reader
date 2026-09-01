@@ -88,7 +88,7 @@ A single larger block is still materialized by itself."
 (cl-defstruct (epub-reader-chapter-data
                (:constructor epub-reader-chapter-data--create))
   "Cached parsed and normalized data for one spine document."
-  section blocks block-index anchor-index character-count)
+  section blocks block-index anchor-index character-count character-prefixes)
 
 (cl-defstruct (epub-reader-viewport
                (:constructor epub-reader-viewport--create))
@@ -197,6 +197,11 @@ A single larger block is still materialized by itself."
   (epub-reader-chapter-data-anchor-index
    (epub-reader-ui--current-chapter session)))
 
+(defun epub-reader-ui--current-character-prefixes (&optional session)
+  "Return cumulative source-character counts for SESSION's chapter."
+  (epub-reader-chapter-data-character-prefixes
+   (epub-reader-ui--current-chapter session)))
+
 (defun epub-reader-ui--chapter-cache-key (publication index)
   "Return the cache key for PUBLICATION spine INDEX."
   (let ((resource
@@ -209,9 +214,10 @@ A single larger block is still materialized by itself."
           (epub-reader-resource-path resource))))
 
 (defun epub-reader-ui--index-blocks (blocks)
-  "Return (BLOCK-INDEX ANCHOR-INDEX CHARACTER-COUNT) for BLOCKS vector."
+  "Return indices, total characters, and character prefixes for BLOCKS."
   (let ((block-index (make-hash-table :test #'equal))
         (anchor-index (make-hash-table :test #'equal))
+        (prefixes (make-vector (1+ (length blocks)) 0))
         (characters 0))
     (cl-loop for block across blocks
              for index from 0
@@ -220,8 +226,9 @@ A single larger block is still materialized by itself."
              do (puthash (epub-reader-block-element-id block)
                          index anchor-index)
              do (setq characters
-                      (+ characters (length (epub-reader-block-text block)))))
-    (list block-index anchor-index characters)))
+                      (+ characters (length (epub-reader-block-text block))))
+             do (aset prefixes (1+ index) characters))
+    (list block-index anchor-index characters prefixes)))
 
 (defun epub-reader-ui--load-chapter (session index)
   "Load spine INDEX into SESSION, reusing its normalized chapter cache."
@@ -239,7 +246,8 @@ A single larger block is still materialized by itself."
               (epub-reader-chapter-data--create
                :section section :blocks blocks
                :block-index (nth 0 indices) :anchor-index (nth 1 indices)
-               :character-count (nth 2 indices)))
+               :character-count (nth 2 indices)
+               :character-prefixes (nth 3 indices)))
         (puthash key chapter cache)))
     (setf (epub-reader-session-current-chapter session) chapter)
     chapter))
@@ -335,17 +343,41 @@ A single larger block is still materialized by itself."
          (total (max 1 (or (epub-reader-session-total-weight session) 1)))
          (spine-index (epub-reader-ui--state-value :spine-index))
          (blocks (epub-reader-ui--current-blocks session))
+         (chapter (epub-reader-ui--current-chapter session))
          (locator (epub-reader-ui--current-locator))
          (block-index
           (or (and locator
                    (gethash (epub-reader-locator-block locator)
                             (epub-reader-ui--current-block-index session)))
               0))
-         (local (/ (float block-index) (max 1 (length blocks))))
+         (block (and (> (length blocks) 0) (aref blocks block-index)))
+         (block-length (if block (length (epub-reader-block-text block)) 0))
+         (character-count
+          (epub-reader-chapter-data-character-count chapter))
+         (prefixes (epub-reader-ui--current-character-prefixes session))
+         (source-offset
+          (if locator
+              (min (epub-reader-locator-offset locator)
+                   (max 0 (1- block-length)))
+            0))
+         (character-position
+          (+ (if (< block-index (length prefixes))
+                 (aref prefixes block-index)
+               0)
+             source-offset))
+         (local
+          (cond
+           ((> character-count 1)
+            (/ (float character-position) (1- character-count)))
+           ((and locator
+                 (= spine-index (1- (length weights))))
+            1.0)
+           (t 0.0)))
          (before (cl-loop for index below spine-index
                           sum (aref weights index)))
          (current (aref weights spine-index)))
-    (* 100.0 (/ (+ before (* current local)) total))))
+    (min 100.0
+         (max 0.0 (* 100.0 (/ (+ before (* current local)) total))))))
 
 (defun epub-reader-ui--header-line ()
   "Return book, chapter, and weighted progression for `header-line-format'."

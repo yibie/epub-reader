@@ -535,5 +535,29 @@
       (should (string-match-p "第二章 图像与论证"
                               (epub-reader-ui--header-line))))))
 
+(ert-deftest epub-reader-ui-progress-uses-source-offset-and-reaches-endpoints ()
+  (epub-reader-ui-test--with-reader _buffer
+    (goto-char (epub-reader-ui--first-source-position))
+    (should (= (epub-reader-ui--progress-percent) 0.0))
+    (let* ((session epub-reader-ui--session)
+           (block
+            (cl-find-if
+             (lambda (candidate)
+               (> (length (epub-reader-block-text candidate)) 10))
+             (append (epub-reader-ui--current-blocks session) nil)))
+           (key (epub-reader-block-key block))
+           (start (epub-reader-ui-test--block-position key))
+           first last)
+      (should start)
+      (goto-char start)
+      (setq first (epub-reader-ui--progress-percent))
+      (goto-char (+ start (1- (length (epub-reader-block-text block)))))
+      (setq last (epub-reader-ui--progress-percent))
+      (should (> last first)))
+    (epub-reader-next-chapter)
+    (let ((blocks (epub-reader-ui--current-blocks)))
+      (epub-reader-ui--goto-block-index (1- (length blocks)) t))
+    (should (= (epub-reader-ui--progress-percent) 100.0))))
+
 (provide 'epub-reader-ui-test)
 ;;; epub-reader-ui-test.el ends here
