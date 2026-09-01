@@ -743,14 +743,11 @@ HIGHLIGHTS are source-offset spans for this block."
     (epub-reader-render-materialize-image block publication section))
   (let ((text (epub-reader-render--materialized-text block highlights)))
     (pcase (epub-reader-block-kind block)
-    ('quote
-     (list :type :flex :direction :column :border t :padding 1
-           :children
-           (list (epub-reader-render--text-element text))))
-    ('code
-     (list :type :flex :direction :column :border t :padding 1
-           :children
-           (list (epub-reader-render--text-element text))))
+    ;; Quotations and code rely on their faces alone.  A drawn border is
+    ;; measured in character cells and does not line up with variable-pitch
+    ;; prose or with the reader's per-line spacing.
+    ((or 'quote 'code)
+     (epub-reader-render--text-element text))
     ('list-item
      (epub-reader-render--text-element
       (concat (or (epub-reader-block-list-marker block) "• ")
