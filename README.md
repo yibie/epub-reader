@@ -211,3 +211,7 @@ Use another Emacs executable with `EMACS=/path/to/emacs`. Production modules
 must use only TextUI's public API. Before submitting a change, run the full ERT
 suite, byte-compile the package, and open at least one text-heavy EPUB for a
 read-only smoke test.
+
+## License
+
+epub-reader is released under GPL-3.0-or-later. See [`COPYING`](COPYING).

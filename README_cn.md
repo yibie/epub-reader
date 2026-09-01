@@ -177,3 +177,7 @@ TEXTUI_DIR=/path/to/textui ./test/run-tests.sh
 
 也可以用 `EMACS=/path/to/emacs` 指定 Emacs。生产模块应保持只调用 TextUI 公开 API；修改后至少
 运行全量 ERT、byte-compile，并用一本文本型 EPUB 做只读 smoke test。
+
+## 许可证
+
+epub-reader 以 GPL-3.0-or-later 发布，全文见 [`COPYING`](COPYING)。
