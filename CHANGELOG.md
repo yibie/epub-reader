@@ -9,19 +9,21 @@
 - 容器改为中央目录 preflight 后按需 materialize；启动只展开格式元数据、恢复章节和当前
   viewport 图片，spine 权重直接读取 ZIP 中央目录的未压缩 size。
 - 图片解压移到 active chunk 的 TextUI leaf 生产阶段，并缓存已 materialize 成员。
-- 图片物理行的 newline 使用 `line-height=t` 忽略继承行距，正文继续保留用户设置；禁止二次
-  软折行并隐藏 continuation/truncation fringe，避免居中栏外的单字列。
-- 配套 TextUI native image 路径支持带 text properties 的 CJK alt，reader 图片 source anchor 与
-  locator 可跨图形切片保留。
+- reader 保存用户行距、以零行距作为图片基线，再把原值逐行加回正文 newline；图片行使用
+  `line-height=t`，图形像素回归为图片 14px、正文 17px。继续禁止二次软折行并隐藏
+  continuation/truncation fringe，避免居中栏外的单字列。
+- 配套 TextUI native image 路径支持带 text properties 的 CJK alt；combining/variation 字符不会
+  击穿固定列 splice，letterbox 的 anchor 固定在 leaf 第 0 行，caption 不再被误标为图片行。
 - text scale 变化触发完整 TextUI 重排，图片行预算按 remap 后字体高度重算，并以 locator/window
   view state 恢复位置。
 - 惰性容器绑定 preflight 时创建的只读归档快照；materialize 前检测外部归档替换，并以容器级
   原子 reservation/commit 维护累计解压预算。
+- publication 将暂态 materialize busy 转译为资源层错误，renderer 不再依赖 container 异常。
 
 ### Performance
 
-- 31.96 MB、164 成员的杂志样书 open→首屏中位数由 1.154 s 降至 0.351 s，首屏落盘成员由
-  164 个降至 6 个。
+- 31.96 MB、164 成员的杂志样书 open→首屏当前中位数为 0.284497 s，其中 archive snapshot
+  I/O 中位数为 0.016526 s；整包解压历史基线为 1.154237 s，首屏落盘成员由 164 个降至 6 个。
 
 ## 0.1.0 - 2026-08-31
 

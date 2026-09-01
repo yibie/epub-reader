@@ -25,13 +25,18 @@ native image 缺陷已直接在 TextUI 修复，reader 只保留调用方拥有�
 消除调用者 buffer 的额外行距。Emacs 的 `line-spacing` newline property 只能把行距扩大到高于
 buffer/frame 默认值，数值 0 或 `(0 . 0)` 都不能把继承的正行距压回零。
 
-reader 规避：不修改 buffer-local `line-spacing`，让普通正文继续继承用户设置；post-render 只给
-带 `epub-reader-image-slice` 的物理行 newline 标记 `line-height=t`。这是 Emacs `Line Height`
-文档为 tiled image slices 定义的形式：行高只由可见内容决定，并忽略该 newline 的行距。结构
-回归同时检查 buffer 仍继承 0.25、正文 newline 没有该 property。
+单独给图片 newline 设置 `line-height=t` 仍不足以抵消 buffer 正行距：可见 glyph 在处理 newline
+前已经把 extra spacing 累计到该视觉行。Emacs 31 图形探针得到图片/正文均为 17px，而临时移除
+buffer spacing 后同一图片行为 14px。
+
+reader 的像素级规避是保存用户设置，把 reader buffer 的基础 `line-spacing` 置 0，再通过公开的
+newline `line-spacing` property 把原值逐行加回全部非图片行；图片行只使用 `line-height=t`。
+mode 关闭时恢复原来的 local/inherited 状态。图形回归得到图片 **14px**、普通正文 **17px**，并
+确认 letterbox 后的 caption 不带 image row 属性。这样改变的是实现载体，不改变正文看到的用户
+行距。
 
 建议 TextUI 后续明确 `:image` 对非 nil `line-spacing` 的契约，或为 image leaf 提供公开的
-行度量/行距策略；在此之前 reader 不修改 TextUI。
+行度量/行距策略；当前这部分仍由 reader 的显示策略负责。
 
 ## 2. 已物理折行的 frame 被 Emacs 再次软折行
 
@@ -60,13 +65,17 @@ window view state 恢复语义 point/视觉行；生成 chunk 时只用公开的
 这能让重排和 caller-owned row budget 跟随缩放，但 TextUI 内部 slice 本身仍使用 frame 默认行高；
 最终像素契约最好由 TextUI 公开一个 image row metric 扩展点。
 
-## 4. native `:image` 的 CJK alt 崩溃和 property 丢失（TextUI 已修复）
+## 4. native `:image` 的 alt、property 与 letterbox range（TextUI 已修复）
 
 旧 native 路径用 `(make-string width ?\s)` 构造 unibyte 行，再用 `store-substring` 写入 alt。
 中文 alt 因此报 `Attempt to store non-byte value into unibyte string`；ASCII 即使能写入，
 `store-substring` 也只复制字符，不复制 reader 放在 alt 上的 image anchor property。
 
-TextUI 提交 `0a89825` 已把 native slice 行改成 multibyte，并用属性保真的字符串拼接嵌入 alt；
-`testui-native-image-preserves-cjk-alt-properties` 覆盖 CJK 字符与 property round-trip。reader 不再
-需要额外规避，仍通过公开 `:alt` 搬运 source anchor。图形 smoke 使用财新周刊样书的真实
-`cover.jpg`，在内存注入“中文图注”后成功生成 native slice 和 locator；样书与 sidecar 均未写入。
+TextUI 提交 `0a89825` 先把 native slice 行改成 multibyte，并用属性保真的字符串拼接嵌入 alt。
+后续提交 `1075b6d` 又关闭两个边界：alt 同时按显示宽度与底层字符槽截断，combining mark 与
+variation selector 不再令 splice 越界；带属性的空白 carrier 固定在 image leaf 第 0 行，实际
+slice 即使因小图 `top>0` 后移，也不会让 reader 的固定行数标记越过 leaf 并污染 caption。
+
+TextUI 回归覆盖 CJK property round-trip、20 个 combining/variation 字符的 10 列 leaf，以及
+20×20 SVG 在 4 行 leaf 中的 letterbox；reader 图形 fixture 同时验证 14px 图片行、17px 正文行和
+caption range。生产 reader 仍只通过公开 `:alt` 搬运 source anchor，没有调用 TextUI 私有 API。
