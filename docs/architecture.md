@@ -242,6 +242,7 @@ Resolve 顺序为 element/block exact -> quote near block -> quote in spine -> s
 
 - Store 使用版本化 sidecar（MVP 可用可读 S-expression），按 book-key 保存当前位置和更新时间。
 - book-key 组合 EPUB identifier、规范路径、size/mtime 和一次缓存的 content hash，不能只信 publisher identifier。
+- 第一阶段尚未写入 sidecar；locator schema 3 以 `book-key + spine-href` 为持久身份，数值 spine index 只作导航提示。早期 schema 2 的 publisher-only locator 明确返回 `legacy-identity`，未来 Store 不静默迁移或误恢复。
 - idle debounce 保存由 render function 声明的 `textui-effect` 创建 timer；callback 用 `textui-async-callback` 绑定正文 buffer 生命周期。
 - 换章前同步捕获 locator；kill-buffer cleanup 最后 flush。写入使用同目录临时文件 + rename，并在写前合并磁盘新版本。
 - Region refresh 不重新 reconcile effect；chunk state 不能成为 effect 依赖。书籍切换走 full `textui-update`，让 effect 正确重启。

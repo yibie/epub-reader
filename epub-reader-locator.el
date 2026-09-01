@@ -11,7 +11,9 @@
 ;; Rendered source characters carry [document-path block-key source-offset].
 ;; Capture compares nearby source characters around synthetic layout space.
 ;; Resolution reports whether it was exact or degraded through quote and spine
-;; fallbacks instead of hiding that distinction from callers.
+;; fallbacks instead of hiding that distinction from callers.  Schema 3 uses
+;; book-key plus source document path (the normalized spine href) as durable
+;; identity; the numeric spine index is only a navigation hint.
 
 ;;; Code:
 
@@ -30,7 +32,8 @@
 
 (cl-defstruct (epub-reader-locator
                (:constructor epub-reader-locator--create))
-  "A layout-independent reading position."
+  "A layout-independent reading position.
+PATH is the durable normalized spine href; SPINE-INDEX is a session hint."
   schema book-key spine-index path block offset prefix suffix context)
 
 (cl-defstruct (epub-reader-locator-resolution
@@ -189,7 +192,7 @@ never attaches to chapter content."
           (nth 3 record) (nth 4 record))))
      (nreverse order))))
 
-(defun epub-reader-locator--capture-quotes (source book-key spine-index)
+(defun epub-reader-locator--capture-quotes (source book-key)
   "Return (PREFIX SUFFIX) around SOURCE offset from current buffer."
   (let* ((path (aref source 0))
          (block (aref source 1))
@@ -199,8 +202,7 @@ never attaches to chapter content."
            (lambda (candidate)
              (and (equal (nth 0 candidate) path)
                   (equal (nth 1 candidate) block)
-                  (equal (nth 4 candidate) book-key)
-                  (equal (nth 5 candidate) spine-index)))
+                  (equal (nth 4 candidate) book-key)))
            (epub-reader-locator--source-blocks)))
          (text (and record (nth 2 record))))
     (if (not text)
@@ -229,9 +231,9 @@ never attaches to chapter content."
                   spine-index))
                (quotes
                 (epub-reader-locator--capture-quotes
-                 source book-key effective-spine-index)))
+                 source book-key)))
           (epub-reader-locator--create
-           :schema 2 :book-key book-key :spine-index effective-spine-index
+           :schema 3 :book-key book-key :spine-index effective-spine-index
            :path (aref source 0) :block (aref source 1)
            :offset (aref source 2)
            :prefix (car quotes) :suffix (cadr quotes)
@@ -267,7 +269,7 @@ never attaches to chapter content."
 (defun epub-reader-locator--record-identity-matches-p (record locator)
   "Return non-nil when RECORD belongs to LOCATOR's book and spine."
   (and (equal (nth 4 record) (epub-reader-locator-book-key locator))
-       (equal (nth 5 record) (epub-reader-locator-spine-index locator))))
+       (equal (nth 0 record) (epub-reader-locator-path locator))))
 
 (defun epub-reader-locator-resolve (locator &optional buffer)
   "Resolve LOCATOR in BUFFER and return position plus degradation quality."
@@ -291,7 +293,10 @@ never attaches to chapter content."
                        (lambda (record) (equal (nth 0 record) path))
                        records)))
       (cond
-       ((not (= (or (epub-reader-locator-schema locator) 0) 2))
+       ((= (or (epub-reader-locator-schema locator) 0) 2)
+        (epub-reader-locator-resolution--create
+         :position nil :quality 'legacy-identity))
+       ((not (= (or (epub-reader-locator-schema locator) 0) 3))
         (epub-reader-locator-resolution--create
          :position nil :quality 'unsupported-schema))
        ((and all-records (null records))

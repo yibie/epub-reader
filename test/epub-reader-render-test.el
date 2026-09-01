@@ -324,11 +324,57 @@
                     'identity-mismatch)))
       (erase-buffer)
       (insert (epub-reader-locator-attach-source
-               "same text" "chapter.xhtml" "id:stable" "book-a" 3))
+               "same text" "other.xhtml" "id:stable" "book-a" 2))
       (let ((resolution (epub-reader-locator-resolve locator)))
         (should-not (epub-reader-locator-resolution-position resolution))
         (should (eq (epub-reader-locator-resolution-quality resolution)
-                    'identity-mismatch))))))
+                    'identity-mismatch)))
+      ;; Numeric indices change when a publisher reorders the spine.  The href
+      ;; remains the durable identity and should still resolve.
+      (erase-buffer)
+      (insert (epub-reader-locator-attach-source
+               "same text" "chapter.xhtml" "id:stable" "book-a" 9))
+      (let ((resolution (epub-reader-locator-resolve locator)))
+        (should (epub-reader-locator-resolution-position resolution))
+        (should (eq (epub-reader-locator-resolution-quality resolution)
+                    'exact))))))
+
+(ert-deftest epub-reader-locator-rejects-legacy-publisher-only-identity ()
+  (with-temp-buffer
+    (insert (epub-reader-locator-attach-source
+             "same text" "chapter.xhtml" "id:stable" "publisher-id" 0))
+    (let ((locator (epub-reader-locator-at-point 0 3)))
+      (setf (epub-reader-locator-schema locator) 2)
+      (let ((resolution (epub-reader-locator-resolve locator)))
+        (should-not (epub-reader-locator-resolution-position resolution))
+        (should (eq (epub-reader-locator-resolution-quality resolution)
+                    'legacy-identity))))))
+
+(ert-deftest epub-reader-locator-separates-fixtures-with-shared-identifier ()
+  (let ((first
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "shared-identifier-a.epub")))
+        (second
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "shared-identifier-b.epub"))))
+    (unwind-protect
+        (with-temp-buffer
+          (should (equal (epub-reader-publication-identifier first)
+                         (epub-reader-publication-identifier second)))
+          (insert (epub-reader-block-text
+                   (car (epub-reader-render-chapter first 0))))
+          (let ((locator (epub-reader-locator-at-point 0 (point-min))))
+            (erase-buffer)
+            (insert (epub-reader-block-text
+                     (car (epub-reader-render-chapter second 0))))
+            (let ((resolution (epub-reader-locator-resolve locator)))
+              (should-not
+               (epub-reader-locator-resolution-position resolution))
+              (should
+               (eq (epub-reader-locator-resolution-quality resolution)
+                   'identity-mismatch)))))
+      (epub-reader-publication-close second)
+      (epub-reader-publication-close first))))
 
 (provide 'epub-reader-render-test)
 ;;; epub-reader-render-test.el ends here

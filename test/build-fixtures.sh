@@ -34,6 +34,13 @@ build_epub epub2 "$source_dir/epub2"
 build_epub epub3 "$source_dir/epub3"
 build_epub epub3-edge "$source_dir/epub3-edge"
 
+shared_identifier_source="$work_dir/shared-identifier-source"
+cp -R "$source_dir/epub2" "$shared_identifier_source"
+perl -0pi -e 's/urn:fixture:epub2/urn:fixture:shared-identifier/' \
+  "$shared_identifier_source/OEBPS/content.opf"
+build_epub shared-identifier-a "$shared_identifier_source"
+build_epub shared-identifier-b "$shared_identifier_source"
+
 missing_media_source="$work_dir/epub3-missing-media-source"
 cp -R "$source_dir/epub3-edge" "$missing_media_source"
 perl -0pi -e 's/ id="chapter" href="text\/a%20b.xhtml" media-type="application\/xhtml\+xml"/ id="chapter" href="text\/a%20b.xhtml"/' \

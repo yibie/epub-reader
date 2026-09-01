@@ -55,6 +55,32 @@
       (should (equal (epub-reader-toc-entry-path (car toc))
                      "EPUB/text/one.xhtml")))))
 
+(ert-deftest epub-reader-publication-book-key-does-not-trust-identifier ()
+  (let ((first
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "shared-identifier-a.epub")))
+        (second
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "shared-identifier-b.epub")))
+        reopened)
+    (unwind-protect
+        (progn
+          (setq reopened
+                (epub-reader-publication-open
+                 (epub-reader-test-fixture "shared-identifier-a.epub")))
+          (should (equal (epub-reader-publication-identifier first)
+                         (epub-reader-publication-identifier second)))
+          (should-not (equal (epub-reader-publication-book-key first)
+                             (epub-reader-publication-identifier first)))
+          (should-not (equal (epub-reader-publication-book-key first)
+                             (epub-reader-publication-book-key second)))
+          (should (equal (epub-reader-publication-book-key first)
+                         (epub-reader-publication-book-key reopened))))
+      (when reopened
+        (epub-reader-publication-close reopened))
+      (epub-reader-publication-close second)
+      (epub-reader-publication-close first))))
+
 (ert-deftest epub-reader-publication-resolves-local-and-external-hrefs ()
   (epub-reader-publication-test--with "epub2.epub" publication
     (let ((target

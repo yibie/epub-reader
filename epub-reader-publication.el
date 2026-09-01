@@ -53,6 +53,29 @@
   container version title language identifier book-key opf-path opf-directory
   manifest spine toc closed-p)
 
+(defun epub-reader-publication--content-hash (file)
+  "Return a SHA-256 digest of FILE's literal bytes.
+
+This is called once while constructing a publication; the resulting book key
+is then retained on the publication object."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (secure-hash 'sha256 (current-buffer))))
+
+(defun epub-reader-publication--book-key (container identifier)
+  "Return a durable identity for CONTAINER, with IDENTIFIER as a hint only."
+  (let* ((source (file-truename (epub-reader-container-source container)))
+         (attributes (file-attributes source 'string))
+         (size (file-attribute-size attributes))
+         (mtime (file-attribute-modification-time attributes))
+         (content-hash (epub-reader-publication--content-hash source))
+         (identity
+          (prin1-to-string
+           (list :format 1 :identifier identifier :path source
+                 :size size :mtime mtime :content-hash content-hash))))
+    (concat "epub-reader-book-v1:" (secure-hash 'sha256 identity))))
+
 (defconst epub-reader-publication--ocf-namespace
   "urn:oasis:names:tc:opendocument:xmlns:container")
 (defconst epub-reader-publication--opf-namespace
@@ -784,11 +807,13 @@ key, but is not interpreted as a path."
                          identifier (not (string-empty-p identifier)))
               (signal 'epub-reader-publication-error
                       '("OPF requires title, language, and identifier"))))
+           (book-key
+            (epub-reader-publication--book-key container identifier))
            (publication
             (epub-reader-publication--create
              :container container
              :version version :title title :language language
-             :identifier identifier :book-key identifier
+             :identifier identifier :book-key book-key
              :opf-path opf-path
              :opf-directory (or (file-name-directory opf-path) "")
              :closed-p nil))
