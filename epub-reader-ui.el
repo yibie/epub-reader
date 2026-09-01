@@ -1109,15 +1109,12 @@ change both paragraph wrapping and the number of physical image slice rows."
             (force-mode-line-update t))
         (setf (epub-reader-session-refreshing-p session) nil)))))
 
-(defun epub-reader-ui--refresh-chunk (start end &optional interaction-fast-path)
+(defun epub-reader-ui--refresh-chunk (start end)
   "Synchronously replace the chapter region with block range START to END.
-INTERACTION-FAST-PATH relies on TextUI's focus anchor because the overlapping
-small chunk still contains point; semantic window restoration remains the
-default for arbitrary jumps and idle expansion."
+Every source-order change captures and restores reader locators and visual
+window rows; TextUI's internal focus identity is not an EPUB position."
   (let* ((session (epub-reader-ui--current-session))
-         (view-state
-          (and (not interaction-fast-path)
-               (epub-reader-ui--capture-view-state)))
+         (view-state (epub-reader-ui--capture-view-state))
          (buffer (current-buffer)))
     (unless (epub-reader-session-refreshing-p session)
       (setf (epub-reader-session-refreshing-p session) t)
@@ -1147,7 +1144,7 @@ default for arbitrary jumps and idle expansion."
       (pcase-let ((`(,next-start ,next-end)
                    (epub-reader-ui--chunk-range
                     blocks block-index 'scroll)))
-        (epub-reader-ui--refresh-chunk next-start next-end t)))))
+        (epub-reader-ui--refresh-chunk next-start next-end)))))
 
 (defun epub-reader-ui--inside-chunk-guard-p
     (block-index start end block-count)
@@ -1179,8 +1176,10 @@ default for arbitrary jumps and idle expansion."
                      (epub-reader-ui--chunk-range
                       (epub-reader-ui--current-blocks)
                       block-index 'scroll)))
-          (unless (and (= start next-start) (= end next-end))
-            (epub-reader-ui--refresh-chunk next-start next-end t)))))))
+          ;; A smaller range that adds no new source only discards context and
+          ;; can make the captured visual row physically impossible to keep.
+          (unless (and (>= next-start start) (<= next-end end))
+            (epub-reader-ui--refresh-chunk next-start next-end)))))))
 
 (defun epub-reader-ui--goto-start (&optional fragment)
   "Move to current chapter's FRAGMENT or first source position."

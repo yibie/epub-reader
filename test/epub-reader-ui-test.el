@@ -612,7 +612,7 @@
         (with-current-buffer buffer
           (let ((session epub-reader-ui--session))
             (epub-reader-ui--cancel-background-work session)
-            (epub-reader-ui--refresh-chunk 0 1 t)
+            (epub-reader-ui--refresh-chunk 0 1)
             (should
              (equal (epub-reader-session-background-jobs session)
                     '((images 0 0 1))))))
@@ -763,6 +763,59 @@
                   (should (= (epub-reader-locator-offset before)
                              (epub-reader-locator-offset after)))
                   (should (= before-row after-row)))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-interactive-chunk-shift-preserves-semantic-point ()
+  "The guard-triggered fast path must not change locator or progress."
+  (let ((epub-reader-enable-progress nil)
+        (epub-reader-background-idle-delay 3600)
+        (epub-reader-first-paint-max-blocks 2)
+        (epub-reader-first-paint-max-characters 4000)
+        (epub-reader-scroll-chunk-max-blocks 1)
+        (epub-reader-scroll-chunk-max-characters 3000)
+        (epub-reader-chunk-guard-blocks 8)
+        buffer)
+    (setq buffer
+          (epub-reader-open (epub-reader-test-fixture "long-chapter.epub")))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (with-current-buffer buffer
+            (epub-reader-ui--cancel-background-work epub-reader-ui--session)
+            (let* ((block (aref (epub-reader-ui--current-blocks) 1))
+                   (key (epub-reader-block-key block))
+                   (position
+                    (cl-loop
+                     for candidate from (point-min) below (point-max)
+                     for source = (get-text-property
+                                   candidate 'epub-reader-source)
+                     when (and (epub-reader-locator-source-p source)
+                               (equal (aref source 1) key)
+                               (= (aref source 2) 20))
+                     return candidate)))
+              (should position)
+              (goto-char position)
+              (recenter 3)
+              (redisplay t)
+              (let ((before (epub-reader-ui--current-locator))
+                    (before-percent (epub-reader-ui--progress-percent))
+                    (before-row
+                     (epub-reader-ui-test--visual-row (selected-window))))
+                (should (= (plist-get textui-state :chunk-start) 0))
+                (epub-reader-ui--maybe-shift-chunk)
+                (redisplay t)
+                (let ((after (epub-reader-ui--current-locator)))
+                  (should (= (plist-get textui-state :chunk-start) 0))
+                  (should (equal (epub-reader-locator-block before)
+                                 (epub-reader-locator-block after)))
+                  (should (= (epub-reader-locator-offset before)
+                             (epub-reader-locator-offset after)))
+                  (should (= before-percent
+                             (epub-reader-ui--progress-percent)))
+                  (should (= before-row
+                             (epub-reader-ui-test--visual-row
+                              (selected-window)))))))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
