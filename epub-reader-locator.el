@@ -31,7 +31,7 @@
 (cl-defstruct (epub-reader-locator
                (:constructor epub-reader-locator--create))
   "A layout-independent reading position."
-  schema spine-index path block offset prefix suffix context)
+  schema book-key spine-index path block offset prefix suffix context)
 
 (cl-defstruct (epub-reader-locator-resolution
                (:constructor epub-reader-locator-resolution--create))
@@ -50,13 +50,20 @@
        (stringp (aref value 1))
        (natnump (aref value 2))))
 
-(defun epub-reader-locator-attach-source (string path block)
-  "Attach PATH, BLOCK, and per-character offsets to STRING."
+(defun epub-reader-locator-attach-source
+    (string path block &optional book-key spine-index)
+  "Attach source identity and offsets to STRING.
+PATH and BLOCK identify the semantic block; BOOK-KEY and SPINE-INDEX prevent
+resolution in a different publication or spine item."
   (let ((result (copy-sequence string)))
     (dotimes (offset (length result))
-      (put-text-property
-       offset (1+ offset) 'epub-reader-source
-       (epub-reader-locator-source path block offset) result))
+      (add-text-properties
+       offset (1+ offset)
+       (list 'epub-reader-source
+             (epub-reader-locator-source path block offset)
+             'epub-reader-book-key book-key
+             'epub-reader-spine-index spine-index)
+       result))
     result))
 
 (defun epub-reader-locator--at (position)
@@ -132,7 +139,7 @@ never attaches to chapter content."
          (next-distance next)))))))
 
 (defun epub-reader-locator--source-blocks ()
-  "Return ordered source blocks as (PATH BLOCK TEXT POSITIONS)."
+  "Return source blocks as (PATH BLOCK TEXT POSITIONS BOOK-KEY SPINE-INDEX)."
   (let ((position (point-min))
         (table (make-hash-table :test #'equal))
         order)
@@ -143,13 +150,19 @@ never attaches to chapter content."
                   (or (next-single-property-change
                        position 'epub-reader-source nil (point-max))
                       (point-max)))
-          (let* ((path (aref source 0))
+          (let* ((book-key
+                  (get-text-property position 'epub-reader-book-key))
+                 (spine-index
+                  (get-text-property position 'epub-reader-spine-index))
+                 (path (aref source 0))
                  (block (aref source 1))
                  (offset (aref source 2))
-                 (key (cons path block))
+                 (key (list book-key spine-index path block))
                  (record (gethash key table)))
             (unless record
-              (setq record (list path block (make-hash-table :test #'eql)))
+              (setq record
+                    (list path block (make-hash-table :test #'eql)
+                          book-key spine-index))
               (puthash key record table)
               (push key order))
             (unless (gethash offset (nth 2 record))
@@ -172,10 +185,11 @@ never attaches to chapter content."
           (vconcat
            (mapcar (lambda (offset)
                      (cdr (gethash offset offset-table)))
-                   offsets)))))
+                   offsets))
+          (nth 3 record) (nth 4 record))))
      (nreverse order))))
 
-(defun epub-reader-locator--capture-quotes (source)
+(defun epub-reader-locator--capture-quotes (source book-key spine-index)
   "Return (PREFIX SUFFIX) around SOURCE offset from current buffer."
   (let* ((path (aref source 0))
          (block (aref source 1))
@@ -184,7 +198,9 @@ never attaches to chapter content."
           (cl-find-if
            (lambda (candidate)
              (and (equal (nth 0 candidate) path)
-                  (equal (nth 1 candidate) block)))
+                  (equal (nth 1 candidate) block)
+                  (equal (nth 4 candidate) book-key)
+                  (equal (nth 5 candidate) spine-index)))
            (epub-reader-locator--source-blocks)))
          (text (and record (nth 2 record))))
     (if (not text)
@@ -200,10 +216,22 @@ never attaches to chapter content."
     (let ((found (epub-reader-locator--source-at-or-near
                   (or position (point)))))
       (when found
-        (let* ((source (cdr found))
-               (quotes (epub-reader-locator--capture-quotes source)))
+        (let* ((source-position (car found))
+               (source (cdr found))
+               (book-key
+                (get-text-property source-position 'epub-reader-book-key))
+               (source-spine-index
+                (get-text-property source-position
+                                   'epub-reader-spine-index))
+               (effective-spine-index
+                (if (natnump source-spine-index)
+                    source-spine-index
+                  spine-index))
+               (quotes
+                (epub-reader-locator--capture-quotes
+                 source book-key effective-spine-index)))
           (epub-reader-locator--create
-           :schema 1 :spine-index spine-index
+           :schema 2 :book-key book-key :spine-index effective-spine-index
            :path (aref source 0) :block (aref source 1)
            :offset (aref source 2)
            :prefix (car quotes) :suffix (cadr quotes)
@@ -223,10 +251,34 @@ never attaches to chapter content."
         (when (< offset (length positions))
           (aref positions offset))))))
 
+(defun epub-reader-locator--quote-matches-offset-p (record locator offset)
+  "Return non-nil when LOCATOR's quote still surrounds OFFSET in RECORD."
+  (let* ((text (nth 2 record))
+         (prefix (or (epub-reader-locator-prefix locator) ""))
+         (suffix (or (epub-reader-locator-suffix locator) ""))
+         (start (- offset (length prefix)))
+         (end (+ offset (length suffix))))
+    (and (not (string-empty-p (concat prefix suffix)))
+         (>= start 0)
+         (<= end (length text))
+         (equal (substring text start offset) prefix)
+         (equal (substring text offset end) suffix))))
+
+(defun epub-reader-locator--record-identity-matches-p (record locator)
+  "Return non-nil when RECORD belongs to LOCATOR's book and spine."
+  (and (equal (nth 4 record) (epub-reader-locator-book-key locator))
+       (equal (nth 5 record) (epub-reader-locator-spine-index locator))))
+
 (defun epub-reader-locator-resolve (locator &optional buffer)
   "Resolve LOCATOR in BUFFER and return position plus degradation quality."
   (with-current-buffer (or buffer (current-buffer))
-    (let* ((records (epub-reader-locator--source-blocks))
+    (let* ((all-records (epub-reader-locator--source-blocks))
+           (records
+            (cl-remove-if-not
+             (lambda (record)
+               (epub-reader-locator--record-identity-matches-p
+                record locator))
+             all-records))
            (path (epub-reader-locator-path locator))
            (block (epub-reader-locator-block locator))
            (offset (epub-reader-locator-offset locator))
@@ -239,7 +291,15 @@ never attaches to chapter content."
                        (lambda (record) (equal (nth 0 record) path))
                        records)))
       (cond
-       ((and same-block (< offset (length (nth 3 same-block))))
+       ((not (= (or (epub-reader-locator-schema locator) 0) 2))
+        (epub-reader-locator-resolution--create
+         :position nil :quality 'unsupported-schema))
+       ((and all-records (null records))
+        (epub-reader-locator-resolution--create
+         :position nil :quality 'identity-mismatch))
+       ((and same-block (< offset (length (nth 3 same-block)))
+             (epub-reader-locator--quote-matches-offset-p
+              same-block locator offset))
         (epub-reader-locator-resolution--create
          :position (aref (nth 3 same-block) offset) :quality 'exact))
        ((and same-block
@@ -292,8 +352,10 @@ never attaches to chapter content."
                       (or (next-single-property-change
                            position 'epub-reader-image-anchor nil (point-max))
                           (point-max)))
-              (let ((source (car anchor))
-                    (rows (cdr anchor)))
+              (let ((source (nth 0 anchor))
+                    (rows (nth 1 anchor))
+                    (book-key (nth 2 anchor))
+                    (spine-index (nth 3 anchor)))
                 (goto-char position)
                 (beginning-of-line)
                 (dotimes (_ rows)
@@ -303,6 +365,8 @@ never attaches to chapter content."
                       (add-text-properties
                        start end
                        (list 'epub-reader-source source
+                             'epub-reader-book-key book-key
+                             'epub-reader-spine-index spine-index
                              'epub-reader-image-slice t))))
                   (forward-line 1))
                 (setq position (point))))))))

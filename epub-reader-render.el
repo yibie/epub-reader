@@ -356,7 +356,9 @@ break between non-CJK words becomes one space.  Newlines carrying the
                       (attributed
                        (epub-reader-locator-attach-source
                         (epub-reader-render--add-face anchor-text face)
-                        document-path key)))
+                        document-path key
+                        (epub-reader-publication-book-key publication)
+                        (epub-reader-section-spine-index section))))
                (push
                 (epub-reader-block--create
                  :key key :kind kind :text attributed
@@ -388,8 +390,11 @@ break between non-CJK words becomes one space.  Newlines carrying the
                  (emit (or context 'paragraph) node
                        (epub-reader-render--normalize-inline
                         (epub-reader-render--inline node)) path)
-                 (dolist (image (epub-reader-render--descendants node "img"))
-                   (emit-image image (concat path "/image"))))
+                 (cl-loop
+                  for image in (epub-reader-render--descendants node "img")
+                  for image-index from 0
+                  do (emit-image image
+                                 (format "%s/image:%d" path image-index))))
                 ((equal tag "blockquote")
                  (when (epub-reader-render--attribute node "id")
                    (emit 'anchor node "" path))
@@ -416,8 +421,11 @@ break between non-CJK words becomes one space.  Newlines carrying the
                 ((equal tag "figure")
                  (when (epub-reader-render--attribute node "id")
                    (emit 'anchor node "" path))
-                 (dolist (image (epub-reader-render--descendants node "img"))
-                   (emit-image image (concat path "/image")))
+                 (cl-loop
+                  for image in (epub-reader-render--descendants node "img")
+                  for image-index from 0
+                  do (emit-image image
+                                 (format "%s/image:%d" path image-index)))
                  (dolist (caption
                           (epub-reader-render--children node "figcaption"))
                    (emit 'paragraph caption
@@ -463,12 +471,19 @@ break between non-CJK words becomes one space.  Newlines carrying the
      (let* ((source
              (get-text-property 0 'epub-reader-source
                                 (epub-reader-block-text block)))
+            (book-key
+             (get-text-property 0 'epub-reader-book-key
+                                (epub-reader-block-text block)))
+            (spine-index
+             (get-text-property 0 'epub-reader-spine-index
+                                (epub-reader-block-text block)))
             (image-alt (copy-sequence (epub-reader-block-text block)))
             (_image-anchor
              (when source
                (put-text-property
                 0 (length image-alt) 'epub-reader-image-anchor
-                (cons source epub-reader-image-rows) image-alt)))
+                (list source epub-reader-image-rows book-key spine-index)
+                image-alt)))
             (caption
             (epub-reader-render--text-element
              (epub-reader-block-text block))))

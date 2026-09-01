@@ -77,17 +77,33 @@
            (cl-loop for position from (point-min) below (point-max)
                     when (get-text-property position
                                             'epub-reader-image-slice)
-                    collect position)))
+                    collect position))
+          (image-blocks
+           (cl-remove-if-not
+            (lambda (block) (eq (epub-reader-block-kind block) 'image))
+            (plist-get textui-state :blocks))))
       (should positions)
+      (should
+       (equal
+        (sort (delete-dups
+               (mapcar
+                (lambda (position)
+                  (aref (get-text-property
+                         position 'epub-reader-source)
+                        1))
+                positions))
+              #'string<)
+        (sort (mapcar #'epub-reader-block-key image-blocks) #'string<)))
       (goto-char (nth (/ (length positions) 2) positions))
       (let ((locator (epub-reader-locator-at-point 1)))
         (should locator)
+        (should (equal (epub-reader-locator-book-key locator)
+                       (epub-reader-publication-book-key
+                        (plist-get textui-state :publication))))
+        (should (= (epub-reader-locator-spine-index locator) 1))
         (should
-         (equal
-          (epub-reader-locator-block locator)
-          (epub-reader-block-key
-           (cl-find 'image (plist-get textui-state :blocks)
-                    :key #'epub-reader-block-kind))))))))
+         (member (epub-reader-locator-block locator)
+                 (mapcar #'epub-reader-block-key image-blocks)))))))
 
 (ert-deftest epub-reader-ui-chrome-does-not-produce-reading-locator ()
   (epub-reader-ui-test--with-reader _buffer

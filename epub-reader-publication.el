@@ -50,7 +50,7 @@
 (cl-defstruct (epub-reader-publication
                (:constructor epub-reader-publication--create))
   "A normalized EPUB publication owned by the caller."
-  container version title language identifier opf-path opf-directory
+  container version title language identifier book-key opf-path opf-directory
   manifest spine toc closed-p)
 
 (defconst epub-reader-publication--ocf-namespace
@@ -726,7 +726,7 @@ uppercase percent escapes so they cannot become path separators."
             (epub-reader-publication--create
              :container container
              :version version :title title :language language
-             :identifier identifier
+             :identifier identifier :book-key identifier
              :opf-path opf-path
              :opf-directory (or (file-name-directory opf-path) "")
              :closed-p nil))

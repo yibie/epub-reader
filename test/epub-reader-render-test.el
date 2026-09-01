@@ -68,9 +68,20 @@
 (ert-deftest epub-reader-render-maps-images-to-image-leaves-with-anchor ()
   (epub-reader-render-test--with-publication publication
     (let* ((blocks (epub-reader-render-chapter publication 1))
-           (image (cl-find 'image blocks :key #'epub-reader-block-kind))
+           (images
+            (cl-remove-if-not
+             (lambda (block) (eq (epub-reader-block-kind block) 'image))
+             blocks))
+           (image (car images))
            (element (epub-reader-render-block-element image)))
       (should image)
+      (should (= (length images) 3))
+      (should (= (length (delete-dups
+                          (mapcar #'epub-reader-block-key images)))
+                 3))
+      (should
+       (equal (mapcar #'epub-reader-block-key (cdr images))
+              '("path:body/3:p/image:0" "path:body/3:p/image:1")))
       (should (file-readable-p (epub-reader-block-image-file image)))
       (should (eq (plist-get element :type) :flex))
       (should (eq (plist-get (car (plist-get element :children)) :type)
@@ -100,6 +111,10 @@
               (let ((locator (epub-reader-locator-at-point 0)))
                 (should locator)
                 (should (= (epub-reader-locator-offset locator) 5))
+                (should (equal
+                         (epub-reader-locator-book-key locator)
+                         (epub-reader-publication-book-key publication)))
+                (should (= (epub-reader-locator-spine-index locator) 0))
                 (textui-set-state buffer :width 24)
                 (textui-refresh buffer)
                 (should (epub-reader-locator-goto locator buffer))
@@ -230,11 +245,11 @@
 (ert-deftest epub-reader-locator-reports-degraded-resolution-quality ()
   (with-temp-buffer
     (insert (epub-reader-locator-attach-source
-             "Alpha target Omega" "chapter.xhtml" "old-block"))
+             "Alpha target Omega" "chapter.xhtml" "old-block" "book" 0))
     (let ((locator (epub-reader-locator-at-point 0 8)))
       (erase-buffer)
       (insert (epub-reader-locator-attach-source
-               "Alpha target Omega" "chapter.xhtml" "new-block"))
+               "Alpha target Omega" "chapter.xhtml" "new-block" "book" 0))
       (let ((resolution (epub-reader-locator-resolve locator)))
         (should (eq (epub-reader-locator-resolution-quality resolution)
                     'quote-in-spine))
@@ -252,6 +267,46 @@
        (eq (epub-reader-locator-resolution-quality
             (epub-reader-locator-resolve locator))
            'spine-start)))))
+
+(ert-deftest epub-reader-locator-validates-quote-before-exact-resolution ()
+  (with-temp-buffer
+    (insert (epub-reader-locator-attach-source
+             "Alpha target Omega" "chapter.xhtml" "id:stable" "book" 4))
+    (let ((locator (epub-reader-locator-at-point 4 8)))
+      (erase-buffer)
+      (insert (epub-reader-locator-attach-source
+               "XX Alpha target Omega" "chapter.xhtml" "id:stable"
+               "book" 4))
+      (let* ((resolution (epub-reader-locator-resolve locator))
+             (position
+              (epub-reader-locator-resolution-position resolution)))
+        (should (eq (epub-reader-locator-resolution-quality resolution)
+                    'quote-near-block))
+        (should position)
+        (should (= (aref (get-text-property
+                          position 'epub-reader-source)
+                         2)
+                   10))))))
+
+(ert-deftest epub-reader-locator-rejects-cross-book-and-spine-resolution ()
+  (with-temp-buffer
+    (insert (epub-reader-locator-attach-source
+             "same text" "chapter.xhtml" "id:stable" "book-a" 2))
+    (let ((locator (epub-reader-locator-at-point 2 3)))
+      (erase-buffer)
+      (insert (epub-reader-locator-attach-source
+               "same text" "chapter.xhtml" "id:stable" "book-b" 2))
+      (let ((resolution (epub-reader-locator-resolve locator)))
+        (should-not (epub-reader-locator-resolution-position resolution))
+        (should (eq (epub-reader-locator-resolution-quality resolution)
+                    'identity-mismatch)))
+      (erase-buffer)
+      (insert (epub-reader-locator-attach-source
+               "same text" "chapter.xhtml" "id:stable" "book-a" 3))
+      (let ((resolution (epub-reader-locator-resolve locator)))
+        (should-not (epub-reader-locator-resolution-position resolution))
+        (should (eq (epub-reader-locator-resolution-quality resolution)
+                    'identity-mismatch))))))
 
 (provide 'epub-reader-render-test)
 ;;; epub-reader-render-test.el ends here
