@@ -96,7 +96,42 @@
                     when (get-text-property position 'epub-reader-chrome)
                     return position)))
       (should chrome)
-      (should-not (epub-reader-locator-at-point 0 chrome)))))
+      (should-not (epub-reader-locator-at-point 0 chrome)))
+    (let ((first-source (epub-reader-ui--first-source-position))
+          last-source)
+      (cl-loop for position downfrom (1- (point-max)) to (point-min)
+               when (epub-reader-locator-source-p
+                     (get-text-property position 'epub-reader-source))
+               return (setq last-source position))
+      (should first-source)
+      (should last-source)
+      (cl-loop for position from (point-min) below first-source
+               do (should (get-text-property position 'epub-reader-chrome))
+               do (should-not (epub-reader-locator-at-point 0 position)))
+      (cl-loop for position from (1+ last-source) below (point-max)
+               do (should (get-text-property position 'epub-reader-chrome))
+               do (should-not (epub-reader-locator-at-point 0 position)))
+      (save-excursion
+        (goto-char first-source)
+        (let ((line-first first-source)
+              (line-start (line-beginning-position))
+              (line-end (line-end-position))
+              line-last)
+          (cl-loop for position from line-start below line-first
+                   do (should
+                       (get-text-property position 'epub-reader-chrome))
+                   do (should-not
+                       (epub-reader-locator-at-point 0 position)))
+          (cl-loop for position downfrom (1- line-end) to line-first
+                   when (epub-reader-locator-source-p
+                         (get-text-property position 'epub-reader-source))
+                   return (setq line-last position))
+          (should line-last)
+          (cl-loop for position from (1+ line-last) below line-end
+                   do (should
+                       (get-text-property position 'epub-reader-chrome))
+                   do (should-not
+                       (epub-reader-locator-at-point 0 position))))))))
 
 (ert-deftest epub-reader-ui-resolves-empty-container-and-inline-fragments ()
   (let ((buffer

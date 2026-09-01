@@ -108,6 +108,46 @@
           (setq position end)))))
   nil)
 
+(defun epub-reader-ui--mark-chrome-regions (&optional buffer)
+  "Mark all frame chrome, including TextUI-synthesized cells, in BUFFER."
+  (with-current-buffer (or buffer (current-buffer))
+    (save-excursion
+      (let ((position (point-min))
+            first-source last-source
+            (inhibit-read-only t))
+        (while (< position (point-max))
+          (when (epub-reader-locator-source-p
+                 (get-text-property position 'epub-reader-source))
+            (unless first-source
+              (setq first-source position))
+            (setq last-source position))
+          (setq position (1+ position)))
+        (when first-source
+          (add-text-properties
+           (point-min) first-source '(epub-reader-chrome t))
+          (add-text-properties
+           (1+ last-source) (point-max) '(epub-reader-chrome t))
+          (goto-char first-source)
+          (while (<= (line-beginning-position) last-source)
+            (let ((line-start (line-beginning-position))
+                  (line-end (line-end-position))
+                  line-first line-last)
+              (setq position line-start)
+              (while (< position line-end)
+                (when (epub-reader-locator-source-p
+                       (get-text-property position 'epub-reader-source))
+                  (unless line-first
+                    (setq line-first position))
+                  (setq line-last position))
+                (setq position (1+ position)))
+              (when line-first
+                (add-text-properties
+                 line-start line-first '(epub-reader-chrome t))
+                (add-text-properties
+                 (1+ line-last) line-end '(epub-reader-chrome t))))
+            (forward-line 1))))))
+  nil)
+
 (defun epub-reader-ui-frame (available-width)
   "Return the complete reader frame for AVAILABLE-WIDTH."
   (let* ((publication (plist-get textui-state :publication))
@@ -133,7 +173,8 @@
      'epub-reader-post-render (list index available-width)
      (lambda ()
        (epub-reader-locator-tag-image-runs (current-buffer))
-       (epub-reader-ui--attach-link-actions (current-buffer))))
+       (epub-reader-ui--attach-link-actions (current-buffer))
+       (epub-reader-ui--mark-chrome-regions (current-buffer))))
     (when (> left 0)
       (push (epub-reader-ui--spacer left) children))
     (push column children)
