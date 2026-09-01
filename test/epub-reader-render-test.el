@@ -79,13 +79,16 @@
 
 (ert-deftest epub-reader-render-maps-images-to-image-leaves-with-anchor ()
   (epub-reader-render-test--with-publication publication
-    (let* ((blocks (epub-reader-render-chapter publication 1))
+    (let* ((section
+            (epub-reader-publication-load-section publication 1))
+           (blocks (epub-reader-render-section publication section))
            (images
             (cl-remove-if-not
              (lambda (block) (eq (epub-reader-block-kind block) 'image))
              blocks))
            (image (car images))
-           (element (epub-reader-render-block-element image)))
+           (element
+            (epub-reader-render-block-element image publication section)))
       (should image)
       (should (= (length images) 4))
       (should (= (length (delete-dups
@@ -128,7 +131,12 @@
                 (substring-no-properties (epub-reader-block-text block))))
              blocks))
            (broken
-            (cl-find-if #'epub-reader-block-image-error blocks)))
+            (cl-find-if
+             (lambda (block)
+               (and (eq (epub-reader-block-kind block) 'image)
+                    (equal (epub-reader-block-image-href block)
+                           "missing.png")))
+             blocks)))
       (should anchor-position)
       (should
        (equal
@@ -150,10 +158,14 @@
         (plist-get (epub-reader-render-block-element (car ordered)) :value)))
       (should unknown)
       (should broken)
+      (should-not (epub-reader-block-image-error broken))
+      (epub-reader-render-block-element
+       broken publication
+       (epub-reader-publication-load-section publication 1))
       (should (string-match-p "missing.png"
                               (epub-reader-block-image-error broken)))
-      (should (string-match-p "missing.png"
-                              (epub-reader-block-text broken))))))
+      (should-not (string-match-p "missing.png"
+                                  (epub-reader-block-text broken))))))
 
 (ert-deftest epub-reader-locator-round-trips-across-textui-reflow ()
   (epub-reader-render-test--with-publication publication

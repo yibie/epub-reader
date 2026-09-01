@@ -87,7 +87,7 @@
                (:constructor epub-reader-block--create))
   "One semantic block extracted from a spine document."
   key kind text document-path book-key spine-index element-id level image-file
-  image-alt image-error list-marker)
+  image-href image-alt image-error list-marker)
 
 (defun epub-reader-render--local-name (node)
   "Return namespace-independent local tag name of XML NODE."
@@ -364,7 +364,8 @@ and other languages it becomes one space.  Newlines carrying the
         (t 'epub-reader-heading-3-face)))
 
 (defun epub-reader-render--image-data (publication section node)
-  "Return (FILE ALT ERROR) for image NODE in SECTION of PUBLICATION."
+  "Return (HREF ALT ERROR) for image NODE in SECTION of PUBLICATION.
+This validates URL resolution without materializing the image member."
   (let ((source (or (epub-reader-render--attribute node "src")
                     (epub-reader-render--attribute node "href")))
         (alt (or (epub-reader-render--attribute node "alt") "Image")))
@@ -372,14 +373,13 @@ and other languages it becomes one space.  Newlines carrying the
         (list nil alt "Image has no source URL")
       (condition-case error-data
           (let ((target
-                 (epub-reader-publication-resolve-resource
-                  publication section source)))
-            (cond
-             ((epub-reader-link-target-external-p target)
-              (list nil alt (format "Remote image is unsupported: %s" source)))
-             ((not (file-readable-p (epub-reader-link-target-file target)))
-              (list nil alt (format "Image resource is unreadable: %s" source)))
-             (t (list (epub-reader-link-target-file target) alt nil))))
+                 (epub-reader-publication-resolve-href
+                  publication (epub-reader-section-base-path section)
+                  source)))
+            (if (epub-reader-link-target-external-p target)
+                (list nil alt
+                      (format "Remote image is unsupported: %s" source))
+              (list source alt nil)))
         (error
          (list nil alt
                (format "Image error for %s: %s" source
@@ -414,8 +414,8 @@ and other languages it becomes one space.  Newlines carrying the
             (epub-reader-render--language body root-language))
            blocks)
       (cl-labels
-          ((emit (kind node text path &optional level image-file image-alt
-                       image-error list-marker)
+          ((emit (kind node text path &optional level image-href image-file
+                       image-alt image-error list-marker)
              (let* ((id (epub-reader-render--attribute node "id"))
                     (anchor-text
                      (if (string-empty-p text)
@@ -444,18 +444,19 @@ and other languages it becomes one space.  Newlines carrying the
                  :book-key (epub-reader-publication-book-key publication)
                  :spine-index (epub-reader-section-spine-index section)
                  :element-id id :level level
-                 :image-file image-file :image-alt image-alt
+                 :image-file image-file :image-href image-href
+                 :image-alt image-alt
                  :image-error image-error :list-marker list-marker)
                 blocks)))
            (emit-image (node path)
-             (pcase-let ((`(,file ,alt ,image-error)
+             (pcase-let ((`(,href ,alt ,image-error)
                            (epub-reader-render--image-data
                             publication section node)))
                (emit 'image node
                      (if image-error
                          (format "[%s — %s]" alt image-error)
                        (format "[%s]" alt))
-                     path nil file alt image-error)))
+                     path nil href nil alt image-error)))
            (node-without-id (node)
              (cons (car node)
                    (cons
@@ -562,7 +563,7 @@ and other languages it becomes one space.  Newlines carrying the
                        (epub-reader-render--normalize-inline
                         (epub-reader-render--inline node node-language)
                         node-language)
-                       path nil nil nil nil
+                       path nil nil nil nil nil
                        (if (stringp context) context "• "))
                  (cl-loop
                   for child in (epub-reader-render--children node)
@@ -628,8 +629,42 @@ and other languages it becomes one space.  Newlines carrying the
    (epub-reader-block-book-key block)
    (epub-reader-block-spine-index block)))
 
-(defun epub-reader-render-block-element (block)
-  "Convert semantic BLOCK to one public TextUI element."
+(defun epub-reader-render--materialize-image (block publication section)
+  "Materialize BLOCK's image from PUBLICATION relative to SECTION.
+Cache either the local file or a visible diagnostic on BLOCK."
+  (when (and (eq (epub-reader-block-kind block) 'image)
+             (epub-reader-block-image-href block)
+             (not (epub-reader-block-image-file block))
+             (not (epub-reader-block-image-error block)))
+    (condition-case error-data
+        (let ((target
+               (epub-reader-publication-resolve-resource
+                publication section (epub-reader-block-image-href block))))
+          (cond
+           ((epub-reader-link-target-external-p target)
+            (setf (epub-reader-block-image-error block)
+                  (format "Remote image is unsupported: %s"
+                          (epub-reader-block-image-href block))))
+           ((not (file-readable-p (epub-reader-link-target-file target)))
+            (setf (epub-reader-block-image-error block)
+                  (format "Image resource is unreadable: %s"
+                          (epub-reader-block-image-href block))))
+           (t
+            (setf (epub-reader-block-image-file block)
+                  (epub-reader-link-target-file target)))))
+      (error
+       (setf (epub-reader-block-image-error block)
+             (format "Image error for %s: %s"
+                     (epub-reader-block-image-href block)
+                     (error-message-string error-data))))))
+  block)
+
+(defun epub-reader-render-block-element (block &optional publication section)
+  "Convert semantic BLOCK to one public TextUI element.
+When PUBLICATION and SECTION are supplied, materialize an image block just
+before producing its leaf."
+  (when (and publication section)
+    (epub-reader-render--materialize-image block publication section))
   (let ((text (epub-reader-render--materialized-text block)))
     (pcase (epub-reader-block-kind block)
     ('quote
@@ -658,23 +693,37 @@ and other languages it becomes one space.  Newlines carrying the
                 0 (length image-alt) 'epub-reader-image-anchor
                 (list source epub-reader-image-rows book-key spine-index)
                 image-alt)))
-            (caption (epub-reader-render--text-element text)))
-       (if (epub-reader-block-image-file block)
-           (list :type :flex :direction :column :gap 0
-                 :children
-                 (list
-                  (list :type :image
-                        :file (epub-reader-block-image-file block)
-                        :rows epub-reader-image-rows
-                        :alt image-alt
-                        :layout '(:min-width 12 :grow 1))
-                  caption))
-         caption)))
+            (caption (epub-reader-render--text-element text))
+            (diagnostic
+             (and (epub-reader-block-image-error block)
+                  (epub-reader-render--text-element
+                   (propertize
+                    (format "[%s]"
+                            (epub-reader-block-image-error block))
+                    'face 'epub-reader-image-error-face)))))
+       (cond
+        ((epub-reader-block-image-file block)
+         (list :type :flex :direction :column :gap 0
+               :children
+               (list
+                (list :type :image
+                      :file (epub-reader-block-image-file block)
+                      :rows epub-reader-image-rows
+                      :alt image-alt
+                      :layout '(:min-width 12 :grow 1))
+                caption)))
+        (diagnostic
+         (list :type :flex :direction :column :gap 0
+               :children (list caption diagnostic)))
+        (t caption))))
     (_ (epub-reader-render--text-element text)))))
 
-(defun epub-reader-render-blocks (blocks)
-  "Convert semantic BLOCKS to a list of public TextUI elements."
-  (mapcar #'epub-reader-render-block-element blocks))
+(defun epub-reader-render-blocks (blocks &optional publication section)
+  "Convert semantic BLOCKS to public TextUI elements.
+Optional PUBLICATION and SECTION enable on-demand image materialization."
+  (mapcar (lambda (block)
+            (epub-reader-render-block-element block publication section))
+          blocks))
 
 (provide 'epub-reader-render)
 ;;; epub-reader-render.el ends here

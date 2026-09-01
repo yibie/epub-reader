@@ -144,6 +144,35 @@
          (member (epub-reader-locator-block locator)
                  (mapcar #'epub-reader-block-key image-blocks)))))))
 
+(ert-deftest epub-reader-ui-materializes-images-only-in-current-chunk ()
+  (let ((epub-reader-chunk-max-blocks 3))
+    (epub-reader-ui-test--with-reader _buffer
+      (let* ((publication
+              (epub-reader-session-publication epub-reader-ui--session))
+             (root
+              (epub-reader-container-root
+               (epub-reader-publication-container publication)))
+             (image (expand-file-name "OEBPS/cover.svg" root)))
+        (should-not (file-exists-p image))
+        (epub-reader-next-chapter)
+        (should (file-readable-p image))
+        (should (= (plist-get textui-state :chunk-end) 3))
+        (cl-loop for block across (epub-reader-ui--current-blocks)
+                 for index from 0
+                 when (equal (epub-reader-block-image-href block) "cover.svg")
+                 if (< index 3)
+                 do (should
+                     (equal (epub-reader-block-image-file block) image))
+                 else
+                 do (should-not (epub-reader-block-image-file block)))
+        (let ((broken
+               (cl-find-if
+                (lambda (block)
+                  (equal (epub-reader-block-image-href block) "missing.png"))
+                (append (epub-reader-ui--current-blocks) nil))))
+          (should broken)
+          (should-not (epub-reader-block-image-error broken)))))))
+
 (ert-deftest epub-reader-ui-chrome-does-not-produce-reading-locator ()
   (epub-reader-ui-test--with-reader _buffer
     (let ((chrome
@@ -281,9 +310,9 @@
           (let ((real-render
                  (symbol-function 'epub-reader-render-block-element)))
             (cl-letf (((symbol-function 'epub-reader-render-block-element)
-                       (lambda (block)
+                       (lambda (&rest arguments)
                          (setq rendered-leaves (1+ rendered-leaves))
-                         (funcall real-render block))))
+                         (apply real-render arguments))))
               (epub-reader-ui--goto-start "p09999")))
           (should (<= rendered-leaves epub-reader-chunk-max-blocks))
           (should (> (plist-get textui-state :chunk-start) 9900))

@@ -306,15 +306,11 @@ A single larger block is still materialized by itself."
     (plist-put next :chunk-end end)))
 
 (defun epub-reader-ui--spine-weights (publication)
-  "Return resource-size weights for PUBLICATION's reading spine."
+  "Return central-directory size weights for PUBLICATION's reading spine."
   (vconcat
    (cl-loop for item across (epub-reader-publication-spine publication)
             for resource = (epub-reader-spine-item-resource item)
-            for file = (epub-reader-resource-file resource)
-            collect (max 1 (or (and file
-                                    (file-attribute-size
-                                     (file-attributes file 'string)))
-                               1)))))
+            collect (max 1 (or (epub-reader-resource-size resource) 1)))))
 
 (defun epub-reader-ui--current-locator ()
   "Return the current semantic locator, or nil outside chapter content."
@@ -569,7 +565,11 @@ A single larger block is still materialized by itself."
          (end (or (plist-get textui-state :chunk-end) (length blocks)))
          elements)
     (cl-loop for index from start below (min end (length blocks))
-             do (push (epub-reader-render-block-element (aref blocks index))
+             do (push (epub-reader-render-block-element
+                       (aref blocks index)
+                       (epub-reader-session-publication session)
+                       (epub-reader-chapter-data-section
+                        (epub-reader-ui--current-chapter session)))
                       elements))
     (setf (epub-reader-session-producer-block-count session)
           (length elements))
