@@ -9,8 +9,9 @@
 ;;; Commentary:
 
 ;; Convert one XHTML spine resource into semantic blocks, then convert those
-;; blocks into public TextUI :text/:image/flex elements.  Source properties are
-;; attached before layout so locator identity survives width changes.
+;; blocks into public TextUI :text/:image/flex elements.  Cached blocks keep
+;; canonical attributed text; source offsets are materialized only for blocks
+;; entering the active TextUI chunk.
 
 ;;; Code:
 
@@ -85,8 +86,8 @@
 (cl-defstruct (epub-reader-block
                (:constructor epub-reader-block--create))
   "One semantic block extracted from a spine document."
-  key kind text document-path element-id level image-file image-alt image-error
-  list-marker)
+  key kind text document-path book-key spine-index element-id level image-file
+  image-alt image-error list-marker)
 
 (defun epub-reader-render--local-name (node)
   "Return namespace-independent local tag name of XML NODE."
@@ -435,15 +436,14 @@ and other languages it becomes one space.  Newlines carrying the
                                    'epub-reader-image-alt-face))
                          (_ 'epub-reader-prose-face)))
                       (attributed
-                       (epub-reader-locator-attach-source
-                        (epub-reader-render--add-face anchor-text face)
-                        document-path key
-                        (epub-reader-publication-book-key publication)
-                        (epub-reader-section-spine-index section))))
+                       (epub-reader-render--add-face anchor-text face)))
                (push
                 (epub-reader-block--create
                  :key key :kind kind :text attributed
-                 :document-path document-path :element-id id :level level
+                 :document-path document-path
+                 :book-key (epub-reader-publication-book-key publication)
+                 :spine-index (epub-reader-section-spine-index section)
+                 :element-id id :level level
                  :image-file image-file :image-alt image-alt
                  :image-error image-error :list-marker list-marker)
                 blocks)))
@@ -619,43 +619,46 @@ and other languages it becomes one space.  Newlines carrying the
   "Return a width-aware TextUI prose element for VALUE."
   (list :type :text :value value :layout '(:min-width 20 :grow 1)))
 
+(defun epub-reader-render--materialized-text (block)
+  "Return a source-attributed copy of canonical BLOCK text."
+  (epub-reader-locator-attach-source
+   (epub-reader-block-text block)
+   (epub-reader-block-document-path block)
+   (epub-reader-block-key block)
+   (epub-reader-block-book-key block)
+   (epub-reader-block-spine-index block)))
+
 (defun epub-reader-render-block-element (block)
   "Convert semantic BLOCK to one public TextUI element."
-  (pcase (epub-reader-block-kind block)
+  (let ((text (epub-reader-render--materialized-text block)))
+    (pcase (epub-reader-block-kind block)
     ('quote
      (list :type :flex :direction :column :border t :padding 1
            :children
-           (list (epub-reader-render--text-element
-                  (epub-reader-block-text block)))))
+           (list (epub-reader-render--text-element text))))
     ('code
      (list :type :flex :direction :column :border t :padding 1
            :children
-           (list (epub-reader-render--text-element
-                  (epub-reader-block-text block)))))
+           (list (epub-reader-render--text-element text))))
     ('list-item
      (epub-reader-render--text-element
       (concat (or (epub-reader-block-list-marker block) "• ")
-              (epub-reader-block-text block))))
+              text)))
     ('image
      (let* ((source
-             (get-text-property 0 'epub-reader-source
-                                (epub-reader-block-text block)))
+             (get-text-property 0 'epub-reader-source text))
             (book-key
-             (get-text-property 0 'epub-reader-book-key
-                                (epub-reader-block-text block)))
+             (get-text-property 0 'epub-reader-book-key text))
             (spine-index
-             (get-text-property 0 'epub-reader-spine-index
-                                (epub-reader-block-text block)))
-            (image-alt (copy-sequence (epub-reader-block-text block)))
+             (get-text-property 0 'epub-reader-spine-index text))
+            (image-alt (copy-sequence text))
             (_image-anchor
              (when source
                (put-text-property
                 0 (length image-alt) 'epub-reader-image-anchor
                 (list source epub-reader-image-rows book-key spine-index)
                 image-alt)))
-            (caption
-            (epub-reader-render--text-element
-             (epub-reader-block-text block))))
+            (caption (epub-reader-render--text-element text)))
        (if (epub-reader-block-image-file block)
            (list :type :flex :direction :column :gap 0
                  :children
@@ -667,8 +670,7 @@ and other languages it becomes one space.  Newlines carrying the
                         :layout '(:min-width 12 :grow 1))
                   caption))
          caption)))
-    (_ (epub-reader-render--text-element
-        (epub-reader-block-text block)))))
+    (_ (epub-reader-render--text-element text)))))
 
 (defun epub-reader-render-blocks (blocks)
   "Convert semantic BLOCKS to a list of public TextUI elements."

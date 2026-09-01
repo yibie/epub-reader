@@ -16,7 +16,7 @@
         (epub-reader-open (epub-reader-test-fixture "long-chapter.epub")))
   (unwind-protect
       (with-current-buffer buffer
-        (let* ((blocks (epub-reader-session-blocks epub-reader-ui--session))
+        (let* ((blocks (epub-reader-ui--current-blocks))
                (limit (max 1 (- (length blocks)
                                 epub-reader-chunk-max-blocks))))
           (dotimes (iteration iterations)

@@ -47,7 +47,10 @@ python3 -c '
 import pathlib, sys
 target = pathlib.Path(sys.argv[1])
 paragraphs = "\n".join(
-    f"    <p id=\"p{index:05d}\">第 {index:05d} 段：长章节 viewport 基准文本。</p>"
+    f"    <p id=\"p{index:05d}\">"
+    + (("x" * 2000) if index == 20
+       else f"第 {index:05d} 段：长章节 viewport 基准文本。")
+    + "</p>"
     for index in range(10000)
 )
 target.write_text(

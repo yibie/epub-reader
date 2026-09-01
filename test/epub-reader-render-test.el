@@ -41,6 +41,14 @@
            when (equal (get-text-property position property object) expected)
            return position))
 
+(defun epub-reader-render-test--element-text (element)
+  "Return the first text value contained in TextUI ELEMENT."
+  (if (eq (plist-get element :type) :text)
+      (plist-get element :value)
+    (cl-loop for child in (plist-get element :children)
+             for value = (epub-reader-render-test--element-text child)
+             when value return value)))
+
 (ert-deftest epub-reader-render-maps-xhtml-to-semantic-blocks ()
   (epub-reader-render-test--with-publication publication
     (let ((blocks (epub-reader-render-chapter publication 0)))
@@ -60,9 +68,12 @@
          (get-text-property link-position 'keymap
                             (epub-reader-block-text last))))
       (dolist (block blocks)
-        (let ((source
-               (get-text-property 0 'epub-reader-source
-                                  (epub-reader-block-text block))))
+        (should-not (get-text-property
+                     0 'epub-reader-source (epub-reader-block-text block)))
+        (let* ((value
+                (epub-reader-render-test--element-text
+                 (epub-reader-render-block-element block)))
+               (source (get-text-property 0 'epub-reader-source value)))
           (should (epub-reader-locator-source-p source))
           (should (equal (aref source 0) "OEBPS/chapter1.xhtml")))))))
 
@@ -89,8 +100,12 @@
                   :image))
       (should
        (epub-reader-locator-source-p
-        (get-text-property 0 'epub-reader-source
-                           (epub-reader-block-text image)))))))
+        (get-text-property
+         0 'epub-reader-source
+         (plist-get (car (plist-get element :children)) :alt))))
+      (should-not
+       (get-text-property 0 'epub-reader-source
+                          (epub-reader-block-text image))))))
 
 (ert-deftest epub-reader-render-preserves-list-container-and-inline-order ()
   (epub-reader-render-test--with-publication publication
@@ -223,10 +238,15 @@
                  blocks)))
           (dolist (block (list empty container page inline))
             (should block)
-            (should (epub-reader-locator-source-p
-                     (get-text-property
-                      0 'epub-reader-source
-                      (epub-reader-block-text block)))))
+            (should-not (get-text-property
+                         0 'epub-reader-source
+                         (epub-reader-block-text block)))
+            (should
+             (epub-reader-locator-source-p
+              (get-text-property
+               0 'epub-reader-source
+               (epub-reader-render-test--element-text
+                (epub-reader-render-block-element block))))))
           (should (equal (epub-reader-block-key empty) "id:empty-block"))
           (should (equal
                    (get-text-property
@@ -292,8 +312,8 @@
           (should (memq 'epub-reader-strong-face
                         (ensure-list (get-text-property 3 'face text))))
           (dotimes (position (length text))
-            (should (epub-reader-locator-source-p
-                     (get-text-property position 'epub-reader-source text))))
+            (should-not
+             (get-text-property position 'epub-reader-source text)))
           (let* ((buffer-name
                   (generate-new-buffer-name " *epub-br-render-test*"))
                  (buffer
@@ -410,12 +430,16 @@
         (with-temp-buffer
           (should (equal (epub-reader-publication-identifier first)
                          (epub-reader-publication-identifier second)))
-          (insert (epub-reader-block-text
-                   (car (epub-reader-render-chapter first 0))))
+          (insert
+           (epub-reader-render-test--element-text
+            (epub-reader-render-block-element
+             (car (epub-reader-render-chapter first 0)))))
           (let ((locator (epub-reader-locator-at-point 0 (point-min))))
             (erase-buffer)
-            (insert (epub-reader-block-text
-                     (car (epub-reader-render-chapter second 0))))
+            (insert
+             (epub-reader-render-test--element-text
+              (epub-reader-render-block-element
+               (car (epub-reader-render-chapter second 0)))))
             (let ((resolution (epub-reader-locator-resolve locator)))
               (should-not
                (epub-reader-locator-resolution-position resolution))

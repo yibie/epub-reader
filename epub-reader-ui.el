@@ -81,7 +81,7 @@ A single larger block is still materialized by itself."
 (cl-defstruct (epub-reader-session
                (:constructor epub-reader-session--create))
   "Non-UI state owned by one reader buffer."
-  publication section blocks block-index anchor-index dom-cache store
+  publication current-chapter dom-cache store
   refreshing-p producer-block-count history-back history-forward toc-buffer
   spine-weights total-weight)
 
@@ -92,8 +92,8 @@ A single larger block is still materialized by itself."
 
 (cl-defstruct (epub-reader-viewport
                (:constructor epub-reader-viewport--create))
-  "One window's semantic position and relative logical row."
-  window locator row)
+  "One window's semantic point and top-of-window positions."
+  window point-locator top-locator visual-row)
 
 (cl-defstruct (epub-reader-view-state
                (:constructor epub-reader-view-state--create))
@@ -171,6 +171,32 @@ A single larger block is still materialized by itself."
     (user-error "EPUB reader session is unavailable"))
   epub-reader-ui--session)
 
+(defun epub-reader-ui--current-chapter (&optional session)
+  "Return SESSION's current canonical chapter data."
+  (or (epub-reader-session-current-chapter
+       (or session (epub-reader-ui--current-session)))
+      (user-error "EPUB chapter data is unavailable")))
+
+(defun epub-reader-ui--current-section (&optional session)
+  "Return SESSION's current publication section."
+  (epub-reader-chapter-data-section
+   (epub-reader-ui--current-chapter session)))
+
+(defun epub-reader-ui--current-blocks (&optional session)
+  "Return SESSION's current canonical block vector."
+  (epub-reader-chapter-data-blocks
+   (epub-reader-ui--current-chapter session)))
+
+(defun epub-reader-ui--current-block-index (&optional session)
+  "Return SESSION's current block-key index."
+  (epub-reader-chapter-data-block-index
+   (epub-reader-ui--current-chapter session)))
+
+(defun epub-reader-ui--current-anchor-index (&optional session)
+  "Return SESSION's current fragment index."
+  (epub-reader-chapter-data-anchor-index
+   (epub-reader-ui--current-chapter session)))
+
 (defun epub-reader-ui--chapter-cache-key (publication index)
   "Return the cache key for PUBLICATION spine INDEX."
   (let ((resource
@@ -215,14 +241,7 @@ A single larger block is still materialized by itself."
                :block-index (nth 0 indices) :anchor-index (nth 1 indices)
                :character-count (nth 2 indices)))
         (puthash key chapter cache)))
-    (setf (epub-reader-session-section session)
-          (epub-reader-chapter-data-section chapter)
-          (epub-reader-session-blocks session)
-          (epub-reader-chapter-data-blocks chapter)
-          (epub-reader-session-block-index session)
-          (epub-reader-chapter-data-block-index chapter)
-          (epub-reader-session-anchor-index session)
-          (epub-reader-chapter-data-anchor-index chapter))
+    (setf (epub-reader-session-current-chapter session) chapter)
     chapter))
 
 (defun epub-reader-ui--minimum-window-height ()
@@ -301,7 +320,7 @@ A single larger block is still materialized by itself."
 (defun epub-reader-ui--chapter-title ()
   "Return a readable title for the current chapter."
   (let ((blocks
-         (epub-reader-session-blocks (epub-reader-ui--current-session))))
+         (epub-reader-ui--current-blocks)))
     (or (cl-loop for block across blocks
                  when (eq (epub-reader-block-kind block) 'heading)
                  return (string-trim
@@ -315,12 +334,12 @@ A single larger block is still materialized by itself."
          (weights (epub-reader-session-spine-weights session))
          (total (max 1 (or (epub-reader-session-total-weight session) 1)))
          (spine-index (epub-reader-ui--state-value :spine-index))
-         (blocks (epub-reader-session-blocks session))
+         (blocks (epub-reader-ui--current-blocks session))
          (locator (epub-reader-ui--current-locator))
          (block-index
           (or (and locator
                    (gethash (epub-reader-locator-block locator)
-                            (epub-reader-session-block-index session)))
+                            (epub-reader-ui--current-block-index session)))
               0))
          (local (/ (float block-index) (max 1 (length blocks))))
          (before (cl-loop for index below spine-index
@@ -359,11 +378,11 @@ A single larger block is still materialized by itself."
 (defun epub-reader-ui--restore-target-index (session locator)
   "Return SESSION block index most likely to resolve LOCATOR."
   (or (gethash (epub-reader-locator-block locator)
-               (epub-reader-session-block-index session))
+               (epub-reader-ui--current-block-index session))
       (let ((quote (concat (or (epub-reader-locator-prefix locator) "")
                            (or (epub-reader-locator-suffix locator) ""))))
         (and (not (string-empty-p quote))
-             (cl-loop for block across (epub-reader-session-blocks session)
+             (cl-loop for block across (epub-reader-ui--current-blocks session)
                       for index from 0
                       when (string-match-p
                             (regexp-quote quote)
@@ -446,7 +465,7 @@ A single larger block is still materialized by itself."
 (defun epub-reader-ui--chapter-elements (available-width)
   "Return the current budgeted chapter region at AVAILABLE-WIDTH."
   (let* ((session (epub-reader-ui--current-session))
-         (blocks (epub-reader-session-blocks session))
+         (blocks (epub-reader-ui--current-blocks session))
          (start (or (plist-get textui-state :chunk-start) 0))
          (end (or (plist-get textui-state :chunk-end) (length blocks)))
          elements)
@@ -529,11 +548,9 @@ A single larger block is still materialized by itself."
   "Return the complete reader frame for AVAILABLE-WIDTH."
   (let* ((session (epub-reader-ui--current-session))
          (publication (epub-reader-session-publication session))
-         (index (plist-get textui-state :spine-index))
-         (start (plist-get textui-state :chunk-start))
-         (end (plist-get textui-state :chunk-end)))
+         (index (plist-get textui-state :spine-index)))
     (textui-effect
-     'epub-reader-post-render (list index start end available-width)
+     'epub-reader-post-render (list index available-width)
      (lambda ()
        (epub-reader-ui--post-render (current-buffer))))
     (when (epub-reader-session-store session)
@@ -609,7 +626,7 @@ A single larger block is still materialized by itself."
         (recenter 0)))))
 
 (defun epub-reader-ui--capture-view-state ()
-  "Capture current semantic point and relative rows of visible windows."
+  "Capture point and top semantic positions for all visible windows."
   (let ((index (epub-reader-ui--state-value :spine-index))
         viewports)
     (dolist (window (get-buffer-window-list (current-buffer) nil t))
@@ -618,17 +635,19 @@ A single larger block is still materialized by itself."
           (push
            (epub-reader-viewport--create
             :window window
-            :locator (epub-reader-locator-at-point
-                      index window-point (current-buffer))
-            :row (max 0 (- (line-number-at-pos window-point)
-                           (line-number-at-pos (window-start window)))))
+            :point-locator (epub-reader-locator-at-point
+                            index window-point (current-buffer))
+            :top-locator (epub-reader-locator-at-point
+                          index (window-start window) (current-buffer))
+            :visual-row (count-screen-lines
+                         (window-start window) window-point nil window))
            viewports))))
     (epub-reader-view-state--create
      :point-locator (epub-reader-locator-at-point index)
      :viewports (nreverse viewports))))
 
 (defun epub-reader-ui--restore-view-state (view-state)
-  "Restore semantic point and window rows from VIEW-STATE after refresh."
+  "Restore semantic point and each window top from VIEW-STATE."
   (let ((point-locator
          (epub-reader-view-state-point-locator view-state)))
     (when point-locator
@@ -636,15 +655,24 @@ A single larger block is still materialized by itself."
         (when position (goto-char position))))
     (dolist (viewport (epub-reader-view-state-viewports view-state))
       (let* ((window (epub-reader-viewport-window viewport))
-             (locator (epub-reader-viewport-locator viewport))
-             (position (and locator (epub-reader-locator-point locator))))
+             (point-locator (epub-reader-viewport-point-locator viewport))
+             (top-locator (epub-reader-viewport-top-locator viewport))
+             (position (and point-locator
+                            (epub-reader-locator-point point-locator)))
+             (top-position (and top-locator
+                                (epub-reader-locator-point top-locator))))
         (when (and position (window-live-p window)
                    (eq (window-buffer window) (current-buffer)))
-          (set-window-point window position)
-          (save-excursion
-            (goto-char position)
-            (forward-line (- (epub-reader-viewport-row viewport)))
-            (set-window-start window (line-beginning-position) t)))))))
+          (if top-position
+              (set-window-start window top-position t)
+            (with-selected-window window
+              (goto-char position)
+              (vertical-motion
+               (- (epub-reader-viewport-visual-row viewport)) window)
+              (set-window-start window (point) t)))
+          ;; Selecting a window to run `vertical-motion' moves its point.
+          ;; Restore the semantic point only after positioning its top row.
+          (set-window-point window position))))))
 
 (defun epub-reader-ui--refresh-chunk (start end)
   "Synchronously replace the chapter region with block range START to END."
@@ -669,13 +697,21 @@ A single larger block is still materialized by itself."
 (defun epub-reader-ui--ensure-block-visible (block-index)
   "Refresh the current chunk if needed to include BLOCK-INDEX."
   (let* ((blocks
-          (epub-reader-session-blocks (epub-reader-ui--current-session)))
+          (epub-reader-ui--current-blocks))
          (start (plist-get textui-state :chunk-start))
          (end (plist-get textui-state :chunk-end)))
     (unless (and (<= start block-index) (< block-index end))
       (pcase-let ((`(,next-start ,next-end)
                    (epub-reader-ui--chunk-range blocks block-index)))
         (epub-reader-ui--refresh-chunk next-start next-end)))))
+
+(defun epub-reader-ui--inside-chunk-guard-p
+    (block-index start end block-count)
+  "Return non-nil when BLOCK-INDEX is in either inclusive chunk guard."
+  (or (and (> start 0)
+           (<= (- block-index start) epub-reader-chunk-guard-blocks))
+      (and (< end block-count)
+           (<= (- end block-index) epub-reader-chunk-guard-blocks))))
 
 (defun epub-reader-ui--maybe-shift-chunk ()
   "Shift the chapter window when point approaches a rendered chunk edge."
@@ -688,21 +724,17 @@ A single larger block is still materialized by itself."
             (and locator
                  (gethash
                   (epub-reader-locator-block locator)
-                  (epub-reader-session-block-index epub-reader-ui--session))))
+                  (epub-reader-ui--current-block-index))))
            (start (plist-get textui-state :chunk-start))
            (end (plist-get textui-state :chunk-end))
            (length (length
-                    (epub-reader-session-blocks epub-reader-ui--session))))
+                    (epub-reader-ui--current-blocks))))
       (when (and block-index
-                 (or (and (> start 0)
-                          (< (- block-index start)
-                             epub-reader-chunk-guard-blocks))
-                     (and (< end length)
-                          (<= (- end block-index)
-                              epub-reader-chunk-guard-blocks))))
+                 (epub-reader-ui--inside-chunk-guard-p
+                  block-index start end length))
         (pcase-let ((`(,next-start ,next-end)
                      (epub-reader-ui--chunk-range
-                      (epub-reader-session-blocks epub-reader-ui--session)
+                      (epub-reader-ui--current-blocks)
                       block-index)))
           (unless (and (= start next-start) (= end next-end))
             (epub-reader-ui--refresh-chunk next-start next-end)))))))
@@ -710,10 +742,10 @@ A single larger block is still materialized by itself."
 (defun epub-reader-ui--goto-start (&optional fragment)
   "Move to current chapter's FRAGMENT or first source position."
   (let* ((session (epub-reader-ui--current-session))
-         (section (epub-reader-session-section session))
+         (section (epub-reader-ui--current-section session))
          (block-index (and fragment
                            (gethash fragment
-                                    (epub-reader-session-anchor-index session))))
+                                    (epub-reader-ui--current-anchor-index session))))
          (_visible (when block-index
                      (epub-reader-ui--ensure-block-visible block-index)))
          (position
@@ -727,7 +759,7 @@ A single larger block is still materialized by itself."
 (defun epub-reader-ui--goto-block-index (block-index &optional at-end)
   "Move to semantic BLOCK-INDEX, optionally to its last source character."
   (let* ((session (epub-reader-ui--current-session))
-         (block (aref (epub-reader-session-blocks session) block-index))
+         (block (aref (epub-reader-ui--current-blocks session) block-index))
          (key (epub-reader-block-key block)))
     (epub-reader-ui--ensure-block-visible block-index)
     (let ((position
@@ -777,11 +809,11 @@ A single larger block is still materialized by itself."
            (target (or (and fragment
                             (gethash
                              fragment
-                             (epub-reader-session-anchor-index session)))
+                             (epub-reader-ui--current-anchor-index session)))
                        0))
            (range
             (epub-reader-ui--chunk-range
-             (epub-reader-session-blocks session) target)))
+             (epub-reader-ui--current-blocks session) target)))
       (textui-update
        buffer
        (lambda (state)
@@ -792,7 +824,7 @@ A single larger block is still materialized by itself."
       (textui-refresh buffer)
       (if at-end
           (epub-reader-ui--goto-block-index
-           (1- (length (epub-reader-session-blocks session))) t)
+           (1- (length (epub-reader-ui--current-blocks session))) t)
         (epub-reader-ui--goto-start fragment))
       (epub-reader-ui--refresh-toc-buffer)
       (force-mode-line-update t)
@@ -823,7 +855,7 @@ A single larger block is still materialized by itself."
       (epub-reader-ui--switch-chapter index nil t))
     (let ((block-index
            (gethash (epub-reader-locator-block locator)
-                    (epub-reader-session-block-index session))))
+                    (epub-reader-ui--current-block-index session))))
       (when block-index
         (epub-reader-ui--ensure-block-visible block-index)))
     (let ((resolution (epub-reader-locator-goto locator)))
@@ -865,7 +897,7 @@ A single larger block is still materialized by itself."
       (scroll-up-command)
     (end-of-buffer
      (let* ((session (epub-reader-ui--current-session))
-            (blocks (epub-reader-session-blocks session))
+            (blocks (epub-reader-ui--current-blocks session))
             (end (plist-get textui-state :chunk-end))
             (index (epub-reader-ui--state-value :spine-index))
             (count (length
@@ -992,7 +1024,7 @@ A single larger block is still materialized by itself."
   (let* ((session (epub-reader-toc--reader-session))
          (publication (epub-reader-session-publication session))
          (current-path (epub-reader-section-path
-                        (epub-reader-session-section session)))
+                        (epub-reader-ui--current-section session)))
          (rows
           (epub-reader-toc--rows
            (epub-reader-publication-toc publication)
@@ -1112,7 +1144,7 @@ A single larger block is still materialized by itself."
     (let* ((session (epub-reader-ui--current-session))
            (publication (epub-reader-session-publication session))
            (current-index (epub-reader-ui--state-value :spine-index))
-           (section (epub-reader-session-section session))
+           (section (epub-reader-ui--current-section session))
            (target
             (epub-reader-publication-resolve-resource
              publication section href)))
@@ -1130,7 +1162,7 @@ A single larger block is still materialized by itself."
                       (and (epub-reader-link-target-fragment target)
                            (gethash
                             (epub-reader-link-target-fragment target)
-                            (epub-reader-session-anchor-index session))))
+                            (epub-reader-ui--current-anchor-index session))))
                      (_visible
                       (when block-index
                         (epub-reader-ui--ensure-block-visible block-index)))
@@ -1196,7 +1228,7 @@ A single larger block is still materialized by itself."
                     0))
                  (range
                   (epub-reader-ui--chunk-range
-                   (epub-reader-session-blocks session) target))
+                   (epub-reader-ui--current-blocks session) target))
                  (name
                   (generate-new-buffer-name
                    (format "*EPUB: %s*"

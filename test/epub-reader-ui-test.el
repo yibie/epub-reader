@@ -32,6 +32,11 @@
                      (equal (aref source 1) key))
            return position))
 
+(defun epub-reader-ui-test--visual-row (window)
+  "Return WINDOW point's visual row relative to its start."
+  (count-screen-lines (window-start window) (window-point window)
+                      nil window))
+
 (ert-deftest epub-reader-ui-opens-centered-textui-reader-and-cleans-up ()
   (let ((epub-reader-reading-width 32)
         root)
@@ -114,7 +119,7 @@
             (lambda (block)
               (and (eq (epub-reader-block-kind block) 'image)
                    (epub-reader-block-image-file block)))
-            (epub-reader-session-blocks epub-reader-ui--session))))
+            (epub-reader-ui--current-blocks))))
       (should positions)
       (should
        (equal
@@ -211,6 +216,14 @@
                     epub-reader-ui--session)))
           (should (hash-table-p
                    (epub-reader-session-dom-cache epub-reader-ui--session)))
+          (should (epub-reader-chapter-data-p
+                   (epub-reader-session-current-chapter
+                    epub-reader-ui--session)))
+          (dolist (accessor '(epub-reader-session-section
+                              epub-reader-session-blocks
+                              epub-reader-session-block-index
+                              epub-reader-session-anchor-index))
+            (should-not (fboundp accessor)))
           (dolist (key '(:publication :section :blocks :store :file))
             (should-not (plist-member textui-state key)))
           (should (equal (plist-get textui-state :spine-index) 0)))
@@ -226,8 +239,7 @@
           (epub-reader-open (epub-reader-test-fixture "long-chapter.epub")))
     (unwind-protect
         (with-current-buffer buffer
-          (should (= (length (epub-reader-session-blocks
-                              epub-reader-ui--session))
+          (should (= (length (epub-reader-ui--current-blocks))
                      10001))
           (should (<= (epub-reader-session-producer-block-count
                        epub-reader-ui--session)
@@ -235,6 +247,13 @@
           (should (<= (- (plist-get textui-state :chunk-end)
                          (plist-get textui-state :chunk-start))
                       epub-reader-chunk-max-blocks))
+          (let* ((blocks (epub-reader-ui--current-blocks))
+                 (outside (aref blocks
+                                (+ (plist-get textui-state :chunk-end) 100)))
+                 (text (epub-reader-block-text outside)))
+            (dotimes (offset (length text))
+              (should-not
+               (get-text-property offset 'epub-reader-source text))))
           (let ((characters 0))
             (cl-loop
              for index from (plist-get textui-state :chunk-start)
@@ -243,8 +262,7 @@
                       (+ characters
                          (length
                           (epub-reader-block-text
-                           (aref (epub-reader-session-blocks
-                                  epub-reader-ui--session)
+                           (aref (epub-reader-ui--current-blocks)
                                  index)))))
              finally
              (should (<= characters epub-reader-chunk-max-characters))))
@@ -252,7 +270,7 @@
                  (edge-index (- (plist-get textui-state :chunk-end) 2))
                  (edge-key
                   (epub-reader-block-key
-                   (aref (epub-reader-session-blocks epub-reader-ui--session)
+                   (aref (epub-reader-ui--current-blocks)
                          edge-index)))
                  (edge-position
                   (epub-reader-ui-test--block-position edge-key)))
@@ -275,6 +293,86 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest epub-reader-ui-chunk-effects-ignore-chunk-range ()
+  (epub-reader-ui-test--with-reader _buffer
+    (let (effects)
+      (cl-letf (((symbol-function 'textui-effect)
+                 (lambda (key dependencies setup)
+                   (push (list key dependencies setup) effects))))
+        (epub-reader-ui-frame 71))
+      (should
+       (equal (cadr (assq 'epub-reader-post-render effects))
+              '(0 71))))))
+
+(ert-deftest epub-reader-ui-chunk-guards-are-inclusive-and-symmetric ()
+  (let ((epub-reader-chunk-guard-blocks 8))
+    (should (epub-reader-ui--inside-chunk-guard-p 108 100 132 200))
+    (should (epub-reader-ui--inside-chunk-guard-p 124 100 132 200))
+    (should-not (epub-reader-ui--inside-chunk-guard-p 109 100 132 200))
+    (should-not (epub-reader-ui--inside-chunk-guard-p 123 100 132 200)))
+  (let ((epub-reader-chunk-guard-blocks 0))
+    (should (epub-reader-ui--inside-chunk-guard-p 100 100 132 200))
+    (should-not (epub-reader-ui--inside-chunk-guard-p 131 100 132 200))))
+
+(ert-deftest epub-reader-ui-chunk-shift-preserves-visual-rows-in-two-windows ()
+  (let ((epub-reader-chunk-max-blocks 32)
+        (epub-reader-chunk-max-characters 4000)
+        (buffer
+         (epub-reader-open (epub-reader-test-fixture "long-chapter.epub"))))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer buffer)
+          (let ((second (split-window-right)))
+            (set-window-buffer second buffer)
+            (with-current-buffer buffer
+              (epub-reader-ui--goto-start "p00020")
+              (let* ((key "id:p00020")
+                     (position
+                      (cl-loop
+                       for candidate from (point-min) below (point-max)
+                       for source = (get-text-property
+                                     candidate 'epub-reader-source)
+                       when (and (epub-reader-locator-source-p source)
+                                 (equal (aref source 1) key)
+                                 (= (aref source 2) 800))
+                       return candidate)))
+                (should position)
+                (dolist (entry (list (cons (selected-window) 4)
+                                     (cons second 8)))
+                  (with-selected-window (car entry)
+                    (goto-char position)
+                    (set-window-point (car entry) position)
+                    (recenter (cdr entry))))
+                (redisplay t)
+                (let ((before
+                       (mapcar
+                        (lambda (window)
+                          (cons (epub-reader-ui-test--visual-row window)
+                                (epub-reader-locator-at-point
+                                 0 (window-point window) buffer)))
+                        (list (selected-window) second)))
+                      (end (epub-reader-ui--chunk-end
+                            (epub-reader-ui--current-blocks)
+                            10)))
+                  (epub-reader-ui--refresh-chunk 10 end)
+                  (redisplay t)
+                  (cl-mapc
+                   (lambda (expected window)
+                     (let ((actual
+                            (epub-reader-locator-at-point
+                             0 (window-point window) buffer)))
+                       (should (= (car expected)
+                                  (epub-reader-ui-test--visual-row window)))
+                       (should (equal
+                                (epub-reader-locator-block (cdr expected))
+                                (epub-reader-locator-block actual)))
+                       (should (= (epub-reader-locator-offset (cdr expected))
+                                  (epub-reader-locator-offset actual)))))
+                   before (list (selected-window) second)))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest epub-reader-ui-chunk-shift-restores-locator-and-window-row ()
   (let ((epub-reader-chunk-max-blocks 32)
         (epub-reader-chunk-max-characters 4000)
@@ -285,7 +383,7 @@
           (switch-to-buffer buffer)
           (with-current-buffer buffer
             (let* ((block
-                    (aref (epub-reader-session-blocks epub-reader-ui--session)
+                    (aref (epub-reader-ui--current-blocks)
                           20))
                    (key (epub-reader-block-key block))
                    (position (epub-reader-ui-test--block-position key)))
@@ -298,7 +396,7 @@
                          (line-number-at-pos (window-start))))
                      (end
                       (epub-reader-ui--chunk-end
-                       (epub-reader-session-blocks epub-reader-ui--session)
+                       (epub-reader-ui--current-blocks)
                        10)))
                 (epub-reader-ui--refresh-chunk 10 end)
                 (let ((after (epub-reader-locator-at-point 0))
