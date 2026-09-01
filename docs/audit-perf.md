@@ -7,13 +7,13 @@
 性能改善真实，且声称的数量级可以独立复现。最终复核范围为 reader
 `2c69389..0efda05`、TextUI `10ca3ed..93f7b22`。R-01、T-01、T-03 已解决；T-02 的
 正文 named face 探针通过，而 remap named-face 边界随后由 TextUI `92da425` 修复并通过复核。
-但该修复没有覆盖 Emacs 文档允许的 dotted entry `(FACE . FACE-NAME)`，会在布局时直接报错；
-因此 T-02 仍为部分解决，gate 不解除。
+该提交遗漏的 dotted entry `(FACE . FACE-NAME)` 又由 TextUI `e3fac30` 修复；最终反例与全量测试
+均通过，原 4 条 P1 已全部关闭，gate 解除。
 
 | 级别 | 初审发现 | 最终未关闭 | Gate 影响 |
 |---|---:|---:|---|
 | P0 | 0 | 0 | 无 |
-| P1 | 4 | 1 | 阻断 |
+| P1 | 4 | 0 | 已解除 |
 | P2 | 5（含复核新增 R-02） | 4 | 不单独阻断 |
 
 ## 1. 独立性能复测
@@ -147,6 +147,12 @@ REPLACEMENT 可直接为 face name。合法值 `((default . perf-remap-dotted-fa
 `(wrong-type-argument listp perf-remap-dotted-face)`，布局失败。119 项测试只覆盖
 `((default textui-test-layout-cache-face))` 的 proper-list 写法，未覆盖该合法 grammar。
 
+**第三次复核（TextUI `e3fac30`）：已解决。** 新增 `textui--face-remap-symbols`，按 remap alist
+grammar 逐 entry 分别遍历 car 与 cdr，不再把 dotted tail 交给 `cl-mapcan`。原
+`((default . perf-remap-dotted-face))` 探针现在正常布局；face height `1.0→2.0` 后 planner calls
+`1→2`、`stale=nil`，再次使用同一上下文仍命中缓存。proper-list 写法也保持 `1→2`。
+`textui-text-layout-cache-accepts-dotted-named-remap-faces` 冻结了准确反例，T-02 最终关闭。
+
 ### T-03 — P1：greedy 默认路径没有保持既有两端对齐契约
 
 位置：reader `epub-reader-render.el:25-33`、`epub-reader-render.el:643-646`；TextUI
@@ -235,10 +241,10 @@ generation；这是可维护性建议，不是当前安全绕过。
 |---|---|
 | epub-reader `0efda05`，batch 全量 | 103 total：101 passed，2 GUI skipped，0 unexpected |
 | epub-reader 当前 HEAD，GUI focused | 2/2 passed |
-| TextUI `92da425` 加既有工作树修复 | 119/119 passed |
+| TextUI `e3fac30` 加既有工作树修复 | 120/120 passed |
 
-TextUI 的 119 项包含其既有未提交 focus/position 修复及 2 个测试；remap 最终修复单独按
-`93f7b22..92da425` 审查。本审计没有修改或清理 TextUI 工作树。reader 两项依赖 graphical
+TextUI 的 120 项包含其既有未提交 focus/position 修复及 2 个测试；dotted remap 最终修复单独按
+`92da425..e3fac30` 审查。本审计没有修改或清理 TextUI 工作树。reader 两项依赖 graphical
 display 的测试在 batch 中按预期 skipped，随后在 GUI 中单独 2/2 通过。
 
 ## 5. Standards review
@@ -280,6 +286,18 @@ Summary: Standards 轴 4 条未关闭，最严重为 remap named-face cache stal
 
 Summary: `92da425` Standards 轴 2 条未关闭，最严重为合法 dotted remap 使布局直接失败。
 
+#### `e3fac30` 增量 Standards 复核
+
+合法 dotted remap 已由 entry-aware visitor 接受，原 high/hard 违反关闭；改动仍局限于 TextUI
+私有 cache-context 计算，没有改变公共 API、布局算法或 reader 模块边界。dotted、proper、plist、
+nested、filtered、nil 与 symbolic-cycle 探针均通过。
+
+- **Low / judgment，Primitive Obsession**：嵌套 face-spec 仍使用通用 cons/symbol 递归，可能把
+  `:weight bold` 中恰好也是 face 的属性值误算成额外依赖，造成无害但多余的签名计算/失效；后续
+  可改成完整 grammar-aware visitor。
+
+Summary: `e3fac30` Standards 轴无 hard finding；1 条 Low 判断项不阻断 gate。
+
 ## 6. Spec review
 
 - **High**：交互 cold chunk shift 会把当前 locator/progress 移到另一语义位置。
@@ -306,10 +324,15 @@ Summary: Spec 轴基本反例 0 条失败；扩展 T-02 契约边界后仍有 1 
 该 exact 边界。规格子审查没有发现遗漏、错误或有害 scope creep；随后 Standards 的合法 grammar
 扩展探针发现 dotted entry 回归，因此 exact probe PASS 不足以关闭整个 T-02。
 
+#### `e3fac30` 增量 Spec 复核
+
+dotted `((default . FACE))` 与 proper-list `((default FACE))` 均能布局并在 metric 改变后从一次规划
+增至两次；第三次相同上下文维持两次，证明没有把缓存退化成永不命中。新增回归准确覆盖解除条件，
+没有遗漏、错误或有害 scope creep。**Spec PASS：T-02 关闭，P1 未关闭数为 0。**
+
 ## 7. Gate 结论
 
-**Gate 不解除。** T-02 的原 proper-list 反例已得到 planner calls `1→2`、`stale=nil`，TextUI
-119/119 通过，财新换章两轮中位 0.032417/0.031562 s，性能量级也未回退；但 Emacs 文档允许的
-dotted named-face remap 会令布局直接报错。解除条件是按 face-spec grammar 分别遍历 entry 的
-car/cdr（而非对任意 cons 使用 `cl-mapcan`），并加入 `((default . FACE))` 的布局与失效回归。
-R-02 与 P-01、D-01、A-02 继续作为 P2 维护项跟踪，不单独阻断。
+**Gate 解除，可以按正确性与性能完成本轮冲刺验收。** 原 4 条 P1 均已关闭；最终 dotted
+named-face 探针正常布局，metric 改变后 planner calls `1→2`、`stale=nil`，TextUI 120/120
+通过。此前财新换章两轮中位 0.032417/0.031562 s 的性能结论不变。R-02 与 P-01、D-01、A-02
+继续作为 P2 维护项跟踪，不再阻断本 gate。
