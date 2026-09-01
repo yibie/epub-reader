@@ -77,5 +77,86 @@
       publication "OEBPS/chapter1.xhtml" "../../../escape.xhtml")
      :type 'epub-reader-publication-error)))
 
+(ert-deftest epub-reader-publication-url-resolver-preserves-segment-semantics ()
+  (epub-reader-publication-test--with "epub3-edge.epub" publication
+    (let ((resolve
+           (lambda (href)
+             (epub-reader-publication-resolve-href
+              publication "EPUB/text/a b.xhtml" href))))
+      (should
+       (equal (epub-reader-link-target-path (funcall resolve "next%20part.xhtml"))
+              "EPUB/text/next part.xhtml"))
+      (should
+       (equal (epub-reader-link-target-path (funcall resolve "part%23one.xhtml"))
+              "EPUB/text/part#one.xhtml"))
+      (should
+       (equal (epub-reader-link-target-path (funcall resolve "a%2fb.xhtml"))
+              "EPUB/text/a%2Fb.xhtml"))
+      (should
+       (equal (epub-reader-link-target-path (funcall resolve "a%5Cb.xhtml"))
+              "EPUB/text/a%5Cb.xhtml"))
+      (should
+       (equal (epub-reader-link-target-path
+               (funcall resolve "%2e%2e/nav.xhtml?ignored=yes"))
+              "EPUB/nav.xhtml"))
+      (let* ((base
+              (epub-reader-publication-resolve-href
+               publication "EPUB/text/a b.xhtml" "../assets/"))
+             (target
+              (epub-reader-publication-resolve-href
+               publication (epub-reader-link-target-path base)
+               "base-target.xhtml")))
+        (should (equal (epub-reader-link-target-path base) "EPUB/assets/"))
+        (should (equal (epub-reader-link-target-path target)
+                       "EPUB/assets/base-target.xhtml")))
+      (let ((target (funcall resolve "#%E7%AB%A0%E4%B8%80")))
+        (should (equal (epub-reader-link-target-path target)
+                       "EPUB/text/a b.xhtml"))
+        (should (equal (epub-reader-link-target-fragment target) "章一")))
+      (should-error (funcall resolve "%ZZ.xhtml")
+                    :type 'epub-reader-publication-error)
+      (should-error (funcall resolve "%FF.xhtml")
+                    :type 'epub-reader-publication-error)
+      (should-error (funcall resolve "../../../escape.xhtml")
+                    :type 'epub-reader-publication-error))))
+
+(ert-deftest epub-reader-publication-enforces-namespaces-and-required-fields ()
+  (epub-reader-publication-test--with "epub3-edge.epub" publication
+    (should (equal (epub-reader-publication-title publication)
+                   "Namespace Edge Book"))
+    (should (equal (epub-reader-publication-identifier publication)
+                   "urn:fixture:edge")))
+  (dolist (fixture '("epub3-missing-media.epub"
+                     "epub3-duplicate-url.epub"))
+    (should-error
+     (epub-reader-publication-open (epub-reader-test-fixture fixture))
+     :type 'epub-reader-publication-error)))
+
+(ert-deftest epub-reader-publication-records-remote-non-spine-resource ()
+  (epub-reader-publication-test--with "epub3-edge.epub" publication
+    (let ((remote (gethash "remote"
+                           (epub-reader-publication-manifest publication))))
+      (should (epub-reader-resource-remote-p remote))
+      (should (equal (epub-reader-resource-uri remote)
+                     "https://example.com/audio.mp3"))
+      (should-not (epub-reader-resource-file remote))))
+  (should-error
+   (epub-reader-publication-open
+    (epub-reader-test-fixture "epub3-remote-spine.epub"))
+   :type 'epub-reader-publication-error))
+
+(ert-deftest epub-reader-publication-preserves-span-navigation-groups ()
+  (epub-reader-publication-test--with "epub3-edge.epub" publication
+    (let* ((group (car (epub-reader-publication-toc publication)))
+           (chapter (car (epub-reader-toc-entry-children group)))
+           (appendix (car (epub-reader-toc-entry-children chapter))))
+      (should (equal (epub-reader-toc-entry-label group) "第一部"))
+      (should-not (epub-reader-toc-entry-path group))
+      (should (equal (epub-reader-toc-entry-label chapter) "章一"))
+      (should (equal (epub-reader-toc-entry-path chapter)
+                     "EPUB/text/a b.xhtml"))
+      (should (equal (epub-reader-toc-entry-fragment chapter) "章一"))
+      (should (equal (epub-reader-toc-entry-label appendix) "附录")))))
+
 (provide 'epub-reader-publication-test)
 ;;; epub-reader-publication-test.el ends here

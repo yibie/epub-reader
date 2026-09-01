@@ -91,14 +91,16 @@
 
 (defun epub-reader-render--local-name (node)
   "Return namespace-independent local tag name of XML NODE."
-  (let ((name (symbol-name (car node))))
-    (if (string-match "\\([^:]+\\)\\'" name)
-        (match-string 1 name)
-      name)))
+  (let ((name (car node)))
+    (if (consp name) (cdr name) (symbol-name name))))
 
 (defun epub-reader-render--element-p (object)
   "Return non-nil when OBJECT is an XML element node."
-  (and (consp object) (symbolp (car object))))
+  (and (consp object)
+       (let ((name (car object)))
+         (or (symbolp name)
+             (and (consp name) (stringp (car name))
+                  (stringp (cdr name)))))))
 
 (defun epub-reader-render--children (node &optional name)
   "Return NODE's direct element children, optionally matching local NAME."
@@ -133,10 +135,10 @@
   (cdr
    (cl-find-if
     (lambda (attribute)
-      (let ((attribute-name (symbol-name (car attribute))))
-        (equal (if (string-match "\\([^:]+\\)\\'" attribute-name)
-                   (match-string 1 attribute-name)
-                 attribute-name)
+      (let ((attribute-name (car attribute)))
+        (equal (if (consp attribute-name)
+                   (cdr attribute-name)
+                 (symbol-name attribute-name))
                name)))
     (cadr node))))
 

@@ -25,7 +25,7 @@
 (cl-defstruct (epub-reader-resource
                (:constructor epub-reader-resource--create))
   "One OPF manifest resource."
-  id href path file media-type properties)
+  id href path file uri remote-p media-type properties)
 
 (cl-defstruct (epub-reader-spine-item
                (:constructor epub-reader-spine-item--create))
@@ -48,51 +48,85 @@
   container version title language identifier opf-path opf-directory
   manifest spine toc closed-p)
 
+(defconst epub-reader-publication--ocf-namespace
+  "urn:oasis:names:tc:opendocument:xmlns:container")
+(defconst epub-reader-publication--opf-namespace
+  "http://www.idpf.org/2007/opf")
+(defconst epub-reader-publication--dc-namespace
+  "http://purl.org/dc/elements/1.1/")
+(defconst epub-reader-publication--ncx-namespace
+  "http://www.daisy.org/z3986/2005/ncx/")
+(defconst epub-reader-publication--xhtml-namespace
+  "http://www.w3.org/1999/xhtml")
+(defconst epub-reader-publication--ops-namespace
+  "http://www.idpf.org/2007/ops")
+
 (defun epub-reader-publication--local-name (name)
-  "Return namespace-independent local name of symbol NAME."
-  (let ((string (symbol-name name)))
-    (if (string-match "\\([^:]+\\)\\'" string)
-        (match-string 1 string)
-      string)))
+  "Return the local part of expanded XML qualified NAME."
+  (if (consp name) (cdr name) (symbol-name name)))
+
+(defun epub-reader-publication--namespace (name)
+  "Return namespace URI of expanded XML qualified NAME."
+  (if (consp name) (car name) ""))
+
+(defun epub-reader-publication--qname-p (name namespace local-name)
+  "Return non-nil when NAME is NAMESPACE plus LOCAL-NAME."
+  (and (equal (epub-reader-publication--namespace name) namespace)
+       (equal (epub-reader-publication--local-name name) local-name)))
 
 (defun epub-reader-publication--element-p (object)
   "Return non-nil when OBJECT is an XML element node."
-  (and (consp object) (symbolp (car object))))
+  (and (consp object)
+       (let ((name (car object)))
+         (or (symbolp name)
+             (and (consp name) (stringp (car name))
+                  (stringp (cdr name)))))))
 
-(defun epub-reader-publication--children (node &optional name)
-  "Return NODE's direct element children, optionally matching local NAME."
+(defun epub-reader-publication--children (node &optional name namespace)
+  "Return NODE's direct children matching NAME and NAMESPACE.
+When NAMESPACE is omitted, inherit NODE's namespace."
+  (let ((expected-namespace
+         (or namespace (epub-reader-publication--namespace (car node)))))
   (cl-remove-if-not
    (lambda (child)
      (and (epub-reader-publication--element-p child)
           (or (null name)
-              (equal (epub-reader-publication--local-name (car child))
-                     name))))
-   (cddr node)))
+              (epub-reader-publication--qname-p
+               (car child) expected-namespace name))))
+   (cddr node))))
 
-(defun epub-reader-publication--descendants (node name)
-  "Return all descendant elements of NODE with local NAME."
+(defun epub-reader-publication--descendants (node name &optional namespace)
+  "Return NODE descendants matching NAME and NAMESPACE."
+  (let ((expected-namespace
+         (or namespace (epub-reader-publication--namespace (car node)))))
   (cl-mapcan
    (lambda (child)
      (append
-      (when (equal (epub-reader-publication--local-name (car child)) name)
+      (when (epub-reader-publication--qname-p
+             (car child) expected-namespace name)
         (list child))
-      (epub-reader-publication--descendants child name)))
-   (epub-reader-publication--children node)))
+      (epub-reader-publication--descendants
+       child name expected-namespace)))
+   (epub-reader-publication--children node nil
+                                      (epub-reader-publication--namespace
+                                       (car node))))))
 
-(defun epub-reader-publication--child (node name)
-  "Return NODE's first direct child with local NAME."
-  (car (epub-reader-publication--children node name)))
+(defun epub-reader-publication--child (node name &optional namespace)
+  "Return NODE's first direct child matching NAME and NAMESPACE."
+  (car (epub-reader-publication--children node name namespace)))
 
-(defun epub-reader-publication--descendant (node name)
-  "Return NODE's first descendant element with local NAME."
-  (car (epub-reader-publication--descendants node name)))
+(defun epub-reader-publication--descendant (node name &optional namespace)
+  "Return NODE's first descendant matching NAME and NAMESPACE."
+  (car (epub-reader-publication--descendants node name namespace)))
 
-(defun epub-reader-publication--attribute (node name)
-  "Return NODE attribute whose local name is NAME."
+(defun epub-reader-publication--attribute (node name &optional namespace)
+  "Return NODE attribute matching NAME and NAMESPACE.
+Unqualified attributes use the empty namespace."
   (cdr
    (cl-find-if
     (lambda (attribute)
-      (equal (epub-reader-publication--local-name (car attribute)) name))
+      (epub-reader-publication--qname-p
+       (car attribute) (or namespace "") name))
     (cadr node))))
 
 (defun epub-reader-publication--text (node)
@@ -112,7 +146,7 @@
   (condition-case error-data
       (with-temp-buffer
         (insert-file-contents file)
-        (or (car (xml-parse-region (point-min) (point-max)))
+        (or (car (xml-parse-region (point-min) (point-max) nil nil t))
             (signal 'epub-reader-publication-error
                     (list (format "Empty XML document: %s" file)))))
     (epub-reader-publication-error
@@ -122,61 +156,152 @@
              (list (format "Could not parse XML %s: %s"
                            file (error-message-string error-data)))))))
 
-(defun epub-reader-publication--decode-component (string)
-  "Percent-decode UTF-8 STRING used by an EPUB href."
-  (decode-coding-string (url-unhex-string string) 'utf-8 t))
+(defun epub-reader-publication--hex-byte (string offset)
+  "Return strict percent byte in STRING at OFFSET or signal."
+  (unless (and (< (+ offset 2) (length string))
+               (= (aref string offset) ?%)
+               (string-match-p
+                "\\`[[:xdigit:]][[:xdigit:]]\\'"
+                (substring string (1+ offset) (+ offset 3))))
+    (signal 'epub-reader-publication-error
+            (list (format "Invalid percent escape in href: %S" string))))
+  (string-to-number (substring string (1+ offset) (+ offset 3)) 16))
+
+(defun epub-reader-publication--decode-percent-run (bytes context)
+  "Decode UTF-8 BYTES for href CONTEXT, rejecting malformed sequences."
+  (cl-labels
+      ((continuation-p (byte) (and (>= byte #x80) (<= byte #xbf)))
+       (valid-p ()
+         (let ((position 0) (length (length bytes)) valid)
+           (setq valid t)
+           (while (and valid (< position length))
+             (let ((first (aref bytes position)))
+               (cond
+                ((<= first #x7f) (cl-incf position))
+                ((and (>= first #xc2) (<= first #xdf)
+                      (< (1+ position) length)
+                      (continuation-p (aref bytes (1+ position))))
+                 (cl-incf position 2))
+                ((and (>= first #xe0) (<= first #xef)
+                      (< (+ position 2) length)
+                      (let ((second (aref bytes (1+ position))))
+                        (and (continuation-p second)
+                             (continuation-p (aref bytes (+ position 2)))
+                             (or (/= first #xe0) (>= second #xa0))
+                             (or (/= first #xed) (<= second #x9f)))))
+                 (cl-incf position 3))
+                ((and (>= first #xf0) (<= first #xf4)
+                      (< (+ position 3) length)
+                      (let ((second (aref bytes (1+ position))))
+                        (and (continuation-p second)
+                             (continuation-p (aref bytes (+ position 2)))
+                             (continuation-p (aref bytes (+ position 3)))
+                             (or (/= first #xf0) (>= second #x90))
+                             (or (/= first #xf4) (<= second #x8f)))))
+                 (cl-incf position 4))
+                (t (setq valid nil)))))
+           valid)))
+    (unless (valid-p)
+      (signal 'epub-reader-publication-error
+              (list (format "Invalid UTF-8 percent escape in href: %S"
+                            context))))
+    (decode-coding-string bytes 'utf-8)))
+
+(defun epub-reader-publication--decode-url-part
+    (string &optional preserve-path-separators)
+  "Strictly percent-decode STRING.
+When PRESERVE-PATH-SEPARATORS is non-nil, keep encoded slash and backslash as
+uppercase percent escapes so they cannot become path separators."
+  (let ((position 0)
+        (bytes (unibyte-string))
+        (result ""))
+    (cl-labels ((flush-bytes ()
+                  (when (> (length bytes) 0)
+                    (setq result
+                          (concat result
+                                  (epub-reader-publication--decode-percent-run
+                                   bytes string))
+                          bytes (unibyte-string)))))
+      (while (< position (length string))
+        (if (/= (aref string position) ?%)
+            (progn
+              (flush-bytes)
+              (setq result (concat result
+                                   (substring string position (1+ position)))
+                    position (1+ position)))
+          (let ((byte (epub-reader-publication--hex-byte string position)))
+            (if (and preserve-path-separators (memq byte '(47 92)))
+                (progn
+                  (flush-bytes)
+                  (setq result (concat result (format "%%%02X" byte))))
+              (setq bytes (concat bytes (unibyte-string byte))))
+            (setq position (+ position 3)))))
+      (flush-bytes))
+    result))
 
 (defun epub-reader-publication--split-href (href)
-  "Return decoded (PATH FRAGMENT) from local HREF, excluding its query."
+  "Return raw (PATH FRAGMENT) from HREF, excluding its query."
   (let* ((hash (string-match "#" href))
-         (raw-path (if hash (substring href 0 hash) href))
-         (raw-fragment (and hash (substring href (1+ hash))))
-         (query (string-match "?" raw-path)))
-    (list (epub-reader-publication--decode-component
-           (if query (substring raw-path 0 query) raw-path))
-          (and raw-fragment
-               (epub-reader-publication--decode-component raw-fragment)))))
+         (before-fragment (if hash (substring href 0 hash) href))
+         (fragment (and hash (substring href (1+ hash))))
+         (query (string-match "?" before-fragment)))
+    (list (if query (substring before-fragment 0 query) before-fragment)
+          (and fragment
+               (epub-reader-publication--decode-url-part fragment)))))
 
 (defun epub-reader-publication--external-href-p (href)
   "Return non-nil when HREF denotes an external URI."
   (or (string-prefix-p "//" href)
       (string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*:" href)))
 
-(defun epub-reader-publication--normalize-path (base-directory path)
-  "Resolve decoded PATH below archive BASE-DIRECTORY without escaping root."
-  (when (or (file-name-absolute-p path)
-            (string-prefix-p "~" path)
-            (string-match-p "\\`[[:alpha:]]:" path)
-            (string-match-p "[\\\\\0\r\n]" path))
-    (signal 'epub-reader-publication-error
-            (list (format "Unsafe publication href: %S" path))))
-  (let ((components
-         (append (split-string (directory-file-name base-directory) "/" t)
-                 (split-string path "/" nil)))
+(defun epub-reader-publication--normalize-url-path (base-path raw-path)
+  "Resolve URL RAW-PATH against archive document BASE-PATH."
+  (let* ((directory-reference-p (string-suffix-p "/" raw-path))
+         (path-for-splitting
+          (if directory-reference-p
+              (string-remove-suffix "/" raw-path)
+            raw-path))
+         (components
+         (append
+          (unless (string-prefix-p "/" raw-path)
+            (split-string
+             (if (string-suffix-p "/" base-path)
+                 base-path
+               (or (file-name-directory base-path) ""))
+             "/" t))
+          (mapcar
+           (lambda (segment)
+             (epub-reader-publication--decode-url-part segment t))
+           (split-string
+            (string-remove-prefix "/" path-for-splitting) "/" nil))))
         stack)
     (dolist (component components)
       (cond
-       ((member component '("" ".")))
+       ((equal component "."))
+       ((string-empty-p component)
+        (signal 'epub-reader-publication-error
+                (list (format "Empty path segment in href: %S" raw-path))))
        ((equal component "..")
         (if stack
             (pop stack)
           (signal 'epub-reader-publication-error
                   (list (format "Publication href escapes archive: %S"
-                                path)))))
+                                raw-path)))))
        (t (push component stack))))
-    (mapconcat #'identity (nreverse stack) "/")))
+    (let ((normalized (mapconcat #'identity (nreverse stack) "/")))
+      (if directory-reference-p (concat normalized "/") normalized))))
 
 (defun epub-reader-publication-resolve-href (publication base-path href)
   "Resolve HREF against archive-relative document BASE-PATH in PUBLICATION."
   (if (epub-reader-publication--external-href-p href)
       (epub-reader-link-target--create :external-p t :uri href)
-    (pcase-let* ((`(,href-path ,fragment)
+    (pcase-let* ((`(,raw-path ,fragment)
                   (epub-reader-publication--split-href href))
                  (effective-path
-                  (if (string-empty-p href-path)
+                  (if (string-empty-p raw-path)
                       base-path
-                    (epub-reader-publication--normalize-path
-                     (or (file-name-directory base-path) "") href-path))))
+                    (epub-reader-publication--normalize-url-path
+                     base-path raw-path))))
       (epub-reader-link-target--create
        :external-p nil
        :path effective-path
@@ -198,50 +323,109 @@
       (signal 'epub-reader-publication-error
               '("EPUB has no META-INF/container.xml")))
     (let* ((root (epub-reader-publication--parse-file container-path))
-           (rootfile (epub-reader-publication--descendant root "rootfile"))
+           (_root-check
+            (unless (epub-reader-publication--qname-p
+                     (car root) epub-reader-publication--ocf-namespace
+                     "container")
+              (signal 'epub-reader-publication-error
+                      '("OCF container root has the wrong namespace"))))
+           (rootfiles
+            (epub-reader-publication--child
+             root "rootfiles" epub-reader-publication--ocf-namespace))
+           (rootfile
+            (cl-find-if
+             (lambda (candidate)
+               (equal
+                (epub-reader-publication--attribute candidate "media-type")
+                "application/oebps-package+xml"))
+             (and rootfiles
+                  (epub-reader-publication--children
+                   rootfiles "rootfile"
+                   epub-reader-publication--ocf-namespace))))
            (path (and rootfile
-                      (epub-reader-publication--attribute rootfile
-                                                          "full-path"))))
+                      (epub-reader-publication--attribute
+                       rootfile "full-path"))))
       (unless path
         (signal 'epub-reader-publication-error
-                '("EPUB container has no package rootfile")))
-      (epub-reader-publication--normalize-path "" path))))
+                '("EPUB container has no supported package rootfile")))
+      (pcase-let ((`(,raw-path ,fragment)
+                   (epub-reader-publication--split-href path)))
+        (when fragment
+          (signal 'epub-reader-publication-error
+                  '("Package rootfile cannot contain a fragment")))
+        (epub-reader-publication--normalize-url-path "" raw-path)))))
 
 (defun epub-reader-publication--metadata-text (metadata name)
-  "Return first metadata descendant NAME text, or nil."
+  "Return first direct Dublin Core metadata NAME text, or nil."
   (let ((node (and metadata
-                   (epub-reader-publication--descendant metadata name))))
+                   (epub-reader-publication--child
+                    metadata name epub-reader-publication--dc-namespace))))
     (and node (epub-reader-publication--text node))))
+
+(defun epub-reader-publication--identifier (package metadata)
+  "Return identifier selected by PACKAGE's unique-identifier IDREF."
+  (let ((idref (epub-reader-publication--required-attribute
+                package "unique-identifier" "Package")))
+    (or
+     (cl-loop
+      for node in (epub-reader-publication--children
+                   metadata "identifier" epub-reader-publication--dc-namespace)
+      when (equal (epub-reader-publication--attribute node "id") idref)
+      return (epub-reader-publication--text node))
+     (signal 'epub-reader-publication-error
+             (list (format "Package unique-identifier is unresolved: %s"
+                           idref))))))
 
 (defun epub-reader-publication--properties (string)
   "Split an OPF space-separated property STRING."
   (and string (split-string string "[[:space:]]+" t)))
 
-(defun epub-reader-publication--manifest
-    (publication package package-directory)
-  "Parse PACKAGE manifest relative to PACKAGE-DIRECTORY for PUBLICATION."
-  (let ((manifest (epub-reader-publication--child package "manifest"))
-        (table (make-hash-table :test #'equal)))
+(defun epub-reader-publication--manifest (publication package)
+  "Parse PACKAGE manifest for PUBLICATION."
+  (let ((manifest
+         (epub-reader-publication--child
+          package "manifest" epub-reader-publication--opf-namespace))
+        (table (make-hash-table :test #'equal))
+        (seen-urls (make-hash-table :test #'equal)))
     (unless manifest
       (signal 'epub-reader-publication-error '("OPF has no manifest")))
-    (dolist (item (epub-reader-publication--children manifest "item"))
+    (dolist (item
+             (epub-reader-publication--children
+              manifest "item" epub-reader-publication--opf-namespace))
       (let* ((id (epub-reader-publication--required-attribute
                   item "id" "Manifest item"))
              (href (epub-reader-publication--required-attribute
                     item "href" "Manifest item"))
-             (path (epub-reader-publication--normalize-path
-                    package-directory
-                    (car (epub-reader-publication--split-href href)))))
+             (media-type (epub-reader-publication--required-attribute
+                          item "media-type" "Manifest item"))
+             (target
+              (epub-reader-publication-resolve-href
+               publication (epub-reader-publication-opf-path publication)
+               href))
+             (remote-p (epub-reader-link-target-external-p target))
+             (path (and (not remote-p)
+                        (epub-reader-link-target-path target)))
+             (url-key (if remote-p
+                          (concat "remote:" (epub-reader-link-target-uri target))
+                        (concat "local:" path))))
+        (when (epub-reader-link-target-fragment target)
+          (signal 'epub-reader-publication-error
+                  (list (format "Manifest item URL has a fragment: %s" href))))
         (when (gethash id table)
           (signal 'epub-reader-publication-error
                   (list (format "Duplicate manifest id: %s" id))))
+        (when (gethash url-key seen-urls)
+          (signal 'epub-reader-publication-error
+                  (list (format "Duplicate resolved manifest URL: %s" href))))
+        (puthash url-key id seen-urls)
         (puthash
          id
          (epub-reader-resource--create
           :id id :href href :path path
-          :file (epub-reader-container-path
-                 (epub-reader-publication-container publication) path)
-          :media-type (epub-reader-publication--attribute item "media-type")
+          :file (and path (epub-reader-link-target-file target))
+          :uri (and remote-p (epub-reader-link-target-uri target))
+          :remote-p remote-p
+          :media-type media-type
           :properties (epub-reader-publication--properties
                        (epub-reader-publication--attribute item "properties")))
          table)))
@@ -249,11 +433,15 @@
 
 (defun epub-reader-publication--spine (package manifest)
   "Parse PACKAGE spine using MANIFEST and return an ordered vector."
-  (let ((spine (epub-reader-publication--child package "spine"))
+  (let ((spine
+         (epub-reader-publication--child
+          package "spine" epub-reader-publication--opf-namespace))
         items)
     (unless spine
       (signal 'epub-reader-publication-error '("OPF has no spine")))
-    (dolist (itemref (epub-reader-publication--children spine "itemref"))
+    (dolist (itemref
+             (epub-reader-publication--children
+              spine "itemref" epub-reader-publication--opf-namespace))
       (let* ((idref (epub-reader-publication--required-attribute
                      itemref "idref" "Spine item"))
              (resource (gethash idref manifest)))
@@ -261,6 +449,10 @@
           (signal 'epub-reader-publication-error
                   (list (format "Spine references unknown manifest id: %s"
                                 idref))))
+        (when (epub-reader-resource-remote-p resource)
+          (signal 'epub-reader-publication-error
+                  (list (format "Remote spine resources are unsupported: %s"
+                                (epub-reader-resource-uri resource)))))
         (unless (file-readable-p (epub-reader-resource-file resource))
           (signal 'epub-reader-publication-error
                   (list (format "Spine resource is missing: %s"
@@ -275,6 +467,8 @@
                        (epub-reader-publication--attribute itemref
                                                            "properties")))
          items)))
+    (unless items
+      (signal 'epub-reader-publication-error '("OPF spine is empty")))
     (vconcat (nreverse items))))
 
 (defun epub-reader-publication--toc-target (publication base-path href)
@@ -289,8 +483,12 @@
   "Convert NCX NAV-POINT into a normalized TOC entry."
   (let* ((label-node
           (epub-reader-publication--descendant
-           (epub-reader-publication--child nav-point "navLabel") "text"))
-         (content (epub-reader-publication--child nav-point "content"))
+           (epub-reader-publication--child
+            nav-point "navLabel" epub-reader-publication--ncx-namespace)
+           "text" epub-reader-publication--ncx-namespace))
+         (content
+          (epub-reader-publication--child
+           nav-point "content" epub-reader-publication--ncx-namespace))
          (href (and content
                     (epub-reader-publication--attribute content "src")))
          (target (and href
@@ -306,46 +504,76 @@
               (lambda (child)
                 (epub-reader-publication--ncx-point
                  publication base-path child))
-              (epub-reader-publication--children nav-point "navPoint")))))))
+              (epub-reader-publication--children
+               nav-point "navPoint"
+               epub-reader-publication--ncx-namespace)))))))
 
 (defun epub-reader-publication--ncx-toc (publication package manifest)
   "Return EPUB 2 NCX TOC from PACKAGE and MANIFEST."
-  (let* ((spine (epub-reader-publication--child package "spine"))
+  (let* ((spine
+          (epub-reader-publication--child
+           package "spine" epub-reader-publication--opf-namespace))
          (toc-id (and spine
                       (epub-reader-publication--attribute spine "toc")))
          (resource (and toc-id (gethash toc-id manifest))))
     (when (and resource (file-readable-p (epub-reader-resource-file resource)))
       (let* ((root (epub-reader-publication--parse-file
                     (epub-reader-resource-file resource)))
-             (nav-map (epub-reader-publication--descendant root "navMap")))
+             (nav-map
+              (and (epub-reader-publication--qname-p
+                    (car root) epub-reader-publication--ncx-namespace "ncx")
+                   (epub-reader-publication--descendant
+                    root "navMap" epub-reader-publication--ncx-namespace))))
         (delq nil
               (mapcar
                (lambda (point)
                  (epub-reader-publication--ncx-point
                   publication (epub-reader-resource-path resource) point))
-               (epub-reader-publication--children nav-map "navPoint")))))))
+               (epub-reader-publication--children
+                nav-map "navPoint" epub-reader-publication--ncx-namespace)))))))
+
+(defun epub-reader-publication--nav-label (node)
+  "Return accessible label text for EPUB navigation NODE."
+  (let ((text (epub-reader-publication--text node)))
+    (if (not (string-empty-p text))
+        text
+      (or (epub-reader-publication--attribute node "title")
+          (let ((image
+                 (epub-reader-publication--descendant
+                  node "img" epub-reader-publication--xhtml-namespace)))
+            (and image (epub-reader-publication--attribute image "alt")))))))
 
 (defun epub-reader-publication--nav-li (publication base-path li)
   "Convert EPUB 3 navigation LI relative to BASE-PATH into a TOC entry."
-  (let* ((anchor (epub-reader-publication--child li "a"))
-         (label-node (or anchor (epub-reader-publication--child li "span")))
+  (let* ((anchor
+          (epub-reader-publication--child
+           li "a" epub-reader-publication--xhtml-namespace))
+         (label-node
+          (or anchor
+              (epub-reader-publication--child
+               li "span" epub-reader-publication--xhtml-namespace)))
          (href (and anchor
                     (epub-reader-publication--attribute anchor "href")))
          (target (and href
                       (epub-reader-publication--toc-target
                        publication base-path href)))
-         (nested (epub-reader-publication--child li "ol")))
-    (when (and label-node target)
+         (nested
+          (epub-reader-publication--child
+           li "ol" epub-reader-publication--xhtml-namespace))
+         (children
+          (delq nil
+                (mapcar
+                 (lambda (child)
+                   (epub-reader-publication--nav-li
+                    publication base-path child))
+                 (and nested
+                      (epub-reader-publication--children
+                       nested "li"
+                       epub-reader-publication--xhtml-namespace))))))
+    (when (and label-node (or target children))
       (epub-reader-toc-entry--create
-       :label (epub-reader-publication--text label-node)
-       :path (car target) :fragment (cadr target)
-       :children
-       (delq nil
-             (mapcar
-              (lambda (child)
-                (epub-reader-publication--nav-li
-                 publication base-path child))
-              (epub-reader-publication--children nested "li")))))))
+       :label (or (epub-reader-publication--nav-label label-node) "")
+       :path (car target) :fragment (cadr target) :children children))))
 
 (defun epub-reader-publication--nav-toc (publication manifest)
   "Return EPUB 3 navigation TOC declared in MANIFEST."
@@ -364,17 +592,22 @@
                (lambda (candidate)
                  (member "toc"
                          (epub-reader-publication--properties
-                          (epub-reader-publication--attribute candidate
-                                                              "type"))))
-               (epub-reader-publication--descendants root "nav")))
+                          (epub-reader-publication--attribute
+                           candidate "type"
+                           epub-reader-publication--ops-namespace))))
+               (epub-reader-publication--descendants
+                root "nav" epub-reader-publication--xhtml-namespace)))
              (list-node (and nav
-                             (epub-reader-publication--child nav "ol"))))
+                             (epub-reader-publication--child
+                              nav "ol"
+                              epub-reader-publication--xhtml-namespace))))
         (delq nil
               (mapcar
                (lambda (li)
                  (epub-reader-publication--nav-li
                   publication (epub-reader-resource-path nav-resource) li))
-               (epub-reader-publication--children list-node "li")))))))
+               (epub-reader-publication--children
+                list-node "li" epub-reader-publication--xhtml-namespace)))))))
 
 (defun epub-reader-publication--check-mimetype (container)
   "Require the canonical EPUB mimetype member in CONTAINER."
@@ -396,27 +629,47 @@
       (signal 'epub-reader-publication-error
               (list (format "Package document is missing: %s" opf-path))))
     (let* ((package (epub-reader-publication--parse-file opf-file))
-           (metadata (epub-reader-publication--child package "metadata"))
+           (_package-check
+            (unless (epub-reader-publication--qname-p
+                     (car package) epub-reader-publication--opf-namespace
+                     "package")
+              (signal 'epub-reader-publication-error
+                      '("Package document has the wrong namespace"))))
+           (version (epub-reader-publication--required-attribute
+                     package "version" "Package"))
+           (_version-check
+            (unless (string-match-p "\\`[23]\\(?:\\.\\|\\'\\)" version)
+              (signal 'epub-reader-publication-error
+                      (list (format "Unsupported package version: %s"
+                                    version)))))
+           (metadata
+            (epub-reader-publication--child
+             package "metadata" epub-reader-publication--opf-namespace))
+           (_metadata-check
+            (unless metadata
+              (signal 'epub-reader-publication-error
+                      '("OPF has no metadata"))))
+           (title (epub-reader-publication--metadata-text metadata "title"))
+           (language
+            (epub-reader-publication--metadata-text metadata "language"))
+           (identifier
+            (epub-reader-publication--identifier package metadata))
+           (_required-metadata-check
+            (unless (and title (not (string-empty-p title))
+                         language (not (string-empty-p language))
+                         identifier (not (string-empty-p identifier)))
+              (signal 'epub-reader-publication-error
+                      '("OPF requires title, language, and identifier"))))
            (publication
             (epub-reader-publication--create
              :container container
-             :version (or (epub-reader-publication--attribute
-                           package "version") "")
-             :title (or (epub-reader-publication--metadata-text
-                         metadata "title")
-                        (file-name-base
-                         (epub-reader-container-source container)))
-             :language (epub-reader-publication--metadata-text
-                        metadata "language")
-             :identifier (epub-reader-publication--metadata-text
-                          metadata "identifier")
+             :version version :title title :language language
+             :identifier identifier
              :opf-path opf-path
              :opf-directory (or (file-name-directory opf-path) "")
              :closed-p nil))
            (manifest
-            (epub-reader-publication--manifest
-             publication package
-             (epub-reader-publication-opf-directory publication)))
+            (epub-reader-publication--manifest publication package))
            (spine (epub-reader-publication--spine package manifest)))
       (setf (epub-reader-publication-manifest publication) manifest
             (epub-reader-publication-spine publication) spine

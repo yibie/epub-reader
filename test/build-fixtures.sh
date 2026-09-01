@@ -32,6 +32,25 @@ build_epub() {
 
 build_epub epub2 "$source_dir/epub2"
 build_epub epub3 "$source_dir/epub3"
+build_epub epub3-edge "$source_dir/epub3-edge"
+
+missing_media_source="$work_dir/epub3-missing-media-source"
+cp -R "$source_dir/epub3-edge" "$missing_media_source"
+perl -0pi -e 's/ id="chapter" href="text\/a%20b.xhtml" media-type="application\/xhtml\+xml"/ id="chapter" href="text\/a%20b.xhtml"/' \
+  "$missing_media_source/EPUB/package.opf"
+build_epub epub3-missing-media "$missing_media_source"
+
+duplicate_url_source="$work_dir/epub3-duplicate-url-source"
+cp -R "$source_dir/epub3-edge" "$duplicate_url_source"
+perl -0pi -e 's|(<item id="chapter"[^>]*/>)|$1\n    <item id="duplicate" href="text/./a%20b.xhtml" media-type="application/xhtml+xml"/>|' \
+  "$duplicate_url_source/EPUB/package.opf"
+build_epub epub3-duplicate-url "$duplicate_url_source"
+
+remote_spine_source="$work_dir/epub3-remote-spine-source"
+cp -R "$source_dir/epub3-edge" "$remote_spine_source"
+perl -0pi -e 's/<itemref idref="chapter"\/>/<itemref idref="remote"\/>/' \
+  "$remote_spine_source/EPUB/package.opf"
+build_epub epub3-remote-spine "$remote_spine_source"
 
 malicious_dir="$work_dir/malicious"
 mkdir -p "$malicious_dir/nested"

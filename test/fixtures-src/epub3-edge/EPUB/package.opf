@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package version="3.0" unique-identifier="book-id"
+         xmlns="http://www.idpf.org/2007/opf"
+         xmlns:dc="http://purl.org/dc/elements/1.1/"
+         xmlns:evil="urn:evil">
+  <metadata>
+    <evil:title>Wrong namespace title</evil:title>
+    <dc:identifier id="other-id">urn:wrong:first</dc:identifier>
+    <dc:title>Namespace Edge Book</dc:title>
+    <dc:language>zh-CN</dc:language>
+    <dc:identifier id="book-id">urn:fixture:edge</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="chapter" href="text/a%20b.xhtml" media-type="application/xhtml+xml"/>
+    <item id="remote" href="https://example.com/audio.mp3" media-type="audio/mpeg"/>
+  </manifest>
+  <spine>
+    <itemref idref="chapter"/>
+  </spine>
+</package>
