@@ -392,6 +392,64 @@
       (delete-directory directory t)
       (delete-file source))))
 
+(ert-deftest epub-reader-store-publishes-canonical-owner-atomically ()
+  (let ((directory (make-temp-file "epub-reader-store-owner-publish-" t))
+        (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
+    (unwind-protect
+        (let* ((epub-reader-store-directory directory)
+               (epub-reader-store-lock-timeout 0.1)
+               (epub-reader-store-ownerless-lock-grace 0.01)
+               (store (epub-reader-store-open source "book"))
+               (path (epub-reader-store-path store))
+               (lock (concat path ".lock"))
+               (real-write
+                (symbol-function 'epub-reader-store--write-lock-owner))
+               (real-rename (symbol-function 'rename-file))
+               outer-token nested-token outer-error nested-error injected)
+          (cl-letf
+              (((symbol-function 'epub-reader-store--write-lock-owner)
+                (lambda (target owner)
+                  (when (and (not injected) (equal target lock))
+                    (setq injected t)
+                    ;; A has published an ownerless canonical directory.  It
+                    ;; pauses beyond grace, so B reclaims and acquires before
+                    ;; A resumes writing through the old pathname.
+                    (set-file-times
+                     lock (seconds-to-time (- (float-time) 1.0)))
+                    (condition-case error-data
+                        (setq nested-token
+                              (epub-reader-store--acquire-lock path))
+                      (error (setq nested-error error-data))))
+                  (funcall real-write target owner)))
+               ((symbol-function 'rename-file)
+                (lambda (old new &optional ok-if-already)
+                  ;; With the fixed protocol, pause A immediately before its
+                  ;; single publication rename.  B publishes first; A's same
+                  ;; rename must then lose without ever exposing an ownerless
+                  ;; canonical lock.
+                  (when (and (not injected) (equal new lock))
+                    (setq injected t)
+                    (condition-case error-data
+                        (setq nested-token
+                              (epub-reader-store--acquire-lock path))
+                      (error (setq nested-error error-data))))
+                  (funcall real-rename old new ok-if-already))))
+            (condition-case error-data
+                (setq outer-token (epub-reader-store--acquire-lock path))
+              (error (setq outer-error error-data))))
+          (should injected)
+          (should-not (and outer-token nested-token))
+          (should (= (length (delq nil (list outer-token nested-token))) 1))
+          (let ((canonical-owner
+                 (epub-reader-store--read-lock-owner lock)))
+            (should canonical-owner)
+            (should
+             (equal (plist-get canonical-owner :nonce)
+                    (plist-get (or outer-token nested-token) :nonce))))
+          (should-not (and outer-error nested-error)))
+      (delete-directory directory t)
+      (delete-file source))))
+
 (ert-deftest epub-reader-store-retains-corrupt-sidecar ()
   (let ((directory (make-temp-file "epub-reader-store-corrupt-" t))
         (source (make-temp-file "epub-reader-store-source-" nil ".epub")))
