@@ -9,8 +9,12 @@
 - 容器改为中央目录 preflight 后按需 materialize；启动只展开格式元数据、恢复章节和当前
   viewport 图片，spine 权重直接读取 ZIP 中央目录的未压缩 size。
 - 图片解压移到 active chunk 的 TextUI leaf 生产阶段，并缓存已 materialize 成员。
-- reader buffer 隔离继承的 `line-spacing`，避免图片切片横缝/连续图片重叠；禁止二次软折行并
-  隐藏 continuation/truncation fringe，避免居中栏外的单字列。
+- 图片物理行用局部零 `line-spacing`，正文继续继承用户行距；禁止二次软折行并隐藏
+  continuation/truncation fringe，避免居中栏外的单字列。
+- text scale 变化触发完整 TextUI 重排，图片行预算按 remap 后字体高度重算，并以 locator/window
+  view state 恢复位置。
+- 惰性容器绑定 preflight 时创建的只读归档快照；materialize 前检测外部归档替换，并以容器级
+  原子 reservation/commit 维护累计解压预算。
 
 ### Performance
 

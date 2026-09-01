@@ -89,7 +89,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 |---|---|---|
 | 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；中央目录安全 preflight 后按需解压 metadata、当前 spine 与当前 chunk 图片；解析 EPUB 2 NCX 与 EPUB 3 nav |
 | 已支持 | 常见 XHTML 语义 | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、图片与可见错误提示 |
-| 已支持 | CJK 与宽度重排 | TextUI 宽度感知折行、common kinsoku、窗口宽度变化全量重排，并通过 focus/source anchor 保持位置 |
+| 已支持 | CJK 与宽度重排 | TextUI 宽度感知折行、common kinsoku；窗口宽度或 text scale 变化时全量重排，并通过 focus/source anchor 保持位置；图片行预算跟随 remap 后字体高度 |
 | 已支持 | 长章节 | block 数与字符数双软预算、guard/overscan、章节 region refresh；不会为整章预先生成 TextUI leaf/source property |
 | 已支持 | 导航 | 前后章、章尾自动前进、内部 fragment、外部链接 allowlist、history back/forward、层级/可折叠 TOC、标题补全跳转 |
 | 已支持 | 进度 | 基于书籍 fingerprint 的版本化 locator；位置变化后 idle debounce、换章与关闭保存；原子 merge/write；exact/degraded 恢复提示；全书加权百分比 |
@@ -106,6 +106,9 @@ M-x epub-reader-open RET /path/to/book.epub RET
   整块载入；一个 50,000 字符的单段可以超过 2,000 字符预算。
 - viewport 的尾端使用 exclusive range；guard 恰好落在边界时，前后两端仍有一个 block 的
   触发差异（V-03），不影响 locator 正确性，但可能带来轻微迟滞差。
+- TextUI 按字符 cell 生成物理行；reader 的 `truncate-lines` 可阻止二次折行，却不能修正
+  variable-pitch glyph 或不可分长 token 的像素溢出，极端情况下尾部会被截断。图片 row budget
+  已按 `window-font-height` 调整，但 TextUI slice 内部仍以 frame 默认 char height 度量。
 - 章内百分比计入 block 内 offset，书末收敛到 100%；章节之间的权重目前仍取各 XHTML 资源的
   byte size，不等同于严格的字数或实际阅读时长。
 - sidecar 事务假设本地文件系统提供同目录 directory rename 的原子且不覆盖语义。非常规或网络
