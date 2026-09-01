@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="nav-1" playOrder="1">
+      <navLabel><text>第一章</text></navLabel>
+      <content src="chapter1.xhtml#first"/>
+    </navPoint>
+    <navPoint id="nav-2" playOrder="2">
+      <navLabel><text>第二章</text></navLabel>
+      <content src="chapter2.xhtml#second"/>
+    </navPoint>
+  </navMap>
+</ncx>

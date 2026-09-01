@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package version="3.0" unique-identifier="pub-id" xmlns="http://www.idpf.org/2007/opf" prefix="dc: http://purl.org/dc/elements/1.1/">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Minimal EPUB 3</dc:title>
+    <dc:language>en</dc:language>
+    <dc:identifier id="pub-id">urn:fixture:epub3</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="one" href="text/one.xhtml" media-type="application/xhtml+xml"/>
+    <item id="two" href="text/two.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="one"/>
+    <itemref idref="two" linear="no"/>
+  </spine>
+</package>
