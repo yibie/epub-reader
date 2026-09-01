@@ -20,13 +20,19 @@
 换包、双 buffer 重入、结构/像素 line-spacing、batch 与图形 text-scale 探针。图形探针使用
 GNU Emacs 31.0.91。
 
+最终裁决轮固定 reader diff 为 `git diff 04d215a...23a2302`（`2bab027`、`23a2302`），并审查
+TextUI 上游 `f6b3a06...0a89825`。本地重跑 reader **93/93**、当前 TextUI worktree
+**109/109** 均通过；TextUI worktree 另有与图片无关的 focus/position 用户改动，本轮未修改或纳入
+image diff 判断。另以 Emacs 31 图形帧重放 native CJK/locator/像素探针，并加 letterbox 与 combining
+mark 反例。
+
 ## 结论先行
 
-**Gate 仍不解除。** C-01、C-02、V-02 已解决；V-01 只解决了“正文保留用户行距”，图片行
-实际清零仍失败。图形复核还发现一条新的 V-03：TextUI native image 路径既会因非 ASCII alt
-触发 unibyte 写入错误，也不会保留 reader 放在 alt 上的 image anchor；因此真实图形图片行没有
-`epub-reader-image-slice`，locator 与局部 line-spacing 后处理均落空。93 个测试全绿是可信的
-batch 结果，但没有覆盖这条 native-image 路径。
+**Gate 仍不解除。** 最终修复关闭了 V-03 的“普通 CJK alt 写入 unibyte/属性全丢”主路径：fixture
+可在 native GUI 渲染，3 个 anchor run、48 个 tagged row 与图片 locator 均存在。但 V-01 的核心
+像素目标仍失败；V-03 也残留两个可构造的现实输入漏洞：letterboxed 图片从实际 slice 行而非 leaf
+第 0 行开始 anchor，导致 caption 被误标；combining/variation 类 alt 可因字符数超过列槽触发
+`args-out-of-range`。两套 ERT 全绿未覆盖这些边界。
 
 | 严重级别 | 未关闭 | 已关闭 | Finding |
 |---|---:|---:|---|
@@ -125,6 +131,17 @@ materialize 的刻意跨线程交错不构成本轮现实 Gate。
 `epub-reader-image-slice`，见 V-03。应使用 Emacs 文档专为 image slices 给出的 newline
 `line-height=t`（或经图形矩阵验证的等价公开契约），并补真实 graphical regression。
 
+**最终复核：仍未解决。** `2bab027` 确实只给 tagged image row 的 newline 加 `line-height=t`，
+buffer 继续继承 0.25，普通 prose newline 没有该 property；结构范围正确。但像素语义不成立：
+
+- 最小图形探针中 image/prose 行均为 `17/17px`；
+- 真实 native slice 同一行在继承 0.25 时为 17px，临时把 buffer `line-spacing` 设 nil 后为 14px。
+
+原因是 buffer spacing 已由该行可见 glyph 累积；只改变 newline 的 line height 没有把整行已有的
+extra spacing 清零。现有 ERT 仍只检查 `line-height=t` 属性存在。并且 V-03 的 letterbox 误标会把
+该 property 加到 caption newline。必须找到可在图形 redisplay 中实际满足 `17 -> 14` 的公开方案，
+并用“继承正行距 vs nil”的同一 native row 像素对照作为 Gate 测试。
+
 ### V-02 — P1 应修：text-scale 后不重排，图片度量也不跟随 face remap
 
 - **位置：** `epub-reader-ui.el:143-163,764-838`；TextUI sibling checkout
@@ -166,6 +183,24 @@ font height `14 -> 20`，四个 image block 的传入预算均由 `16 -> 12`，�
   的 text properties 到可识别的全部图片物理行；或提供公开 image-row metadata/post-render hook，
   避免 reader 借 alt 搬运 anchor。新增真正 `display-graphic-p=t` 的 ASCII/CJK alt × source round-trip
   × line-spacing 回归；生产代码继续不得调用 `textui--*` 私有 API。
+
+**最终复核：部分解决，仍阻 Gate。** TextUI `0a89825` 把 native 行转为 multibyte，并用 concat
+保留截断后 alt 的 properties。未注入 workaround 的 Emacs 31 GUI fixture 已能渲染“测试封面/图一/
+图二”，得到 3 个 anchor line、48 个 image-slice row；中部图片行 locator 正确解析到
+`OEBPS/chapter2.xhtml`。reader 生产代码仍未调用 `textui--*` 私有 API。这关闭了原始简单 CJK 主路径。
+
+但两个独立反例仍失败：
+
+1. **letterbox range：** TextUI 只在首个实际 slice（`row=top`）嵌入带 property 的 alt，reader 却从
+   该行按配置 `rows` 向后标记。fixture 的小 SVG 产生 `top>0`，实际探针中 `[测试封面]` caption
+   带 `epub-reader-image-slice=t`；顶部 padding 未覆盖、尾部越过 leaf。locator/line-height 作用域
+   因此并不可靠。
+2. **Unicode 字符数：** splice 用显示宽度截断 alt，却以 `(length alternative)` 切底层固定宽度行。
+   `"a" + 20 个 U+0301` 的合法 alt 为 `chars=21, display-width=1`，在 10 列 native leaf 稳定报
+   `args-out-of-range "          " 21 nil`。CJK variation selector/ZWJ 类序列同属此形态。
+
+应把 anchor 固定在 image leaf 第 0 行或提供公开的精确 leaf range；splice 同时受显示宽度和可用字符
+槽约束，并保留最终字符边界的 properties。补 letterbox+caption 与 combining/VS/ZWJ 回归后再关闭。
 
 ### C-03 — P2 建议：验证的是 private part，不是 rename 后 final truename
 
@@ -214,6 +249,10 @@ commit 失败，unwind 会删除已发布 target 并释放 reservation。新增�
 截断限制，原三项缺口已覆盖；但它错误宣称 `(0 . 0)` 能稳定覆盖正行距，且未记录 V-03 的 native
 image unibyte/property-loss。待 V-01/V-03 修复后必须同步改正文档与最小图形复现。
 
+**最终复核：仍为部分解决。** `23a2302` 已准确记录原 native CJK/unibyte/property-loss 根因和
+TextUI `0a89825`，但又把 newline `line-height=t` 描述成会忽略继承正行距；上述像素探针反证该结论。
+文档也未写 letterbox anchor range 与 combining/VS 长字符序列限制，需随 V-01/V-03 再修订。
+
 ### R-01 — P2 建议：图片状态已形成位置参数 data clump
 
 - **位置：** `epub-reader-render.el:417-459`。
@@ -257,6 +296,17 @@ geometry 下有效；它不能替代图形帧的 variable-pitch、line-spacing �
 | native CJK alt | Emacs 31 GUI | `Attempt to store non-byte value into unibyte string` | **失败（V-03）** |
 | native source tag | Emacs 31 GUI，探针仅 ASCII 化 alt | image tags `0 -> 0` | **失败（V-03）** |
 
+最终裁决轮：
+
+| 探针 | 结果 | 判定 |
+|---|---|---|
+| native fixture CJK + property | 直接渲染成功；3 anchor lines、48 tagged rows | 主路径通过 |
+| native image locator | 中部 tagged row → `OEBPS/chapter2.xhtml` image block | 主路径通过 |
+| V-01 同一 native row | inherited 0.25=`17px`，buffer nil=`14px` | **失败** |
+| V-01 最小 newline `line-height=t` | image/prose=`17/17px` | **失败** |
+| letterboxed image range | `[测试封面]` caption 被标 `image-slice=t` | **失败** |
+| combining alt | chars=21、display width=1、10 列 → `args-out-of-range` | **失败** |
+
 ## 测试质量
 
 当前 93 项已经新增 source replacement、different/same key reentry、累计 reservation、final
@@ -273,6 +323,11 @@ containment、transient image busy、冻结 sidecar、正文/property scope 与 
 因此“93/93”不能关闭 V-01/V-03；至少要有一个真实图形 Emacs job，覆盖 ASCII/CJK alt、source
 round-trip、line-spacing 像素高度与 scale 0/±2。
 
+最终轮 reader 93/93、TextUI 109/109 再次全绿。新增 reader test 仍只验证 image newline 上存在
+`line-height=t`；新增 TextUI test 只覆盖普通“中文图注”且只要求 property 在某处出现。真实杂志
+smoke 证明常见大图主路径，但不能覆盖小图 `top>0` 的 range 语义、buffer spacing 的像素差异，或
+字符数远大于显示宽度的 Unicode 序列。这正是上述反例能穿过两套测试的原因。
+
 ## Standards
 
 - **Medium（hard violation）：** `epub-reader-ui.el:663-667`、`docs/textui-issues.md:23-30`：
@@ -284,6 +339,15 @@ round-trip、line-spacing 像素高度与 scale 0/±2。
   condition，泄漏 publication seam；可由 publication 转译成资源层 transient error。
 - 其余 C-01/C-02/V-02 留在所属模块，生产代码仍只使用 TextUI 公共 API。
 
+最终裁决轮（`04d215a...HEAD` + TextUI `f6b3a06...0a89825`）：
+
+- **High（hard violation）：** TextUI `textui.el:675-686` 只覆盖普通 CJK；
+  `truncate-string-to-width` 限制显示宽度而不限制字符数，combining/variation selector alt 可令
+  `(substring line (+ left (length alternative)))` 越界。修复为“显示宽度 + 可用字符槽”双限、
+  属性保真的 splice，并补 combining/ZWJ 回归。
+- 其余静态规范未发现新增违反：reader 的 newline `line-height=t` 写法符合 Emacs documented form，
+  正文变量未覆盖，生产代码仍只用 TextUI 公共 API；但其实际像素效果由独立探针判定失败。
+
 ## Spec
 
 - **Medium：** V-01/D-01 只部分完成：正文继承已恢复，但图片行 effective spacing 未清零，文档
@@ -292,17 +356,31 @@ round-trip、line-spacing 像素高度与 scale 0/±2。
   book-key，不能单独发现旧/新 fingerprint 漂移。这两项不推翻生产事务/sidecar 恢复结论。
 - C-01、V-02、C-03、R-01 满足原规格；没有明显 scope creep。
 
+最终裁决轮：
+
+- **High：** V-03/V-01 仍部分解决。TextUI 只把 anchor 放在首个实际 slice 行 `top`，reader 从该行
+  按配置 `rows` 向后标记；宽扁图会漏顶部 padding 并误标 caption/后续内容，随后 V-01 也把
+  `line-height=t` 加到错误 newline。应让 native/fallback anchor 都固定到 leaf 第 0 行，或公开精确
+  leaf range，并加 letterbox + 后续正文 GUI 回归。
+- **Medium：** V-03 的 multibyte-safe 不完整；combining/ZWJ alt 的字符数可大于列数并击穿 splice。
+- 普通 CJK alt/property、documented `line-height=t` 形式、无 reader 私有 API 均已实现；无 scope creep。
+
 双轴摘要：Standards 3 个 finding，最严重为 V-01 文档/实现契约不成立与性能基线过时；Spec 2 个
 finding，最严重为 V-01/D-01 只部分完成。独立图形探针另新增 V-03 P1。
 
+最终双轴摘要：Standards 1 个 finding，最严重为 Unicode alt splice 越界；Spec 2 个 finding，
+最严重为 letterbox range 污染 locator/line-height。独立像素探针另确认 V-01 effective spacing 未关闭。
+
 ## Gate 结论
 
-**Gate 不解除，第三阶段仍不可视为完成。** C-01、C-02、V-02 已关闭，C-03 的剩余微秒级同用户
-目录竞态按现实威胁模型接受，不再阻断。必须完成两项现实图形路径修复：
+**Gate 不解除，第三阶段仍不可视为完成。** 常见 CJK native image/locator 冒烟已经从失败变为
+通过，值得保留；但不能据此关闭两个 P1。剩余 Gate 条件都是可重复的现实显示/Unicode输入，不属于
+同用户微秒级理论竞态：
 
-1. V-01：图片物理行使用真正能覆盖正行距的公开 newline/display 契约，并以像素高度验证；
-2. V-03：TextUI native `:image` 对 CJK alt 必须 multibyte-safe，并把 source/anchor 保留到全部图片
-   物理行，恢复 locator 与 post-render 属性。
+1. V-01：在继承正 `line-spacing` 下，同一 native image row 的像素高度必须与 buffer spacing=nil
+   相同；目前是 `17 != 14`。
+2. V-03 range：letterboxed image 的 source/image-slice/line-height 必须严格落在 leaf 行内，caption
+   与后续 prose 不得被覆盖。
+3. V-03 Unicode：combining/VS/ZWJ alt 不得越界，CJK alt 的 properties/locator 仍须 round-trip。
 
-D-01/D-02 为文档 P2，可随上述修复和性能重测收口；它们不单独决定 Gate。只有新增真实 graphical
-回归并关闭 V-01/V-03 后，第三阶段 Gate 才可解除。
+D-01/D-02 仍是非阻断文档 P2。完成上述三个回归并重跑真实 graphical fixture 后，才可解除 Gate。
