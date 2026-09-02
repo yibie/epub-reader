@@ -15,10 +15,13 @@ and reading positions that survive changes in window width and text scale.
 Version 0.1.0 requires Emacs 29.1 or later. It does not support DRM or
 fixed-layout EPUBs.
 
-![epub-reader showing the table of contents, the reading column, and the highlights list](screenshots/reader-toc-highlights.png)
+![Frankenstein in epub-reader: table of contents, reading column, and highlights list](screenshots/reader-frankenstein.png)
+
+![紅樓夢 in epub-reader: grouped table of contents, reading column, and highlights list](screenshots/reader-hongloumeng.png)
 
 Table of contents on the left, reading column in the centre, highlights list
-on the right.
+on the right. The texts are *Frankenstein* from Standard Ebooks and 紅樓夢
+from Project Gutenberg, both in the public domain.
 
 ## How it differs from nov.el
 
