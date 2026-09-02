@@ -2,7 +2,7 @@
 
 本文件记录 epub-reader 的公开版本变化。版本号遵循 Semantic Versioning。
 
-## Unreleased
+## 0.2.0 - 2026-09-01
 
 ### Added
 
@@ -22,6 +22,8 @@
 
 ### Changed
 
+- 安装说明改为优先用 `package-vc-install` 从 GitHub 安装 TextUI 和本包，克隆后加入
+  `load-path` 的方式保留为备选。
 - 引用块和代码块不再绘制边框：按字符格计算的边框在比例字体正文里对不齐。引用仍用斜体灰字，
   代码仍用等宽灰底区分。
 - 打开书后阅读 buffer 独占当前 frame，`q` 退出时恢复原来的窗口布局；新增

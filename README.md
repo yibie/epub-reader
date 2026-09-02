@@ -12,7 +12,7 @@ HTML: a centered reading column, automatic reflow, CJK-aware line breaking,
 incremental rendering for long chapters, a hierarchical table of contents,
 and reading positions that survive changes in window width and text scale.
 
-Version 0.1.0 requires Emacs 29.1 or later. It does not support DRM or
+Version 0.2.0 requires Emacs 29.1 or later. It does not support DRM or
 fixed-layout EPUBs.
 
 ![Frankenstein in epub-reader: table of contents, reading column, and highlights list](screenshots/reader-frankenstein.png)
@@ -31,7 +31,7 @@ variety of books. It renders one XHTML document at a time with `shr`.
 small viewport through TextUI. That architectural difference matters most for
 reflow, long chapters, and reliable reading positions.
 
-| Area | nov.el 0.5 | epub-reader 0.1.0 |
+| Area | nov.el 0.5 | epub-reader 0.2.0 |
 |---|---|---|
 | Rendering | Sends a complete spine document through `shr` | Converts XHTML to semantic blocks and renders a bounded chapter viewport |
 | Resizing and text scale | Usually requires another render; buffer positions may move | Reflows automatically and restores the semantic reading position |
@@ -54,11 +54,19 @@ locators. Keeping both installed is reasonable.
 Requirements:
 
 - Emacs 29.1 or later, built with libxml2 support;
-- TextUI 0.5.1;
+- TextUI 0.5.1 or later;
 - either `unzip` or `bsdtar` on `exec-path`.
 
-At this stage, install both TextUI and `epub-reader` from local checkouts and
-add them to `load-path`:
+Neither package is in a package archive yet. On Emacs 29.1 or later,
+`package-vc-install` installs both straight from GitHub. Install TextUI first
+so that `epub-reader` finds its dependency:
+
+```elisp
+(package-vc-install "https://github.com/yibie/textui")
+(package-vc-install "https://github.com/yibie/epub-reader")
+```
+
+Alternatively, clone both repositories and add them to `load-path`:
 
 ```elisp
 (add-to-list 'load-path "/path/to/textui")
@@ -188,7 +196,7 @@ and TOC state also have `epub-reader-*` faces that can be adjusted with
 
 ## Feature matrix
 
-| Status | Area | Behavior in 0.1.0 |
+| Status | Area | Behavior in 0.2.0 |
 |---|---|---|
 | Supported | EPUB container and publication model | Opens DRM-free, reflowable EPUB 2/3; validates the central directory; extracts metadata, spine documents, and visible images on demand; reads EPUB 2 NCX and EPUB 3 navigation documents |
 | Supported | Common XHTML semantics | Paragraphs, headings, emphasis, links, quotations, code, ordered and unordered lists, a text fallback for simple tables, and visible image errors |

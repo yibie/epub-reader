@@ -10,7 +10,7 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 模型、稳定 locator 和 TextUI 的宽度感知 frame/分块 viewport 组织阅读体验。逐项对比见
 [与 nov.el 的比较](#与-novel-的比较)。
 
-当前版本为 0.1.0，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
+当前版本为 0.2.0，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
 
 ![epub-reader 打开紅樓夢：分组目录、正文阅读栏和高亮列表](screenshots/reader-hongloumeng.png)
 
@@ -24,7 +24,7 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 `nov.el` 是成熟、打包广、经过更多书籍验证的选择；`epub-reader` 还很年轻，但它不是
 把整章 HTML 一次性显示到 buffer 里，而是为阅读位置、长章分块和 CJK 重排单独建模。
 
-| 项目 | nov.el 0.5 | epub-reader 0.1.0 |
+| 项目 | nov.el 0.5 | epub-reader 0.2.0 |
 |---|---|---|
 | 渲染 | 通过 `shr` 显示完整 spine 文档 | XHTML 先转成语义块，再由 TextUI 排版当前视区 |
 | 窗口变宽、字号变化 | 通常需要重新渲染，buffer 位置可能移动 | 自动重排，并回到同一语义位置 |
@@ -42,23 +42,23 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 
 要求：
 
-- Emacs 29.1 或更高版本；
-- TextUI 0.5.1，当前以本地 checkout 加入 `load-path`；
+- Emacs 29.1 或更高版本，且编译时带 libxml2 支持；
+- TextUI 0.5.1 或更高版本；
 - `unzip` 或 `bsdtar`，安装任意一个即可。两者都存在时默认先尝试 `unzip`。
 
-把 TextUI 与本项目目录加入 `load-path`：
+两个包都还没有进入软件源。Emacs 29.1 起自带的 `package-vc-install` 可以直接从 GitHub
+安装。先装 TextUI，再装本项目：
+
+```elisp
+(package-vc-install "https://github.com/yibie/textui")
+(package-vc-install "https://github.com/yibie/epub-reader")
+```
+
+也可以克隆两个仓库后加入 `load-path`：
 
 ```elisp
 (add-to-list 'load-path "/path/to/textui")
 (add-to-list 'load-path "/path/to/epub-reader")
-(require 'epub-reader)
-```
-
-例如本仓库开发环境使用：
-
-```elisp
-(add-to-list 'load-path "/Users/chenyibin/Documents/emacs/package/textui")
-(add-to-list 'load-path "/Users/chenyibin/Documents/emacs/package/epub-reader")
 (require 'epub-reader)
 ```
 
@@ -157,7 +157,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 
 ## 功能矩阵
 
-| 状态   | 能力                  | 0.1.0 行为                                                                                                                                                                                                                 |
+| 状态   | 能力                  | 0.2.0 行为                                                                                                                                                                                                                 |
 |--------|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；中央目录安全 preflight 后按需解压 metadata、当前 spine 与当前 chunk 图片；解析 EPUB 2 NCX 与 EPUB 3 nav                                                                                 |
 | 已支持 | 常见 XHTML 语义       | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、异步后到图片与可见错误提示                                                                                                                          |
@@ -170,7 +170,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | 不支持 | 受限或固定版式出版物  | DRM、fixed-layout、竖排与精确分页                                                                                                                                                                                          |
 | 不支持 | 富媒体与复杂排版      | 复杂 ruby、MathML、SVG、音视频、JavaScript、通用 CSS、publisher font、float/grid fidelity                                                                                                                                  |
 | 不支持 | 全书服务              | 索引式全文搜索、跨设备同步、EPUB CFI 或 Web Annotation 互操作                                                                                                                                                              |
-| 不支持 | 纯 Elisp ZIP          | 0.1.0 仍通过 unzip/bsdtar adapter 流式读取归档                                                                                                                                                                             |
+| 不支持 | 纯 Elisp ZIP          | 0.2.0 仍通过 unzip/bsdtar adapter 流式读取归档                                                                                                                                                                             |
 
 ## 已知限制
 
