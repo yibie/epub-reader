@@ -16,6 +16,9 @@
 - 新增纯英文和中英混排 EPUB fixture，覆盖 Latin 词间断行、非末行对齐、混排来源位置与高亮
   引文重定位。
 - 目录、书签列表和高亮列表支持鼠标点击条目跳转，效果与 `RET` 相同。
+- 新增阅读字体与排版设置：标题和引用继承 `epub-reader-prose-face`，并提供
+  `epub-reader-text-scale`、`epub-reader-line-spacing` 和
+  `epub-reader-paragraph-spacing`。
 
 ### Changed
 

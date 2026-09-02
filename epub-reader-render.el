@@ -33,24 +33,24 @@
                  (const :tag "Balanced Knuth--Plass" balanced))
   :group 'epub-reader)
 
+(defface epub-reader-prose-face
+  '((t (:inherit variable-pitch)))
+  "Face for ordinary EPUB prose."
+  :group 'epub-reader)
+
 (defface epub-reader-heading-1-face
-  '((t (:inherit variable-pitch :weight bold :height 1.45)))
+  '((t (:inherit epub-reader-prose-face :weight bold :height 1.45)))
   "Face for top-level EPUB headings."
   :group 'epub-reader)
 
 (defface epub-reader-heading-2-face
-  '((t (:inherit variable-pitch :weight bold :height 1.25)))
+  '((t (:inherit epub-reader-prose-face :weight bold :height 1.25)))
   "Face for second-level EPUB headings."
   :group 'epub-reader)
 
 (defface epub-reader-heading-3-face
-  '((t (:inherit variable-pitch :weight bold :height 1.12)))
+  '((t (:inherit epub-reader-prose-face :weight bold :height 1.12)))
   "Face for lower-level EPUB headings."
-  :group 'epub-reader)
-
-(defface epub-reader-prose-face
-  '((t (:inherit variable-pitch)))
-  "Face for ordinary EPUB prose."
   :group 'epub-reader)
 
 (defface epub-reader-emphasis-face
@@ -64,7 +64,8 @@
   :group 'epub-reader)
 
 (defface epub-reader-quote-face
-  '((t (:inherit variable-pitch :slant italic :foreground "gray55")))
+  '((t (:inherit epub-reader-prose-face
+        :slant italic :foreground "gray55")))
   "Face for block quotations."
   :group 'epub-reader)
 

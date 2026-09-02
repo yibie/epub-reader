@@ -120,6 +120,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | 用途             | 变量                                                                                                                                                                                                                                                                                                                                                                |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 正文与图片       | epub-reader-reading-width、epub-reader-image-rows、epub-reader-text-wrap-strategy                                                                                                                                                                                                                                                                                   |
+| 字体与间距       | epub-reader-text-scale、epub-reader-line-spacing、epub-reader-paragraph-spacing                                                                                                                                                                                                                                                                                     |
 | 窗口布局         | epub-reader-open-full-frame |
 | 交互首绘         | epub-reader-first-paint-max-blocks、epub-reader-first-paint-max-characters                                                                                                                                                                                                                                                                                          |
 | 冷滚动 chunk     | epub-reader-scroll-chunk-max-blocks、epub-reader-scroll-chunk-max-characters                                                                                                                                                                                                                                                                                        |
@@ -132,7 +133,23 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | 归档 adapter     | epub-reader-container-adapters                                                                                                                                                                                                                                                                                                                                      |
 | 归档安全上限     | epub-reader-container-max-entries、epub-reader-container-max-files、epub-reader-container-max-directories、epub-reader-container-max-central-directory-bytes、epub-reader-container-max-path-bytes、epub-reader-container-max-entry-bytes、epub-reader-container-max-total-bytes、epub-reader-container-max-compression-ratio、epub-reader-container-member-timeout |
 
-正文、标题、强调、引用、代码、链接、高亮、图片提示、header/footer 和目录状态均有
+### 字体、字号与间距
+
+要换阅读字体或基础字号，运行
+`M-x customize-face RET epub-reader-prose-face RET`；标题会继承正文 face，并保留各自的
+相对字号。临时放大、缩小或复原可用 `C-x C-+`、`C-x C--`、`C-x C-0`，reader 会自动
+重排。每次打开书时的默认缩放由 `epub-reader-text-scale` 控制，正文行距由
+`epub-reader-line-spacing` 控制，段落之间的空行数由
+`epub-reader-paragraph-spacing` 控制，阅读栏宽度则由 `epub-reader-reading-width` 控制。
+
+```elisp
+(setq epub-reader-text-scale 1
+      epub-reader-line-spacing 0.2
+      epub-reader-paragraph-spacing 1
+      epub-reader-reading-width 72)
+```
+
+强调、引用、代码、链接、高亮、图片提示、header/footer 和目录状态也都有
 `epub-reader-*` face，可通过 `M-x customize-face` 调整。
 
 ## 功能矩阵

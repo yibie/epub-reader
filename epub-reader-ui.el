@@ -29,6 +29,24 @@
   :type 'integer
   :group 'epub-reader)
 
+(defcustom epub-reader-line-spacing nil
+  "Extra line spacing used for prose lines in reader buffers.
+Nil means inherit `line-spacing' from the buffer or selected frame."
+  :type '(choice (const :tag "Inherit the global line spacing" nil)
+                 number)
+  :group 'epub-reader)
+
+(defcustom epub-reader-paragraph-spacing 1
+  "Number of blank lines inserted between reading-column blocks."
+  :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-text-scale 0
+  "Text scale level applied when a reader buffer is opened.
+The value has the same meaning as the argument to `text-scale-set'."
+  :type 'integer
+  :group 'epub-reader)
+
 (defcustom epub-reader-open-full-frame t
   "Non-nil means an opened book takes over the whole frame.
 `epub-reader-open' then shows the reader in the selected window and hides
@@ -245,7 +263,8 @@ Set only when the book took over the frame on opening.")
         (setq-local epub-reader-ui--saved-line-spacing
                     (cons (local-variable-p 'line-spacing) line-spacing))
         (setq-local epub-reader-ui--prose-line-spacing
-                    (or line-spacing
+                    (or epub-reader-line-spacing
+                        line-spacing
                         (frame-parameter (selected-frame) 'line-spacing)))
         (setq-local line-spacing 0)
         (epub-reader-ui--disable-image-line-spacing (current-buffer))
@@ -1012,7 +1031,8 @@ remap does not leave image slices measured in unscaled frame rows."
     (setf (epub-reader-session-producer-block-count session)
           (length elements))
     (list (epub-reader-ui--centered-column
-           available-width (nreverse elements) 1))))
+           available-width (nreverse elements)
+           (max 0 epub-reader-paragraph-spacing)))))
 
 (defun epub-reader-ui--attach-link-actions (&optional buffer)
   "Install UI-owned interaction properties on hyperlink runs in BUFFER."
@@ -2531,7 +2551,9 @@ and remembers the previous window layout for `epub-reader-quit'."
             (setq buffer (get-buffer-create name))
             (with-current-buffer buffer
               (textui-mode)
-              (setq-local epub-reader-ui--session session))
+              (setq-local epub-reader-ui--session session)
+              (unless (zerop epub-reader-text-scale)
+                (text-scale-set epub-reader-text-scale)))
             (textui-open
              name #'epub-reader-ui-frame
              (list :spine-index saved-index :chunk-start (car range)

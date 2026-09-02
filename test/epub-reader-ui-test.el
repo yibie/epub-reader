@@ -1643,5 +1643,56 @@
                          "第二章"))
           (should (equal (epub-reader-ui--chapter-title) "第一章")))))))
 
+(ert-deftest epub-reader-ui-custom-line-spacing-applies-to-prose ()
+  (let ((epub-reader-line-spacing 0.4))
+    (epub-reader-ui-test--with-reader _buffer
+      (should (= line-spacing 0))
+      (should (local-variable-p 'line-spacing))
+      (let ((position
+             (epub-reader-ui-test--block-position "path:body/1:p")))
+        (should position)
+        (let ((newline
+               (save-excursion
+                 (goto-char position)
+                 (line-end-position))))
+          (should (= (get-text-property newline 'line-spacing) 0.4)))))))
+
+(ert-deftest epub-reader-ui-custom-paragraph-spacing-controls-blank-lines ()
+  (dolist (spacing '(0 2))
+    (let ((epub-reader-paragraph-spacing spacing))
+      (epub-reader-ui-test--with-reader _buffer
+        (let* ((first-key "path:body/1:p")
+               (first (epub-reader-ui-test--block-position first-key))
+               (second
+                (epub-reader-ui-test--block-position
+                 "path:body/2:blockquote/0:p")))
+          (should first)
+          (should second)
+          (let ((first-last
+                 (cl-loop for position from (point-min) below (point-max)
+                          for source = (get-text-property
+                                        position 'epub-reader-source)
+                          when (and (epub-reader-locator-source-p source)
+                                    (equal (aref source 1) first-key))
+                          maximize position)))
+            (should first-last)
+            (should
+             (= (- (line-number-at-pos second)
+                   (line-number-at-pos first-last) 1)
+                spacing))))))))
+
+(ert-deftest epub-reader-ui-heading-face-inherits-prose-face ()
+  (should (eq (face-attribute 'epub-reader-heading-1-face :inherit)
+              'epub-reader-prose-face)))
+
+(ert-deftest epub-reader-ui-default-text-scale-applies-before-rendering ()
+  (let ((epub-reader-text-scale 1))
+    (epub-reader-ui-test--with-reader _buffer
+      (should (= text-scale-mode-amount 1))
+      (should (epub-reader-ui-test--block-position "path:body/1:p"))
+      (should (string-match-p
+               "天地玄黄"
+               (buffer-substring-no-properties (point-min) (point-max)))))))
+
 (provide 'epub-reader-ui-test)
 ;;; epub-reader-ui-test.el ends here

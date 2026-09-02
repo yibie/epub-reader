@@ -148,6 +148,7 @@ The settings most readers are likely to change are:
 | Purpose | Options |
 |---|---|
 | Reading column and images | `epub-reader-reading-width`, `epub-reader-image-rows`, `epub-reader-text-wrap-strategy` |
+| Fonts and spacing | `epub-reader-text-scale`, `epub-reader-line-spacing`, `epub-reader-paragraph-spacing` |
 | Window layout | `epub-reader-open-full-frame` |
 | Initial chapter paint | `epub-reader-first-paint-max-blocks`, `epub-reader-first-paint-max-characters` |
 | Cold scrolling | `epub-reader-scroll-chunk-max-blocks`, `epub-reader-scroll-chunk-max-characters` |
@@ -160,9 +161,27 @@ The settings most readers are likely to change are:
 | Archive program | `epub-reader-container-adapters` |
 | Archive safety limits | `epub-reader-container-max-entries`, `epub-reader-container-max-files`, `epub-reader-container-max-directories`, `epub-reader-container-max-central-directory-bytes`, `epub-reader-container-max-path-bytes`, `epub-reader-container-max-entry-bytes`, `epub-reader-container-max-total-bytes`, `epub-reader-container-max-compression-ratio`, `epub-reader-container-member-timeout` |
 
-Body text, headings, emphasis, quotations, code, links, highlights, image
-messages, reader chrome, and TOC state all have `epub-reader-*` faces. Use
-`M-x customize-face` to adjust them.
+### Fonts, size, and spacing
+
+To change the reading font or its base size, run
+`M-x customize-face RET epub-reader-prose-face RET`. Headings inherit that face
+and keep their relative sizes. For a temporary size change, use `C-x C-+`,
+`C-x C--`, or `C-x C-0`; the reader automatically reflows the text. Set
+`epub-reader-text-scale` for the scale applied whenever a book opens,
+`epub-reader-line-spacing` for prose line spacing,
+`epub-reader-paragraph-spacing` for blank lines between blocks, and
+`epub-reader-reading-width` for the column width.
+
+```elisp
+(setq epub-reader-text-scale 1
+      epub-reader-line-spacing 0.2
+      epub-reader-paragraph-spacing 1
+      epub-reader-reading-width 72)
+```
+
+Emphasis, quotations, code, links, highlights, image messages, reader chrome,
+and TOC state also have `epub-reader-*` faces that can be adjusted with
+`M-x customize-face`.
 
 ## Feature matrix
 
