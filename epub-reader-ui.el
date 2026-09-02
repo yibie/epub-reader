@@ -638,16 +638,72 @@ current when it runs, so it also covers this request."
             (cons locator (epub-reader-session-history-back session))
             (epub-reader-session-history-forward session) nil))))
 
+(defun epub-reader-ui--heading-label (blocks)
+  "Return the trimmed text of the first heading in BLOCKS, or nil."
+  (cl-loop for block across blocks
+           when (eq (epub-reader-block-kind block) 'heading)
+           return (let ((text (string-trim
+                               (substring-no-properties
+                                (epub-reader-block-text block)))))
+                    (and (not (string-empty-p text)) text))))
+
+(defun epub-reader-ui--toc-label-for-spine-index (publication index)
+  "Return the first PUBLICATION TOC label whose target is spine INDEX."
+  (let* ((resource (epub-reader-publication-spine-resource publication index))
+         (path (and resource (epub-reader-resource-path resource))))
+    (when path
+      (cl-labels ((search (entries)
+                    (catch 'found
+                      (dolist (entry entries)
+                        (let ((label (string-trim
+                                      (epub-reader-toc-entry-label entry))))
+                          (when (and (equal (epub-reader-toc-entry-path entry)
+                                            path)
+                                     (not (string-empty-p label)))
+                            (throw 'found label)))
+                        (let ((nested (search
+                                       (epub-reader-toc-entry-children entry))))
+                          (when nested (throw 'found nested))))
+                      nil)))
+        (search (epub-reader-publication-toc publication))))))
+
+(defun epub-reader-ui--cjk-numeral (number)
+  "Return NUMBER as a Chinese numeral below 100, otherwise as decimal digits."
+  (let ((digits ["零" "一" "二" "三" "四" "五" "六" "七" "八" "九"]))
+    (cond ((or (< number 1) (>= number 100)) (number-to-string number))
+          ((< number 10) (aref digits number))
+          (t (let ((tens (/ number 10))
+                   (ones (% number 10)))
+               (concat (if (> tens 1) (aref digits tens) "")
+                       "十"
+                       (if (> ones 0) (aref digits ones) "")))))))
+
+(defun epub-reader-ui--numbered-chapter-label (language number)
+  "Return a numbered fallback label for chapter NUMBER written in LANGUAGE."
+  (let ((language (downcase (or language ""))))
+    (cond ((or (string-prefix-p "zh" language)
+               (string-prefix-p "ja" language))
+           (format "第%s章" (epub-reader-ui--cjk-numeral number)))
+          ((string-prefix-p "ko" language)
+           (format "제%d장" number))
+          (t (format "Chapter %d" number)))))
+
+(defun epub-reader-ui--chapter-label (session index)
+  "Return a readable label for SESSION spine INDEX.
+Prefer the chapter's own first heading, then its table-of-contents label,
+and finally a chapter number in the publication's language."
+  (let ((publication (epub-reader-session-publication session)))
+    (or (epub-reader-ui--heading-label
+         (epub-reader-chapter-data-blocks
+          (epub-reader-ui--chapter-data session index)))
+        (epub-reader-ui--toc-label-for-spine-index publication index)
+        (epub-reader-ui--numbered-chapter-label
+         (epub-reader-publication-language publication) (1+ index)))))
+
 (defun epub-reader-ui--chapter-title ()
   "Return a readable title for the current chapter."
-  (let ((blocks
-         (epub-reader-ui--current-blocks)))
-    (or (cl-loop for block across blocks
-                 when (eq (epub-reader-block-kind block) 'heading)
-                 return (string-trim
-                         (substring-no-properties
-                          (epub-reader-block-text block))))
-        (format "Chapter %d" (1+ (epub-reader-ui--state-value :spine-index))))))
+  (epub-reader-ui--chapter-label (epub-reader-ui--current-session)
+                                 (epub-reader-ui--state-value :spine-index)))
 
 (defun epub-reader-ui--progress-percent ()
   "Return weighted whole-book progress for point in the current buffer."
@@ -1580,32 +1636,45 @@ window rows; TextUI's internal focus identity is not an EPUB position."
     (nreverse rows)))
 
 (defun epub-reader-toc--row-element (row)
-  "Return one TextUI text element for TOC ROW."
+  "Return one TextUI row element for TOC ROW.
+The markers and indentation sit in a fixed leading cell and the label in a
+growing cell, so a label wrapped over several lines keeps every continuation
+line aligned under its first character instead of at the window edge."
   (let* ((entry (epub-reader-toc-row-entry row))
          (children (epub-reader-toc-entry-children entry))
          (disclosure (cond ((not children) "  ")
                            ((epub-reader-toc-row-expanded-p row) "▾ ")
                            (t "▸ ")))
          (current (if (epub-reader-toc-row-current-p row) "▶ " "  "))
-         (value
-          (propertize
-           (format "%s%s%s%s" current
-                   (make-string (* 2 (epub-reader-toc-row-depth row)) ?\s)
-                   disclosure (epub-reader-toc-entry-label entry))
-           'epub-reader-toc-row row
-           'epub-reader-toc-key (epub-reader-toc-row-key row)
-           'face (cond ((epub-reader-toc-row-current-p row)
-                        'epub-reader-toc-current-face)
-                       ((and children
-                             (not (epub-reader-toc-entry-path entry)))
-                        'epub-reader-toc-group-face)
-                       (t 'default))
-           'mouse-face 'highlight
-           'keymap epub-reader-toc-row-map
-           'help-echo (if (epub-reader-toc-entry-path entry)
-                          "RET or mouse-1: jump; TAB: fold"
-                        "RET, mouse-1, or TAB: fold"))))
-    (list :type :text :value value)))
+         (properties
+          (list 'epub-reader-toc-row row
+                'epub-reader-toc-key (epub-reader-toc-row-key row)
+                'face (cond ((epub-reader-toc-row-current-p row)
+                             'epub-reader-toc-current-face)
+                            ((and children
+                                  (not (epub-reader-toc-entry-path entry)))
+                             'epub-reader-toc-group-face)
+                            (t 'default))
+                'mouse-face 'highlight
+                'keymap epub-reader-toc-row-map
+                'help-echo (if (epub-reader-toc-entry-path entry)
+                               "RET or mouse-1: jump; TAB: fold"
+                             "RET, mouse-1, or TAB: fold")))
+         (prefix
+          (apply #'propertize
+                 (format "%s%s%s" current
+                         (make-string (* 2 (epub-reader-toc-row-depth row))
+                                      ?\s)
+                         disclosure)
+                 properties))
+         (label
+          (apply #'propertize (epub-reader-toc-entry-label entry)
+                 properties)))
+    (list :type :flex :direction :row :gap 0
+          :children
+          (list (list :type :text :value prefix)
+                (list :type :text :value label :wrap 'greedy
+                      :layout '(:min-width 8 :grow 1))))))
 
 (defun epub-reader-toc-frame (_available-width)
   "Return the secondary TextUI table-of-contents frame."
@@ -1622,10 +1691,17 @@ window rows; TextUI's internal focus identity is not an EPUB position."
            :children (mapcar #'epub-reader-toc--row-element rows)))))
 
 (defun epub-reader-toc--row-at-point ()
-  "Return the TOC row at or immediately before point."
+  "Return the TOC row at point, before point, or owning the current line.
+The continuation lines of a wrapped label start with blank padding that
+carries no properties, so the row is also looked up at the line's end."
   (or (get-text-property (point) 'epub-reader-toc-row)
       (and (> (point) (point-min))
-           (get-text-property (1- (point)) 'epub-reader-toc-row))))
+           (get-text-property (1- (point)) 'epub-reader-toc-row))
+      (save-excursion
+        (end-of-line)
+        (skip-chars-backward " \t")
+        (and (> (point) (line-beginning-position))
+             (get-text-property (1- (point)) 'epub-reader-toc-row)))))
 
 (defun epub-reader-toc--key-position (key)
   "Return buffer position of visible TOC row KEY."
@@ -2169,7 +2245,8 @@ window rows; TextUI's internal focus identity is not an EPUB position."
                         (list (list :type :text
                                     :value
                                     (propertize
-                                     (format "Chapter %d" (1+ index))
+                                     (epub-reader-ui--chapter-label
+                                      session index)
                                      'face 'epub-reader-toc-group-face)))))
           (setq previous-index index))
         (let* ((note (epub-reader-annotation-note annotation))

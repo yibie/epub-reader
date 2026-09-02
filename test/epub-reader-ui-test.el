@@ -1312,7 +1312,13 @@
           (with-current-buffer annotation-list
             (should (= (epub-reader-ui-test--property-count
                         'epub-reader-annotation)
-                       2))))
+                       2))
+            ;; Highlights are grouped under the chapter's own heading, not
+            ;; under a hard-coded English "Chapter N" label.
+            (let ((text (buffer-substring-no-properties
+                         (point-min) (point-max))))
+              (should (string-match-p "Language Layout" text))
+              (should-not (string-match-p "Chapter 1" text)))))
       (when (buffer-live-p bookmark-list) (kill-buffer bookmark-list))
       (when (buffer-live-p annotation-list) (kill-buffer annotation-list))
       (when (buffer-live-p reader) (kill-buffer reader))
@@ -1552,6 +1558,90 @@
       (when (buffer-live-p reader) (kill-buffer reader))
       (delete-file source)
       (delete-directory directory t))))
+
+(ert-deftest epub-reader-ui-toc-wrapped-label-keeps-hanging-indent ()
+  (let* ((entries
+          (list (epub-reader-toc-entry--create
+                 :label "第一回至第十回"
+                 :children
+                 (list (epub-reader-toc-entry--create
+                        :label "第一回　甄士隱夢幻識通靈　賈雨村風塵懷閨秀"
+                        :path "text/1.xhtml")
+                       (epub-reader-toc-entry--create
+                        :label "第二回　賈夫人仙逝揚州城　冷子興演說榮國府"
+                        :path "text/2.xhtml")))))
+         (buffer (generate-new-buffer " *epub-reader-toc-wrap-test*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (textui-mode)
+          (setq-local textui--last-width 24
+                      textui--render-function
+                      (lambda (_width)
+                        (list
+                         (list :type :flex :direction :column :gap 0
+                               :children
+                               (mapcar #'epub-reader-toc--row-element
+                                       (epub-reader-toc--rows
+                                        entries nil "text/2.xhtml"))))))
+          (textui-refresh buffer)
+          (let* ((lines (split-string (buffer-substring-no-properties
+                                       (point-min) (point-max))
+                                      "\n"))
+                 (second-start
+                  (cl-position-if (lambda (line) (string-prefix-p "▶" line))
+                                  lines))
+                 (continuations (cl-subseq lines 2 second-start)))
+            (should (string-prefix-p "  ▾ 第一回至第十回" (nth 0 lines)))
+            (should (string-prefix-p "      第一回" (nth 1 lines)))
+            ;; The long label wraps, and every continuation line is indented
+            ;; to the label column instead of starting at the window edge.
+            (should (>= (length continuations) 1))
+            (dolist (line continuations)
+              (should (string-match-p "\\`      [^ ]" line)))
+            (should (string-prefix-p "▶     第二回" (nth second-start lines)))
+            ;; Point on the blank indentation of a continuation line still
+            ;; resolves to the wrapped row, and the row key lookup lands on
+            ;; the row's first line.
+            (goto-char (point-min))
+            (forward-line 2)
+            (should (equal (epub-reader-toc-row-key
+                            (epub-reader-toc--row-at-point))
+                           "0/0"))
+            (goto-char (point-min))
+            (forward-line second-start)
+            (should (= (epub-reader-toc--key-position "0/1") (point)))))
+      (kill-buffer buffer))))
+
+(ert-deftest epub-reader-ui-numbered-chapter-label-follows-language ()
+  (should (equal (epub-reader-ui--numbered-chapter-label "zh-CN" 2) "第二章"))
+  (should (equal (epub-reader-ui--numbered-chapter-label "zh-Hant" 10)
+                 "第十章"))
+  (should (equal (epub-reader-ui--numbered-chapter-label "zh" 21)
+                 "第二十一章"))
+  (should (equal (epub-reader-ui--numbered-chapter-label "zh" 120)
+                 "第120章"))
+  (should (equal (epub-reader-ui--numbered-chapter-label "ja" 12) "第十二章"))
+  (should (equal (epub-reader-ui--numbered-chapter-label "ko" 3) "제3장"))
+  (should (equal (epub-reader-ui--numbered-chapter-label "en" 2) "Chapter 2"))
+  (should (equal (epub-reader-ui--numbered-chapter-label nil 2) "Chapter 2")))
+
+(ert-deftest epub-reader-ui-chapter-label-falls-back-to-toc-then-number ()
+  (epub-reader-ui-test--with-reader reader
+    (let* ((session (epub-reader-ui--current-session))
+           (publication (epub-reader-session-publication session)))
+      ;; The fixture chapter has a heading, which wins outright.
+      (should (equal (epub-reader-ui--chapter-label session 0)
+                     "第一章 哲学从问题开始"))
+      ;; Without headings the table-of-contents label is used, and without a
+      ;; TOC entry the number follows the publication language (zh-CN).
+      (cl-letf (((symbol-function 'epub-reader-ui--heading-label)
+                 (lambda (_blocks) nil)))
+        (should (equal (epub-reader-ui--chapter-label session 0) "第一章"))
+        (cl-letf (((symbol-function 'epub-reader-publication-toc)
+                   (lambda (_publication) nil)))
+          (should (equal (epub-reader-ui--chapter-label session 1)
+                         "第二章"))
+          (should (equal (epub-reader-ui--chapter-title) "第一章")))))))
 
 (provide 'epub-reader-ui-test)
 ;;; epub-reader-ui-test.el ends here
