@@ -2,6 +2,13 @@
 
 本文件记录 epub-reader 的公开版本变化。版本号遵循 Semantic Versioning。
 
+## Unreleased
+
+### Changed
+
+- 用 `package-vc-install` 安装时不再字节编译 `test/` 目录下的测试和 fixture 文件：
+  `test/.dir-locals.el` 标记了 `no-byte-compile`，安装日志不再出现测试文件的报错。
+
 ## 0.2.0 - 2026-09-01
 
 ### Added
