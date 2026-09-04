@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Author: chenyibin
 ;; Version: 0.2.0
-;; Package-Requires: ((emacs "29.1") (textui "0.5.1"))
+;; Package-Requires: ((emacs "29.1") (textui "0.7.0"))
 
 ;;; Commentary:
 
@@ -18,8 +18,14 @@
 (require 'face-remap)
 (require 'subr-x)
 (require 'textui)
+(require 'textui-keyed-region)
+(require 'textui-widgets)
 (require 'epub-reader-annotation)
+(require 'epub-reader-annotation-index)
+(require 'epub-reader-layout)
 (require 'epub-reader-locator)
+(require 'epub-reader-note)
+(require 'epub-reader-panel)
 (require 'epub-reader-publication)
 (require 'epub-reader-render)
 (require 'epub-reader-store)
@@ -41,6 +47,12 @@ Nil means inherit `line-spacing' from the buffer or selected frame."
   :type 'integer
   :group 'epub-reader)
 
+(defconst epub-reader-ui--minimum-chrome-width 10
+  "Minimum width at which the reader renders header and footer chrome.
+Below this width the chapter remains usable while chrome is omitted.  This
+also keeps parent layout padding from extending chapter lines beyond their
+refresh-region text properties during transient narrow-window layouts.")
+
 (defcustom epub-reader-text-scale 0
   "Text scale level applied when a reader buffer is opened.
 The value has the same meaning as the argument to `text-scale-set'."
@@ -54,6 +66,26 @@ every other window, and `epub-reader-quit' restores the window layout that
 was in place before the book was opened.  When nil, the reader buffer is only
 displayed through `display-buffer' and the existing windows stay as they are."
   :type 'boolean
+  :group 'epub-reader)
+
+(defcustom epub-reader-toc-width 34
+  "Preferred width in character cells of the table-of-contents panel."
+  :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-list-width 42
+  "Preferred width in character cells of bookmark and annotation panels."
+  :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-reader-min-width 40
+  "Minimum reader width preserved when opening a horizontal side panel."
+  :type 'integer
+  :group 'epub-reader)
+
+(defcustom epub-reader-side-min-width 20
+  "Minimum useful width for a horizontal EPUB side panel."
+  :type 'integer
   :group 'epub-reader)
 
 (defcustom epub-reader-chunk-max-blocks 64
@@ -88,7 +120,11 @@ A single larger block is still materialized by itself."
   :group 'epub-reader)
 
 (defcustom epub-reader-scroll-chunk-max-blocks 1
-  "Maximum new semantic blocks rendered in a cold interactive chunk shift."
+  "Base block allowance for a cold interactive chunk shift.
+Half the edge guard may raise this allowance so a completed shift moves the
+active block out of the trigger zone without laying out a whole screen of new
+paragraphs at once.  The character allowance remains independently bounded by
+`epub-reader-scroll-chunk-max-characters'."
   :type 'integer
   :group 'epub-reader)
 
@@ -132,12 +168,23 @@ A single larger block is still materialized by itself."
   "Face for collapsible TOC groups."
   :group 'epub-reader)
 
+(defface epub-reader-panel-active-tab-face
+  '((t (:inherit mode-line-emphasis :weight bold)))
+  "Face for the selected view tab in the EPUB panel."
+  :group 'epub-reader)
+
+(defface epub-reader-panel-inactive-tab-face
+  '((t (:inherit shadow)))
+  "Face for an unselected view tab in the EPUB panel."
+  :group 'epub-reader)
+
 (cl-defstruct (epub-reader-session
                (:constructor epub-reader-session--create))
   "Non-UI state owned by one reader buffer."
   publication current-chapter dom-cache store
-  refreshing-p producer-block-count history-back history-forward toc-buffer
-  bookmark-buffer annotation-buffer bookmarks annotations
+  refreshing-p producer-block-count history-back history-forward
+  panel-buffer panel panel-view bookmarks annotations
+  annotation-index
   spine-weights total-weight
   progress-key progress-dirty-p progress-timer progress-callback
   background-generation background-jobs background-timer background-callback)
@@ -170,20 +217,17 @@ Set only when the book took over the frame on opening.")
 (defvar-local epub-reader-ui--session nil
   "Domain session owned by the current EPUB reader buffer.")
 
+(defvar-local epub-reader-ui--layout-group nil
+  "Managed window group owned by the current EPUB reader buffer.")
+
 (defvar-local epub-reader-ui--saved-line-spacing nil
   "Saved `(LOCAL-P . VALUE)' for restoring the user's line spacing.")
 
 (defvar-local epub-reader-ui--prose-line-spacing nil
   "Line spacing copied onto non-image rows in the current reader buffer.")
 
-(defvar-local epub-reader-toc--reader-buffer nil
-  "Reader buffer controlled by the current TOC TextUI buffer.")
-
-(defvar-local epub-reader-bookmark-list--reader-buffer nil
-  "Reader buffer controlled by the current bookmark list.")
-
-(defvar-local epub-reader-annotation-list--reader-buffer nil
-  "Reader buffer controlled by the current annotation list.")
+(defvar-local epub-reader-ui--panel-view-reader nil
+  "Reader buffer owning the current panel buffer.")
 
 (defvar-keymap epub-reader-ui-mode-map
   :doc "Keymap active in EPUB reader TextUI buffers."
@@ -205,25 +249,45 @@ Set only when the book took over the frame on opening.")
   "RET" #'epub-reader-follow-link
   "q" #'epub-reader-quit)
 
+(defvar-keymap epub-reader-panel-view-map
+  :doc "Keys shared by every view of the EPUB panel."
+  "1" #'epub-reader-panel-select-contents
+  "2" #'epub-reader-panel-select-highlights
+  "3" #'epub-reader-panel-select-bookmarks
+  "t" #'epub-reader-panel-select-contents
+  "a" #'epub-reader-panel-select-highlights
+  "M" #'epub-reader-panel-select-bookmarks)
+
 (defvar-keymap epub-reader-toc-mode-map
-  :doc "Keymap active in EPUB TOC TextUI buffers."
+  :doc "Keymap active while the EPUB panel shows the table of contents."
+  :parent epub-reader-panel-view-map
+  "n" #'epub-reader-toc-next-chapter
+  "]" #'epub-reader-toc-next-chapter
+  "p" #'epub-reader-toc-previous-chapter
+  "[" #'epub-reader-toc-previous-chapter
   "RET" #'epub-reader-toc-activate
   "TAB" #'epub-reader-toc-toggle
+  "t" #'epub-reader-toc-quit
   "q" #'epub-reader-toc-quit)
 
 (defvar-keymap epub-reader-bookmark-list-mode-map
-  :doc "Keymap active in EPUB bookmark list buffers."
+  :doc "Keymap active while the EPUB panel shows bookmarks."
+  :parent epub-reader-panel-view-map
   "RET" #'epub-reader-bookmark-list-activate
   "d" #'epub-reader-bookmark-list-delete
+  "M" #'epub-reader-bookmark-list-quit
   "q" #'epub-reader-bookmark-list-quit)
 
 (defvar-keymap epub-reader-annotation-list-mode-map
-  :doc "Keymap active in EPUB annotation list buffers."
+  :doc "Keymap active while the EPUB panel shows highlights and notes."
+  :parent epub-reader-panel-view-map
+  "n" #'epub-reader-annotation-list-next
+  "p" #'epub-reader-annotation-list-previous
   "RET" #'epub-reader-annotation-list-activate
   "d" #'epub-reader-annotation-list-delete
   "e" #'epub-reader-annotation-list-edit-note
+  "a" #'epub-reader-annotation-list-quit
   "q" #'epub-reader-annotation-list-quit)
-
 (defvar epub-reader-ui-link-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'epub-reader-follow-link)
@@ -248,6 +312,221 @@ Set only when the book took over the frame on opening.")
     (define-key map [mouse-1] #'epub-reader-annotation-list-activate-mouse)
     map)
   "Keymap installed on annotation list rows so that a click acts like RET.")
+
+(defconst epub-reader-ui--panel-views
+  '((toc "Contents" epub-reader-toc-frame epub-reader-toc-mode)
+    (annotations "Highlights" epub-reader-annotation-list-frame
+                 epub-reader-annotation-list-mode)
+    (bookmarks "Bookmarks" epub-reader-bookmark-list-frame
+               epub-reader-bookmark-list-mode))
+  "Panel views as (VIEW LABEL RENDER-FUNCTION MINOR-MODE), in tab order.")
+
+(defun epub-reader-ui--panel-view-entry (view)
+  "Return the `epub-reader-ui--panel-views' entry for VIEW."
+  (or (assq view epub-reader-ui--panel-views)
+      (error "Unknown EPUB panel view: %S" view)))
+
+(defun epub-reader-ui--panel-reader-session ()
+  "Return the live reader session owned by the current panel buffer."
+  (unless (buffer-live-p epub-reader-ui--panel-view-reader)
+    (user-error "The EPUB reader buffer has been closed"))
+  (with-current-buffer epub-reader-ui--panel-view-reader
+    (epub-reader-ui--current-session)))
+
+(defun epub-reader-ui--panel-view-buffer (session view)
+  "Return SESSION's live panel buffer when it currently shows VIEW."
+  (let ((buffer (epub-reader-session-panel-buffer session)))
+    (and (buffer-live-p buffer)
+         (eq (plist-get (buffer-local-value 'textui-state buffer) :view) view)
+         buffer)))
+
+(defun epub-reader-ui--select-panel-tab (view)
+  "Show VIEW in the panel that owns the current panel buffer."
+  (let ((reader epub-reader-ui--panel-view-reader))
+    (unless (buffer-live-p reader)
+      (user-error "The EPUB reader buffer has been closed"))
+    (with-current-buffer reader
+      (epub-reader-ui--show-panel-view view))))
+
+(defun epub-reader-panel-select-contents ()
+  "Show the table of contents in the EPUB panel."
+  (interactive)
+  (epub-reader-ui--select-panel-tab 'toc))
+
+(defun epub-reader-panel-select-highlights ()
+  "Show highlights and notes in the EPUB panel."
+  (interactive)
+  (epub-reader-ui--select-panel-tab 'annotations))
+
+(defun epub-reader-panel-select-bookmarks ()
+  "Show bookmarks in the EPUB panel."
+  (interactive)
+  (epub-reader-ui--select-panel-tab 'bookmarks))
+
+(defun epub-reader-ui--panel-tab-label (widget)
+  "Return the padded label drawn for tab WIDGET."
+  (format " %s " (widget-get widget :tag)))
+
+(defun epub-reader-ui--panel-tab-value-create (widget)
+  "Insert the label of tab WIDGET."
+  (insert (epub-reader-ui--panel-tab-label widget)))
+
+(defun epub-reader-ui--panel-tab-face (widget)
+  "Return the face for tab WIDGET, depending on whether it is active."
+  (if (widget-get widget :epub-reader-active)
+      'epub-reader-panel-active-tab-face
+    'epub-reader-panel-inactive-tab-face))
+
+(defun epub-reader-ui--panel-tab-notify (widget &rest _)
+  "Switch the panel to the view carried by tab WIDGET."
+  (epub-reader-ui--select-panel-tab (widget-get widget :epub-reader-view)))
+
+(define-widget 'epub-reader-panel-tab 'textui-button
+  "One tab of the EPUB panel: Contents, Highlights, or Bookmarks.
+Clicking it with the mouse or pressing RET on it switches the panel view."
+  :textui-measure #'epub-reader-ui--panel-tab-label
+  :value-create #'epub-reader-ui--panel-tab-value-create
+  :button-face-get #'epub-reader-ui--panel-tab-face
+  :notify #'epub-reader-ui--panel-tab-notify)
+
+(defun epub-reader-ui--panel-tab-element (entry current)
+  "Return the tab element for panel view ENTRY; CURRENT is the shown view."
+  (list :type 'epub-reader-panel-tab
+        :tag (nth 1 entry)
+        :epub-reader-view (car entry)
+        :epub-reader-active (eq (car entry) current)
+        :help-echo (format "mouse-1, RET: show %s" (nth 1 entry))))
+
+(defun epub-reader-panel-frame (available-width)
+  "Render the panel: a row of view tabs above the current view's content."
+  (let* ((view (plist-get textui-state :view))
+         (entry (epub-reader-ui--panel-view-entry view)))
+    (list
+     (list :type :flex :direction :column :gap 1
+           :children
+           (cons (list :type :flex :direction :row :gap 0
+                       :children
+                       (mapcar (lambda (candidate)
+                                 (epub-reader-ui--panel-tab-element
+                                  candidate view))
+                               epub-reader-ui--panel-views))
+                 (funcall (nth 2 entry) available-width))))))
+
+(defun epub-reader-ui--apply-panel-view-mode (view)
+  "Enable VIEW's minor mode in the current panel buffer, disabling the rest."
+  (dolist (entry epub-reader-ui--panel-views)
+    (let ((mode (nth 3 entry)))
+      (when (and (not (eq (car entry) view)) (symbol-value mode))
+        (funcall mode -1))))
+  (funcall (nth 3 (epub-reader-ui--panel-view-entry view)) 1))
+
+(defun epub-reader-ui--panel-selected-id (view)
+  "Return the id of the VIEW item at point in the current panel buffer."
+  (pcase view
+    ('bookmarks
+     (when-let* ((bookmark (epub-reader-bookmark-list--at-point)))
+       (epub-reader-bookmark-id bookmark)))
+    ('annotations
+     (when-let* ((annotation (epub-reader-annotation-list--at-point)))
+       (epub-reader-annotation-id annotation)))))
+
+(defun epub-reader-ui--switch-panel-view (view)
+  "Re-render the current panel buffer showing VIEW, keeping its selection."
+  (let* ((previous (plist-get textui-state :view))
+         (selected-id (and (eq previous view)
+                           (epub-reader-ui--panel-selected-id view))))
+    (setq textui-state (plist-put (copy-sequence textui-state) :view view))
+    (unless (eq previous view)
+      (epub-reader-ui--apply-panel-view-mode view))
+    (pcase view
+      ('toc (epub-reader-toc--refresh))
+      ('bookmarks (epub-reader-bookmark-list--refresh selected-id))
+      ('annotations (epub-reader-annotation-list--refresh selected-id)))))
+
+(defun epub-reader-ui--place-panel-point (view window position)
+  "Put point on a VIEW item in WINDOW, preferring POSITION when it is one."
+  (pcase view
+    ('toc (epub-reader-toc--restore-selection window))
+    (_
+     (let* ((property (if (eq view 'bookmarks)
+                          'epub-reader-bookmark
+                        'epub-reader-annotation))
+            (target (if (get-text-property position property)
+                        position
+                      (epub-reader-ui--first-position-with property))))
+       (when target
+         (goto-char target)
+         (when (window-live-p window)
+           (set-window-point window target)))))))
+
+(defun epub-reader-ui--first-position-with (property)
+  "Return the first buffer position carrying text PROPERTY, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (if (get-text-property (point) property)
+        (point)
+      (next-single-property-change (point) property))))
+
+(defun epub-reader-ui--press-panel-widget ()
+  "Press the panel widget at point; return non-nil when there was one."
+  (when-let* ((widget (widget-at (point))))
+    (widget-apply widget :action)
+    t))
+
+(defun epub-reader-ui--show-panel-view (view)
+  "Show VIEW in this reader's panel buffer, creating the buffer when needed.
+Return the panel buffer."
+  (epub-reader-ui--panel-view-entry view)
+  (let* ((reader (current-buffer))
+         (session (epub-reader-ui--current-session))
+         (group (epub-reader-ui--ensure-layout reader))
+         (existing (epub-reader-session-panel-buffer session))
+         (buffer
+          (if (buffer-live-p existing)
+              existing
+            (let* ((epub-reader-ui--panel-view-reader reader)
+                   (created
+                    (epub-reader-ui--open-secondary-textui
+                     (generate-new-buffer-name
+                      (format "*EPUB Panel: %s*"
+                              (epub-reader-publication-title
+                               (epub-reader-session-publication session))))
+                     #'epub-reader-panel-frame
+                     (list :view view :collapsed nil :selected-key nil))))
+              (with-current-buffer created
+                (setq-local epub-reader-ui--panel-view-reader reader)
+                (epub-reader-ui--apply-panel-view-mode view))
+              (setf (epub-reader-session-panel-buffer session) created)
+              created))))
+    (when (eq buffer existing)
+      (with-current-buffer buffer
+        (epub-reader-ui--switch-panel-view view)))
+    (let* ((position (with-current-buffer buffer (point)))
+           (window (epub-reader-ui--focus-panel-view
+                    reader session group buffer view)))
+      ;; A new buffer was rendered before it had a window, so render it
+      ;; again at the panel's real width instead of waiting for redisplay.
+      (unless (eq buffer existing)
+        (textui-refresh buffer))
+      (with-current-buffer buffer
+        (epub-reader-ui--place-panel-point view window position)))
+    buffer))
+
+(defun epub-reader-ui--hide-line-end-indicators ()
+  "Hide truncation and continuation marks in the current TextUI buffer."
+  (setq-local fringe-indicator-alist
+              (copy-tree fringe-indicator-alist))
+  (dolist (indicator '(truncation continuation))
+    (when-let* ((entry (assq indicator fringe-indicator-alist)))
+      (setcdr entry '(nil nil))))
+  ;; A child frame with zero-width fringes draws these indicators in the
+  ;; window's final text column, where the default truncation glyph is `$'.
+  (setq-local buffer-display-table
+              (copy-sequence (or buffer-display-table
+                                 standard-display-table
+                                 (make-display-table))))
+  (set-display-table-slot buffer-display-table 'truncation ?\s)
+  (set-display-table-slot buffer-display-table 'wrap ?\s))
 
 (define-minor-mode epub-reader-ui-mode
   "Minor mode adding EPUB reader commands to a TextUI buffer."
@@ -274,10 +553,7 @@ Set only when the book took over the frame on opening.")
         ;; Fixed-width TextUI rows need neither Emacs continuation nor
         ;; truncation fringe glyphs; those form a distracting vertical rail
         ;; beside centered CJK prose.
-        (setq-local fringe-indicator-alist
-                    (copy-tree fringe-indicator-alist))
-        (setcdr (assq 'truncation fringe-indicator-alist) '(nil nil))
-        (setcdr (assq 'continuation fringe-indicator-alist) '(nil nil))
+        (epub-reader-ui--hide-line-end-indicators)
         (add-hook 'post-command-hook
                   #'epub-reader-ui--maybe-shift-chunk nil t)
         (add-hook 'post-command-hook
@@ -303,21 +579,24 @@ Set only when the book took over the frame on opening.")
   :init-value nil
   :lighter " EPUB-TOC"
   :keymap epub-reader-toc-mode-map
-  (setq-local truncate-lines t))
+  (setq-local truncate-lines t)
+  (epub-reader-ui--hide-line-end-indicators))
 
 (define-minor-mode epub-reader-bookmark-list-mode
   "Minor mode for the secondary EPUB bookmark list buffer."
   :init-value nil
   :lighter " EPUB-Bookmarks"
   :keymap epub-reader-bookmark-list-mode-map
-  (setq-local truncate-lines t))
+  (setq-local truncate-lines t)
+  (epub-reader-ui--hide-line-end-indicators))
 
 (define-minor-mode epub-reader-annotation-list-mode
   "Minor mode for the secondary EPUB annotation list buffer."
   :init-value nil
   :lighter " EPUB-Annotations"
   :keymap epub-reader-annotation-list-mode-map
-  (setq-local truncate-lines t))
+  (setq-local truncate-lines t)
+  (epub-reader-ui--hide-line-end-indicators))
 
 (defun epub-reader-ui--state-value (key)
   "Return KEY from the current reader's TextUI state."
@@ -330,6 +609,171 @@ Set only when the book took over the frame on opening.")
   (unless (epub-reader-session-p epub-reader-ui--session)
     (user-error "EPUB reader session is unavailable"))
   epub-reader-ui--session)
+
+(defun epub-reader-ui--ensure-layout (&optional reader)
+  "Return READER's managed layout, registering its visible window."
+  (let* ((reader (or reader (current-buffer)))
+         (window
+          (or (and (eq (window-buffer (selected-window)) reader)
+                   (selected-window))
+              (get-buffer-window reader (selected-frame))
+              (get-buffer-window reader t))))
+    (unless (window-live-p window)
+      (user-error "The EPUB reader is not displayed"))
+    (with-current-buffer reader
+      (unless (and (epub-reader-layout-live-p epub-reader-ui--layout-group)
+                   (eq (epub-reader-layout-group-frame
+                        epub-reader-ui--layout-group)
+                       (window-frame window)))
+        (when (epub-reader-layout-live-p epub-reader-ui--layout-group)
+          (epub-reader-layout-release epub-reader-ui--layout-group))
+        (setq-local epub-reader-ui--layout-group
+                    (epub-reader-layout-create reader (window-frame window))))
+      (epub-reader-layout-manage-window
+       epub-reader-ui--layout-group window reader 'reader)
+      epub-reader-ui--layout-group)))
+
+(defun epub-reader-ui--safe-reader-display-window (_buffer _alist)
+  "Return or create a non-side, unmanaged window for restoring a reader."
+  (or (cl-find-if
+       (lambda (window)
+         (and (not (eq window (selected-window)))
+              (not (window-dedicated-p window))
+              (not (window-parameter window 'window-side))
+              (not (epub-reader-layout-managed-window-p window))))
+       (window-list (selected-frame) 'no-minibuffer))
+      (split-window-sensibly (selected-window))
+      (condition-case nil
+          (split-window (window-main-window (selected-frame)) nil 'below)
+        (error nil))
+      (user-error "No safe window is available for the EPUB reader")))
+
+(defun epub-reader-ui--session-panel-origin-window (session)
+  "Return the live reader window retained by SESSION's panel."
+  (epub-reader-panel-origin-window (epub-reader-session-panel session)))
+
+(defun epub-reader-ui--select-reader-window (reader)
+  "Select READER on its owning frame and restore its managed layout."
+  (unless (buffer-live-p reader)
+    (user-error "The EPUB reader buffer has been closed"))
+  (save-current-buffer
+    (let* ((associated-window (selected-window))
+           (associated-buffer (window-buffer associated-window))
+           (associated-role
+            (with-current-buffer associated-buffer
+              (cond ((bound-and-true-p epub-reader-toc-mode) 'panel)
+                    ((bound-and-true-p epub-reader-bookmark-list-mode) 'panel)
+                    ((bound-and-true-p epub-reader-annotation-list-mode)
+                     'panel))))
+           (reader-window
+            (or (with-current-buffer reader
+                  (and epub-reader-ui--session
+                       (epub-reader-ui--session-panel-origin-window
+                        epub-reader-ui--session)))
+                (get-buffer-window reader (selected-frame))
+                (get-buffer-window reader t)
+                (display-buffer
+                 reader
+                 '((display-buffer-use-some-window)
+                   (some-window . epub-reader-ui--safe-reader-display-window)
+                   (inhibit-same-window . t))))))
+      (unless (window-live-p reader-window)
+        (user-error "The EPUB reader could not be displayed"))
+      (select-window reader-window)
+      (let ((group (epub-reader-ui--ensure-layout reader)))
+        (when (and associated-role
+                   (window-live-p associated-window)
+                   (eq (window-frame associated-window)
+                       (window-frame reader-window))
+                   (eq (window-buffer associated-window) associated-buffer))
+          (let ((existing
+                 (epub-reader-layout-window group associated-role)))
+            (unless (and (window-live-p existing)
+                         (not (eq existing associated-window)))
+              (epub-reader-layout-manage-window
+               group associated-window associated-buffer associated-role)))))
+      reader-window)))
+
+(defun epub-reader-ui--open-secondary-textui (name render-function state)
+  "Create and render a secondary TextUI buffer without changing user layout."
+  (epub-reader-layout-with-inhibited
+    (save-window-excursion
+      (textui-open name render-function state))))
+
+(defun epub-reader-ui--close-layout-role (reader role)
+  "Close READER's managed ROLE window and focus the reader when visible."
+  (when (buffer-live-p reader)
+    (let* ((group
+            (with-current-buffer reader epub-reader-ui--layout-group))
+           (role-window
+            (and (epub-reader-layout-live-p group)
+                 (epub-reader-layout-window group role)))
+           (selected (selected-window)))
+      (if (window-live-p role-window)
+          (epub-reader-layout-close-role group role)
+        (when (eq (window-buffer selected) (current-buffer))
+          (quit-restore-window selected)))
+      (let ((reader-window
+             (or (get-buffer-window reader (selected-frame))
+                 (get-buffer-window reader t))))
+        (when (window-live-p reader-window)
+          (select-window reader-window))))))
+
+(defun epub-reader-ui--refit-panel-view (session view)
+  "Refit SESSION's visible panel when it is currently showing VIEW."
+  (let ((panel (epub-reader-session-panel session)))
+    (when (and (eq (epub-reader-session-panel-view session) view)
+               (epub-reader-panel-visible-p panel))
+      (epub-reader-panel-refit panel))))
+
+(defun epub-reader-ui--hide-session-panel (reader)
+  "Hide READER's reusable panel and restore focus to the reader."
+  (when (buffer-live-p reader)
+    (let* ((session
+            (with-current-buffer reader
+              (epub-reader-ui--current-session)))
+           (panel (epub-reader-session-panel session)))
+      (unless (epub-reader-panel-hide panel)
+        (setf (epub-reader-session-panel session) nil
+              (epub-reader-session-panel-view session) nil)
+        (epub-reader-ui--close-layout-role reader 'panel)))))
+
+(defun epub-reader-ui--display-panel-buffer
+    (group buffer placement _reader-window)
+  "Display BUFFER for GROUP through the ordinary panel layout adapter."
+  (if (eq placement 'bottom)
+      (epub-reader-layout-display-side-buffer
+       group buffer 'panel 'bottom 0 epub-reader-panel-height 0 0)
+    (epub-reader-layout-display-side-buffer
+     group buffer 'panel 'right 0
+     (max epub-reader-toc-width epub-reader-list-width)
+     epub-reader-reader-min-width epub-reader-side-min-width)))
+
+(defun epub-reader-ui--focus-panel-view
+    (reader session group buffer view)
+  "Show BUFFER as SESSION's VIEW in its single reusable panel host."
+  (let ((panel (epub-reader-session-panel session)))
+    (setf (epub-reader-session-panel-view session) view)
+    (if (epub-reader-panel-live-p panel)
+        (progn
+          (epub-reader-panel-set-buffer panel buffer)
+          (epub-reader-panel-focus panel))
+      (let ((reader-window (get-buffer-window reader t)))
+        (unless (window-live-p reader-window)
+          (user-error "The EPUB reader is not displayed"))
+        (setq panel
+              (let ((epub-reader-panel-width
+                     (max epub-reader-toc-width epub-reader-list-width)))
+                (epub-reader-panel-open
+                 buffer reader-window
+                 (lambda (panel-buffer placement origin)
+                   (epub-reader-ui--display-panel-buffer
+                    group panel-buffer placement origin))
+                 (lambda (_panel-window)
+                   (epub-reader-layout-close-role group 'panel))
+                 'right)))
+        (setf (epub-reader-session-panel session) panel)
+        (epub-reader-panel-focus panel)))))
 
 (defun epub-reader-ui--decode-values (values decoder kind)
   "Decode plain VALUES with DECODER, warning and skipping invalid KIND values."
@@ -481,9 +925,34 @@ Set only when the book took over the frame on opening.")
             end (1+ end)))
     end))
 
-(defun epub-reader-ui--chunk-range (blocks target-index &optional small-budget)
+(defun epub-reader-ui--chunk-start
+    (blocks end &optional max-blocks max-characters)
+  "Return inclusive chunk start in BLOCKS before END under both budgets."
+  (let ((start end)
+        (characters 0)
+        (block-limit (or max-blocks epub-reader-chunk-max-blocks))
+        (character-limit
+         (or max-characters epub-reader-chunk-max-characters)))
+    (while (and (> start 0)
+                (< (- end start) block-limit)
+                (or (= start end)
+                    (<= (+ characters
+                           (length
+                            (epub-reader-block-text
+                             (aref blocks (1- start)))))
+                        character-limit)))
+      (setq start (1- start)
+            characters
+            (+ characters
+               (length (epub-reader-block-text (aref blocks start))))))
+    start))
+
+(defun epub-reader-ui--chunk-range
+    (blocks target-index &optional small-budget current-range direction)
   "Return a budgeted range containing TARGET-INDEX.
-SMALL-BUDGET may be `first' for chapter entry or `scroll' for a cold shift."
+SMALL-BUDGET may be `first' for chapter entry, `restore' for restored
+progress, or `scroll' for a cold shift.  With CURRENT-RANGE and DIRECTION, a
+scroll range adds coverage beyond that edge and retains overlapping context."
   (let* ((length (length blocks))
          (target (max 0 (min target-index (max 0 (1- length)))))
          (max-blocks
@@ -497,15 +966,48 @@ SMALL-BUDGET may be `first' for chapter entry or `scroll' for a cold shift."
          (start
           (max 0
                (- target
-                  (if small-budget
-                      (/ (max 1 max-blocks) 2)
-                    (epub-reader-ui--overscan-blocks)))))
+                  (if (eq small-budget 'restore)
+                      0
+                    (if small-budget
+                        (/ (max 1 max-blocks) 2)
+                      (epub-reader-ui--overscan-blocks))))))
          (end (epub-reader-ui--chunk-end
                blocks start max-blocks max-characters)))
-    (when (>= target end)
+    (cond
+     ((and (eq small-budget 'scroll) current-range direction)
+      (let ((addition-blocks
+             (max max-blocks
+                  (max 1 (/ (1+ epub-reader-chunk-guard-blocks) 2)))))
+        (pcase direction
+          ('forward
+           (let* ((current-start (car current-range))
+                  (current-end (cadr current-range))
+                  (next-end
+                   (epub-reader-ui--chunk-end
+                    blocks current-end addition-blocks max-characters)))
+             (if (= next-end current-end)
+                 (setq start current-start end current-end)
+               (setq start
+                     (min target
+                          (epub-reader-ui--chunk-start blocks next-end))
+                     end next-end))))
+          ('backward
+           (let* ((current-start (car current-range))
+                  (current-end (cadr current-range))
+                  (next-start
+                   (epub-reader-ui--chunk-start
+                    blocks current-start addition-blocks max-characters)))
+             (if (= next-start current-start)
+                 (setq start current-start end current-end)
+               (setq start next-start
+                     end
+                     (max (1+ target)
+                          (epub-reader-ui--chunk-end
+                           blocks next-start)))))))))
+     ((>= target end)
       (setq start target
             end (epub-reader-ui--chunk-end
-                 blocks start max-blocks max-characters)))
+                 blocks start max-blocks max-characters))))
     (list start end)))
 
 (defun epub-reader-ui--state-with-chunk (state start end)
@@ -550,6 +1052,19 @@ current when it runs, so it also covers this request."
     (epub-reader-ui--arm-background-work
      session (or (epub-reader-session-background-generation session) 0))))
 
+(defun epub-reader-ui--queue-expand-job (session index)
+  "Queue one idle full-budget expansion for SESSION chapter INDEX."
+  (unless (cl-some
+           (lambda (job)
+             (and (eq (car job) 'expand) (= (cadr job) index)))
+           (epub-reader-session-background-jobs session))
+    (setf (epub-reader-session-background-jobs session)
+          (append (epub-reader-session-background-jobs session)
+                  (list (list 'expand index)))))
+  (unless (timerp (epub-reader-session-background-timer session))
+    (epub-reader-ui--arm-background-work
+     session (or (epub-reader-session-background-generation session) 0))))
+
 (defun epub-reader-ui--background-image-job
     (session index start end)
   "Materialize SESSION images in INDEX block range START to END."
@@ -577,15 +1092,16 @@ current when it runs, so it also covers this request."
                      ;; retryable and let the next scheduled chapter visit try.
                      (message "%s" (error-message-string error-data)))))
       (when changed
-        (textui-refresh-region
-         (current-buffer) 'chapter #'epub-reader-ui--chapter-elements)
+        (textui-reconcile-keyed-region
+         (current-buffer) 'chapter #'epub-reader-ui--chapter-keyed-entries)
         (epub-reader-ui--post-render (current-buffer))))))
 
 (defun epub-reader-ui--background-expand-job (session index)
   "Expand SESSION's first-paint chunk for spine INDEX to its full budget."
   (when (= index (epub-reader-ui--state-value :spine-index))
     (let* ((blocks (epub-reader-ui--current-blocks session))
-           (locator (epub-reader-locator-at-point index))
+           (locator
+            (epub-reader-ui--locator-at-reading-row index (point)))
            (target
             (or (and locator
                      (gethash (epub-reader-locator-block locator)
@@ -875,13 +1391,34 @@ and finally a chapter number in the publication's language."
       0))
 
 (defun epub-reader-ui--restore-progress ()
-  "Resolve pending saved progress and report exact or degraded quality."
+  "Resolve pending progress into a useful bounded chunk and report quality."
   (let ((locator (plist-get textui-state :pending-locator)))
     (when locator
-      (let* ((target
-              (epub-reader-ui--restore-target-index
-               (epub-reader-ui--current-session) locator))
+      (let* ((session (epub-reader-ui--current-session))
+             (blocks (epub-reader-ui--current-blocks session))
+             (target (epub-reader-ui--restore-target-index session locator))
              (_visible (epub-reader-ui--ensure-block-visible target))
+             (initial-resolution (epub-reader-locator-goto locator))
+             (position
+              (epub-reader-locator-resolution-position initial-resolution))
+             (source
+              (and position
+                   (get-text-property position 'epub-reader-source)))
+             (resolved-target
+              (or (and (epub-reader-locator-source-p source)
+                       (gethash (aref source 1)
+                                (epub-reader-ui--current-block-index session)))
+                  target))
+             (range
+              (epub-reader-ui--chunk-range
+               blocks resolved-target 'restore))
+             (_restored-chunk
+              (unless (and (= (car range)
+                              (plist-get textui-state :chunk-start))
+                           (= (cadr range)
+                              (plist-get textui-state :chunk-end)))
+                (epub-reader-ui--refresh-chunk
+                 (car range) (cadr range))))
              (resolution (epub-reader-locator-goto locator))
              (quality (epub-reader-locator-resolution-quality resolution)))
         (setq textui-state
@@ -981,34 +1518,18 @@ remap does not leave image slices measured in unscaled frame rows."
 
 (defun epub-reader-ui--annotation-spans-by-block (session chapter)
   "Resolve SESSION annotations against CHAPTER and index their source spans."
-  (let ((blocks (epub-reader-chapter-data-blocks chapter))
-        (locator-index (epub-reader-chapter-data-locator-index chapter))
-        (table (make-hash-table :test #'equal)))
-    (dolist (annotation (epub-reader-session-annotations session))
-      (let* ((range (epub-reader-annotation-range annotation))
-             (start (epub-reader-locator-range-start range))
-             (section-path
-              (and (> (length blocks) 0)
-                   (epub-reader-block-document-path (aref blocks 0)))))
-        (when (equal (epub-reader-locator-path start) section-path)
-          (let* ((resolution
-                  (epub-reader-locator-range-resolve range locator-index))
-                 (quality
-                  (epub-reader-locator-range-resolution-quality resolution)))
-            (setf (epub-reader-annotation-quality annotation) quality)
-            (dolist (span
-                     (epub-reader-locator-range-resolution-spans resolution))
-              (let ((value
-                     (list :start (nth 1 span) :end (nth 2 span)
-                           :id (epub-reader-annotation-id annotation)
-                           :quality quality
-                           :note (epub-reader-annotation-note annotation))))
-                (puthash (car span)
-                         (cons value (gethash (car span) table)) table)))))))
-    table))
+  (let ((blocks (epub-reader-chapter-data-blocks chapter)))
+    (if (= (length blocks) 0)
+        (make-hash-table :test #'equal)
+      (let ((spine-index
+             (epub-reader-block-spine-index (aref blocks 0))))
+        (epub-reader-annotation-index-chapter-spans
+         (epub-reader-session-annotation-index session)
+         spine-index spine-index
+         (epub-reader-chapter-data-locator-index chapter))))))
 
-(defun epub-reader-ui--chapter-elements (available-width)
-  "Return the current budgeted chapter region at AVAILABLE-WIDTH."
+(defun epub-reader-ui--chapter-keyed-entries (available-width)
+  "Return keyed current-chapter block elements at AVAILABLE-WIDTH."
   (let* ((session (epub-reader-ui--current-session))
          (chapter (epub-reader-ui--current-chapter session))
          (blocks (epub-reader-chapter-data-blocks chapter))
@@ -1017,22 +1538,40 @@ remap does not leave image slices measured in unscaled frame rows."
          (image-rows (epub-reader-ui--image-row-budget))
          (highlights (epub-reader-ui--annotation-spans-by-block
                       session chapter))
-         elements)
+         entries)
     (cl-loop for index from start below (min end (length blocks))
-             do (push (epub-reader-render-block-element
-                       (aref blocks index)
-                       (epub-reader-session-publication session)
-                       (epub-reader-chapter-data-section
-                        (epub-reader-ui--current-chapter session))
-                       image-rows t
-                       (gethash (epub-reader-block-key (aref blocks index))
-                                highlights))
-                      elements))
+             for block = (aref blocks index)
+             for element = (epub-reader-render-block-element
+                            block
+                            (epub-reader-session-publication session)
+                            (epub-reader-chapter-data-section chapter)
+                            image-rows t
+                            (gethash (epub-reader-block-key block) highlights)
+                            (list
+                             (epub-reader-block-document-path block)
+                             (epub-reader-block-key block)
+                             (gethash (epub-reader-block-key block)
+                                      highlights)))
+             do (push
+                 (list (epub-reader-block-key block)
+                       (epub-reader-ui--centered-column
+                        available-width (list element)))
+                 entries))
     (setf (epub-reader-session-producer-block-count session)
-          (length elements))
-    (list (epub-reader-ui--centered-column
-           available-width (nreverse elements)
-           (max 0 epub-reader-paragraph-spacing)))))
+          (length entries))
+    (nreverse entries)))
+
+(defun epub-reader-ui--chapter-elements (available-width)
+  "Return current budgeted chapter children at AVAILABLE-WIDTH."
+  (mapcar #'cadr
+          (epub-reader-ui--chapter-keyed-entries available-width)))
+
+(defun epub-reader-ui--chapter-region (available-width)
+  "Return the refreshable chapter container for AVAILABLE-WIDTH."
+  (list :type :flex :direction :column
+        :layout '(:refresh-id chapter)
+        :gap (max 0 epub-reader-paragraph-spacing)
+        :children (epub-reader-ui--chapter-elements available-width)))
 
 (defun epub-reader-ui--attach-link-actions (&optional buffer)
   "Install UI-owned interaction properties on hyperlink runs in BUFFER."
@@ -1118,7 +1657,8 @@ can make the final slices appear to overlap following content."
           (add-text-properties
            (1+ last-source) (point-max) '(epub-reader-chrome t))
           (goto-char first-source)
-          (while (<= (line-beginning-position) last-source)
+          (while (and (not (eobp))
+                      (<= (line-beginning-position) last-source))
             (let ((line-start (line-beginning-position))
                   (line-end (line-end-position))
                   line-first line-last)
@@ -1173,18 +1713,19 @@ can make the final slices appear to overlap following content."
          (lambda ()
            (epub-reader-ui--cancel-progress-timer session)
            (setf (epub-reader-session-progress-callback session) nil)))))
-    (list
-     (list
-      :type :flex :direction :column :gap 1
-      :children
-      (list
-       (epub-reader-ui--centered-column
-        available-width (list (epub-reader-ui--header publication index)))
-       (list :type :flex :direction :column :gap 0
-             :layout '(:refresh-id chapter)
-             :children (epub-reader-ui--chapter-elements available-width))
-       (epub-reader-ui--centered-column
-        available-width (list (epub-reader-ui--footer))))))))
+    (let ((chapter (epub-reader-ui--chapter-region available-width)))
+      (if (< available-width epub-reader-ui--minimum-chrome-width)
+          (list chapter)
+        (list
+         (list
+          :type :flex :direction :column :gap 1
+          :children
+          (list
+           (epub-reader-ui--centered-column
+            available-width (list (epub-reader-ui--header publication index)))
+           chapter
+           (epub-reader-ui--centered-column
+            available-width (list (epub-reader-ui--footer))))))))))
 
 (defun epub-reader-ui--first-source-position ()
   "Return the first source-backed position in the current buffer."
@@ -1227,6 +1768,47 @@ can make the final slices appear to overlap following content."
       (with-selected-window window
         (recenter 0)))))
 
+(defun epub-reader-ui--locator-at-reading-row (index position)
+  "Return the locator at POSITION or on its centered source row for INDEX."
+  (cl-labels
+      ((valid-source-position-p
+        (cursor)
+        (let* ((source (get-text-property cursor 'epub-reader-source))
+               (block-index
+                (and (epub-reader-locator-source-p source)
+                     (gethash
+                      (aref source 1)
+                      (epub-reader-ui--current-block-index))))
+               (block
+                (and block-index
+                     (aref (epub-reader-ui--current-blocks) block-index))))
+          (and block
+               (< (aref source 2)
+                  (length (epub-reader-block-text block)))))))
+    (let ((found (and (valid-source-position-p position) position)))
+      (unless found
+        (save-excursion
+          (goto-char position)
+          (let ((ranges
+                 (list (cons (line-beginning-position) (line-end-position))
+                       (save-excursion
+                         (forward-line 1)
+                         (cons (line-beginning-position) (line-end-position)))
+                       (save-excursion
+                         (forward-line -1)
+                         (cons (line-beginning-position) (line-end-position))))))
+            (while (and ranges (not found))
+              (let ((cursor (caar ranges))
+                    (end (cdar ranges)))
+                (while (and (< cursor end) (not found))
+                  (when (valid-source-position-p cursor)
+                    (setq found cursor))
+                  (setq cursor (1+ cursor))))
+              (setq ranges (cdr ranges))))))
+      (and found
+           (epub-reader-locator-at-point
+            index found (current-buffer))))))
+
 (defun epub-reader-ui--capture-view-state ()
   "Capture point and top semantic positions for all visible windows."
   (let ((index (epub-reader-ui--state-value :spine-index))
@@ -1237,15 +1819,15 @@ can make the final slices appear to overlap following content."
           (push
            (epub-reader-viewport--create
             :window window
-            :point-locator (epub-reader-locator-at-point
-                            index window-point (current-buffer))
-            :top-locator (epub-reader-locator-at-point
-                          index (window-start window) (current-buffer))
+            :point-locator (epub-reader-ui--locator-at-reading-row
+                            index window-point)
+            :top-locator (epub-reader-ui--locator-at-reading-row
+                          index (window-start window))
             :visual-row (count-screen-lines
                          (window-start window) window-point nil window))
            viewports))))
     (epub-reader-view-state--create
-     :point-locator (epub-reader-locator-at-point index)
+     :point-locator (epub-reader-ui--locator-at-reading-row index (point))
      :viewports (nreverse viewports))))
 
 (defun epub-reader-ui--restore-window-visual-row (window position desired-row)
@@ -1330,10 +1912,11 @@ change both paragraph wrapping and the number of physical image slice rows."
             (force-mode-line-update t))
         (setf (epub-reader-session-refreshing-p session) nil)))))
 
-(defun epub-reader-ui--refresh-chunk (start end)
+(defun epub-reader-ui--refresh-chunk (start end &optional expand)
   "Synchronously replace the chapter region with block range START to END.
-Every source-order change captures and restores reader locators and visual
-window rows; TextUI's internal focus identity is not an EPUB position."
+Reader locators preserve point and visual rows while keyed TextUI
+reconciliation retains the overlapping source blocks.
+When EXPAND is non-nil, queue a later full-budget expansion around point."
   (let* ((session (epub-reader-ui--current-session))
          (view-state (epub-reader-ui--capture-view-state))
          (buffer (current-buffer)))
@@ -1345,13 +1928,17 @@ window rows; TextUI's internal focus identity is not an EPUB position."
             ;; synchronous so semantic restoration can happen after commit.
             (setq textui-state
                   (epub-reader-ui--state-with-chunk textui-state start end))
-            (textui-refresh-region
-             buffer 'chapter #'epub-reader-ui--chapter-elements)
+            (textui-reconcile-keyed-region
+             buffer 'chapter #'epub-reader-ui--chapter-keyed-entries)
             (epub-reader-ui--post-render buffer)
+            (when expand
+              (epub-reader-ui--queue-expand-job
+               session (epub-reader-ui--state-value :spine-index)))
             (epub-reader-ui--queue-image-job
              session (epub-reader-ui--state-value :spine-index) start end)
             (when view-state
-              (epub-reader-ui--restore-view-state view-state)))
+              (epub-reader-ui--restore-view-state view-state))
+            (force-mode-line-update t))
         (setf (epub-reader-session-refreshing-p session) nil)))
     buffer))
 
@@ -1362,10 +1949,17 @@ window rows; TextUI's internal focus identity is not an EPUB position."
          (start (plist-get textui-state :chunk-start))
          (end (plist-get textui-state :chunk-end)))
     (unless (and (<= start block-index) (< block-index end))
-      (pcase-let ((`(,next-start ,next-end)
-                   (epub-reader-ui--chunk-range
-                    blocks block-index 'scroll)))
-        (epub-reader-ui--refresh-chunk next-start next-end)))))
+      (let* ((direction (if (< block-index start) 'backward 'forward))
+             (range
+              (epub-reader-ui--chunk-range
+               blocks block-index 'scroll (list start end) direction)))
+        ;; Semantic jumps may be far beyond the adjacent scroll addition.
+        ;; Give those targets a useful bounded first paint of their own.
+        (unless (and (<= (car range) block-index)
+                     (< block-index (cadr range)))
+          (setq range
+                (epub-reader-ui--chunk-range blocks block-index 'restore)))
+        (epub-reader-ui--refresh-chunk (car range) (cadr range) t)))))
 
 (defun epub-reader-ui--inside-chunk-guard-p
     (block-index start end block-count)
@@ -1375,12 +1969,38 @@ window rows; TextUI's internal focus identity is not an EPUB position."
       (and (< end block-count)
            (<= (- end block-index) epub-reader-chunk-guard-blocks))))
 
-(defun epub-reader-ui--maybe-shift-chunk ()
+(defun epub-reader-ui--source-near-viewport-edge (direction)
+  "Return source nearest the selected viewport edge in DIRECTION."
+  (let ((window (selected-window)))
+    (when (eq (window-buffer window) (current-buffer))
+      (pcase direction
+        ('forward
+         (let ((position
+                (save-excursion
+                  (goto-char (window-start window))
+                  (vertical-motion (1- (window-body-height window)) window)
+                  (line-end-position)))
+               source)
+           (while (and (> position (point-min)) (not source))
+             (setq position (1- position)
+                   source (get-text-property position 'epub-reader-source)))
+           (and (epub-reader-locator-source-p source) source)))
+        ('backward
+         (let ((position (window-start window)) source)
+           (while (and (< position (point-max)) (not source))
+             (setq source (get-text-property position 'epub-reader-source)
+                   position (1+ position)))
+           (and (epub-reader-locator-source-p source) source)))))))
+
+(defun epub-reader-ui--maybe-shift-chunk (&optional direction)
   "Shift the chapter window when point approaches a rendered chunk edge."
   (when (and epub-reader-ui-mode
              (epub-reader-session-p epub-reader-ui--session)
              (not (epub-reader-session-refreshing-p epub-reader-ui--session)))
-    (let* ((source (epub-reader-locator-source-at-point))
+    (let* ((source
+            (or (and direction
+                     (epub-reader-ui--source-near-viewport-edge direction))
+                (epub-reader-locator-source-at-point)))
            (block-index
             (and source
                  (gethash
@@ -1389,18 +2009,41 @@ window rows; TextUI's internal focus identity is not an EPUB position."
            (start (plist-get textui-state :chunk-start))
            (end (plist-get textui-state :chunk-end))
            (length (length
-                    (epub-reader-ui--current-blocks))))
+                    (epub-reader-ui--current-blocks)))
+           (left-guard
+            (and block-index (> start 0)
+                 (<= (- block-index start)
+                     epub-reader-chunk-guard-blocks)))
+           (right-guard
+            (and block-index (< end length)
+                 (<= (- end block-index)
+                     epub-reader-chunk-guard-blocks)))
+           (direction
+            (or direction
+                (cond
+                 ((and left-guard right-guard)
+                  (if (< (- block-index start)
+                         (- (1- end) block-index))
+                      'backward
+                    'forward))
+                 (left-guard 'backward)
+                 (right-guard 'forward)))))
       (when (and block-index
-                 (epub-reader-ui--inside-chunk-guard-p
-                  block-index start end length))
+                 direction
+                 (if (eq direction 'backward)
+                     left-guard
+                   right-guard))
         (pcase-let ((`(,next-start ,next-end)
                      (epub-reader-ui--chunk-range
                       (epub-reader-ui--current-blocks)
-                      block-index 'scroll)))
-          ;; A smaller range that adds no new source only discards context and
-          ;; can make the captured visual row physically impossible to keep.
-          (unless (and (>= next-start start) (<= next-end end))
-            (epub-reader-ui--refresh-chunk next-start next-end)))))))
+                      block-index 'scroll (list start end) direction)))
+          ;; Never discard context unless the chosen edge gains new source.
+          (when (if (eq direction 'backward)
+                    (< next-start start)
+                  (> next-end end))
+            (epub-reader-ui--refresh-chunk
+             next-start next-end
+             (< (- end start) epub-reader-chunk-max-blocks))))))))
 
 (defun epub-reader-ui--goto-start (&optional fragment)
   "Move to current chapter's FRAGMENT or first source position."
@@ -1448,13 +2091,11 @@ window rows; TextUI's internal focus identity is not an EPUB position."
       position)))
 
 (defun epub-reader-ui--refresh-toc-buffer ()
-  "Refresh the session TOC buffer while preserving its selected row."
-  (let ((toc-buffer
-         (epub-reader-session-toc-buffer
-          (epub-reader-ui--current-session))))
-    (when (buffer-live-p toc-buffer)
-      (with-current-buffer toc-buffer
-        (epub-reader-toc--refresh)))))
+  "Refresh the panel while it shows the TOC, preserving its selected row."
+  (when-let* ((buffer (epub-reader-ui--panel-view-buffer
+                       (epub-reader-ui--current-session) 'toc)))
+    (with-current-buffer buffer
+      (epub-reader-toc--refresh))))
 
 (defun epub-reader-ui--switch-chapter
     (index &optional fragment no-history at-end)
@@ -1556,6 +2197,9 @@ window rows; TextUI's internal focus identity is not an EPUB position."
 (defun epub-reader-scroll-forward ()
   "Scroll forward, shifting chunks or advancing at chapter end."
   (interactive)
+  ;; Add the next overscan before `scroll-up-command' reaches the temporary
+  ;; chunk footer; point can be on chrome rather than source after that error.
+  (epub-reader-ui--maybe-shift-chunk 'forward)
   (condition-case nil
       (scroll-up-command)
     (end-of-buffer
@@ -1572,11 +2216,12 @@ window rows; TextUI's internal focus identity is not an EPUB position."
         ((< (1+ index) count)
          (epub-reader-ui--switch-chapter (1+ index)))
         (t (user-error "End of publication"))))))
-  (epub-reader-ui--maybe-shift-chunk))
+  (epub-reader-ui--maybe-shift-chunk 'forward))
 
 (defun epub-reader-scroll-backward ()
   "Scroll backward, shifting chunks or moving to the previous chapter end."
   (interactive)
+  (epub-reader-ui--maybe-shift-chunk 'backward)
   (condition-case nil
       (scroll-down-command)
     (beginning-of-buffer
@@ -1588,7 +2233,7 @@ window rows; TextUI's internal focus identity is not an EPUB position."
         ((> index 0)
          (epub-reader-ui--switch-chapter (1- index) nil nil t))
         (t (user-error "Beginning of publication"))))))
-  (epub-reader-ui--maybe-shift-chunk))
+  (epub-reader-ui--maybe-shift-chunk 'backward))
 
 (defun epub-reader-ui--href-at-point ()
   "Return EPUB href text property at or immediately before point."
@@ -1608,6 +2253,7 @@ window rows; TextUI's internal focus identity is not an EPUB position."
 
 (defun epub-reader-ui--jump-to-target (path fragment)
   "Navigate current reader to spine PATH and optional FRAGMENT."
+  (epub-reader-ui--select-reader-window (current-buffer))
   (let* ((session (epub-reader-ui--current-session))
          (publication (epub-reader-session-publication session))
          (index (epub-reader-ui--spine-index-for-path publication path)))
@@ -1618,13 +2264,6 @@ window rows; TextUI's internal focus identity is not an EPUB position."
           (epub-reader-ui--record-history)
           (epub-reader-ui--goto-start fragment))
       (epub-reader-ui--switch-chapter index fragment))))
-
-(defun epub-reader-toc--reader-session ()
-  "Return the live reader session controlled by the current TOC buffer."
-  (unless (buffer-live-p epub-reader-toc--reader-buffer)
-    (user-error "The EPUB reader buffer has been closed"))
-  (with-current-buffer epub-reader-toc--reader-buffer
-    (epub-reader-ui--current-session)))
 
 (defun epub-reader-toc--rows
     (entries collapsed current-path &optional prefix depth)
@@ -1698,7 +2337,7 @@ line aligned under its first character instead of at the window edge."
 
 (defun epub-reader-toc-frame (_available-width)
   "Return the secondary TextUI table-of-contents frame."
-  (let* ((session (epub-reader-toc--reader-session))
+  (let* ((session (epub-reader-ui--panel-reader-session))
          (publication (epub-reader-session-publication session))
          (current-path (epub-reader-section-path
                         (epub-reader-ui--current-section session)))
@@ -1727,6 +2366,25 @@ carries no properties, so the row is also looked up at the line's end."
   "Return buffer position of visible TOC row KEY."
   (cl-loop for position from (point-min) below (point-max)
            when (equal (get-text-property position 'epub-reader-toc-key) key)
+           return position))
+
+(defun epub-reader-toc--current-key ()
+  "Return the first full-hierarchy TOC key for the current chapter."
+  (let* ((session (epub-reader-ui--panel-reader-session))
+         (publication (epub-reader-session-publication session))
+         (current-path (epub-reader-section-path
+                        (epub-reader-ui--current-section session))))
+    (cl-loop for row in (epub-reader-toc--rows
+                         (epub-reader-publication-toc publication)
+                         nil current-path)
+             when (epub-reader-toc-row-current-p row)
+             return (epub-reader-toc-row-key row))))
+
+(defun epub-reader-toc--current-position ()
+  "Return buffer position of the visible current-chapter row."
+  (cl-loop for position from (point-min) below (point-max)
+           for row = (get-text-property position 'epub-reader-toc-row)
+           when (and row (epub-reader-toc-row-current-p row))
            return position))
 
 (defun epub-reader-toc--fallback-position (key)
@@ -1768,8 +2426,36 @@ carries no properties, so the row is also looked up at the line's end."
     (setq textui-state
           (plist-put (copy-sequence textui-state) :selected-key key))
     (textui-refresh (current-buffer))
+    (when (buffer-live-p epub-reader-ui--panel-view-reader)
+      (with-current-buffer epub-reader-ui--panel-view-reader
+        (epub-reader-ui--refit-panel-view
+         (epub-reader-ui--current-session) 'toc)))
     (epub-reader-toc--restore-selection
      (get-buffer-window (current-buffer) t))))
+
+(defun epub-reader-toc--select-current (window)
+  "Reveal and select the current chapter row, updating WINDOW point.
+Return nil without changing selection or folding when the spine item has no
+TOC entry."
+  (when-let* ((key (epub-reader-toc--current-key)))
+    (let* ((collapsed (plist-get textui-state :collapsed))
+           (revealed
+            (cl-remove-if
+             (lambda (candidate)
+               (string-prefix-p (concat candidate "/") key))
+             collapsed)))
+      (setq textui-state
+            (plist-put
+             (plist-put (copy-sequence textui-state)
+                        :collapsed revealed)
+             :selected-key key))
+      (unless (equal collapsed revealed)
+        (textui-refresh (current-buffer))
+        (when (buffer-live-p epub-reader-ui--panel-view-reader)
+          (with-current-buffer epub-reader-ui--panel-view-reader
+            (epub-reader-ui--refit-panel-view
+             (epub-reader-ui--current-session) 'toc))))
+      (epub-reader-toc--restore-selection window))))
 
 (defun epub-reader-toc-quit ()
   "Hide the TOC after saving its selected stable row key."
@@ -1779,37 +2465,74 @@ carries no properties, so the row is also looked up at the line's end."
       (setq textui-state
             (plist-put (copy-sequence textui-state) :selected-key
                        (epub-reader-toc-row-key row)))))
-  (delete-windows-on (current-buffer) t))
+  (let ((reader epub-reader-ui--panel-view-reader))
+    (if (buffer-live-p reader)
+        (epub-reader-ui--hide-session-panel reader)
+      (quit-restore-window (selected-window)))))
 
 (defun epub-reader-toc-toggle ()
-  "Toggle the TOC subtree at point."
+  "Toggle the TOC subtree at point, or move past a panel tab."
   (interactive)
   (let* ((row (epub-reader-toc--row-at-point))
          (entry (and row (epub-reader-toc-row-entry row))))
-    (unless (and row (epub-reader-toc-entry-children entry))
+    (cond
+     ((widget-at (point)) (widget-forward 1))
+     ((not (and row (epub-reader-toc-entry-children entry)))
       (user-error "TOC entry has no children"))
-    (let* ((key (epub-reader-toc-row-key row))
-           (collapsed (copy-sequence (plist-get textui-state :collapsed))))
-      (setq textui-state
-            (plist-put
-             (copy-sequence textui-state) :collapsed
-             (if (member key collapsed)
-                 (delete key collapsed)
-               (cons key collapsed))))
-      (epub-reader-toc--refresh))))
+     (t
+      (let* ((key (epub-reader-toc-row-key row))
+             (collapsed (copy-sequence (plist-get textui-state :collapsed))))
+        (setq textui-state
+              (plist-put
+               (copy-sequence textui-state) :collapsed
+               (if (member key collapsed)
+                   (delete key collapsed)
+                 (cons key collapsed))))
+        (epub-reader-toc--refresh))))))
+
+(defun epub-reader-toc--navigate-chapter (command)
+  "Run reader chapter COMMAND and select the newly current TOC row."
+  (let* ((toc-buffer (current-buffer))
+         (toc-window
+          (or (and (eq (window-buffer (selected-window)) toc-buffer)
+                   (selected-window))
+              (get-buffer-window toc-buffer t)))
+         (reader epub-reader-ui--panel-view-reader))
+    (unless (buffer-live-p reader)
+      (user-error "The EPUB reader buffer has been closed"))
+    (unwind-protect
+        (progn
+          (epub-reader-ui--select-reader-window reader)
+          (with-current-buffer reader
+            (funcall command))
+          (epub-reader-toc--select-current toc-window))
+      (when (and (window-live-p toc-window)
+                 (eq (window-buffer toc-window) toc-buffer))
+        (select-window toc-window)))))
+
+(defun epub-reader-toc-next-chapter ()
+  "Move the reader to its next chapter and track it in the TOC."
+  (interactive)
+  (epub-reader-toc--navigate-chapter #'epub-reader-next-chapter))
+
+(defun epub-reader-toc-previous-chapter ()
+  "Move the reader to its previous chapter and track it in the TOC."
+  (interactive)
+  (epub-reader-toc--navigate-chapter #'epub-reader-previous-chapter))
 
 (defun epub-reader-toc-activate ()
-  "Jump to the TOC target at point, or fold a targetless group."
+  "Press the panel tab at point, jump to the TOC target, or fold a group."
   (interactive)
-  (let* ((row (epub-reader-toc--row-at-point))
-         (entry (and row (epub-reader-toc-row-entry row))))
-    (unless row (user-error "No TOC entry at point"))
-    (if (not (epub-reader-toc-entry-path entry))
-        (epub-reader-toc-toggle)
-      (with-current-buffer epub-reader-toc--reader-buffer
-        (epub-reader-ui--jump-to-target
-         (epub-reader-toc-entry-path entry)
-         (epub-reader-toc-entry-fragment entry))))))
+  (unless (epub-reader-ui--press-panel-widget)
+    (let* ((row (epub-reader-toc--row-at-point))
+           (entry (and row (epub-reader-toc-row-entry row))))
+      (unless row (user-error "No TOC entry at point"))
+      (if (not (epub-reader-toc-entry-path entry))
+          (epub-reader-toc-toggle)
+        (with-current-buffer epub-reader-ui--panel-view-reader
+          (epub-reader-ui--jump-to-target
+           (epub-reader-toc-entry-path entry)
+           (epub-reader-toc-entry-fragment entry)))))))
 
 (defun epub-reader-toc-activate-mouse (event)
   "Move to mouse EVENT and activate the TOC row there."
@@ -1818,43 +2541,9 @@ carries no properties, so the row is also looked up at the line's end."
   (epub-reader-toc-activate))
 
 (defun epub-reader-toc ()
-  "Display this reader's hierarchical TextUI table of contents."
+  "Open and focus this reader's hierarchical table of contents."
   (interactive)
-  (let* ((reader (current-buffer))
-         (session (epub-reader-ui--current-session))
-         (existing (epub-reader-session-toc-buffer session)))
-    (if (buffer-live-p existing)
-        (let ((_hidden (delete-windows-on existing t))
-              (window
-               (display-buffer existing '(display-buffer-in-side-window
-                                          (side . left)
-                                          (window-width . 34)))))
-          (with-current-buffer existing
-            (epub-reader-toc--restore-selection window))
-          existing)
-      (let* ((epub-reader-toc--reader-buffer reader)
-            (buffer
-             (textui-open
-              (generate-new-buffer-name
-               (format "*EPUB TOC: %s*"
-                       (epub-reader-publication-title
-                        (epub-reader-session-publication session))))
-              #'epub-reader-toc-frame
-              '(:collapsed nil :selected-key nil))))
-        (with-current-buffer buffer
-          (setq-local epub-reader-toc--reader-buffer reader)
-          (epub-reader-toc-mode 1))
-        (setf (epub-reader-session-toc-buffer session) buffer)
-        ;; `textui-open' may choose an ordinary display window.  The reader
-        ;; owns the sole TOC presentation and always recreates it at the side.
-        (delete-windows-on buffer t)
-        (let ((window
-               (display-buffer buffer '(display-buffer-in-side-window
-                                        (side . left) (window-width . 34)))))
-          (with-current-buffer buffer
-            (epub-reader-toc--restore-selection window)))
-        buffer))))
-
+  (epub-reader-ui--show-panel-view 'toc))
 (defun epub-reader-ui--completion-entries (entries &optional prefix)
   "Return flattened completion alist for target-bearing ENTRIES."
   (cl-mapcan
@@ -1927,16 +2616,9 @@ carries no properties, so the row is also looked up at the line's end."
       (message "Bookmark saved: %s" (epub-reader-bookmark-name bookmark))
       bookmark)))
 
-(defun epub-reader-bookmark-list--session ()
-  "Return the live reader session owned by this bookmark list."
-  (unless (buffer-live-p epub-reader-bookmark-list--reader-buffer)
-    (user-error "The EPUB reader buffer has been closed"))
-  (with-current-buffer epub-reader-bookmark-list--reader-buffer
-    (epub-reader-ui--current-session)))
-
 (defun epub-reader-bookmark-list-frame (_available-width)
   "Return the TextUI frame for the current book's bookmarks."
-  (let* ((session (epub-reader-bookmark-list--session))
+  (let* ((session (epub-reader-ui--panel-reader-session))
          (publication (epub-reader-session-publication session))
          (bookmarks
           (sort (copy-sequence (epub-reader-session-bookmarks session))
@@ -1995,22 +2677,22 @@ carries no properties, so the row is also looked up at the line's end."
 
 (defun epub-reader-ui--refresh-live-bookmark-list
     (session &optional selected-id)
-  "Refresh SESSION's live bookmark list, preserving SELECTED-ID."
-  (let ((buffer (epub-reader-session-bookmark-buffer session)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (epub-reader-bookmark-list--refresh selected-id)))))
+  "Refresh SESSION's panel when it shows bookmarks, keeping SELECTED-ID."
+  (when-let* ((buffer (epub-reader-ui--panel-view-buffer session 'bookmarks)))
+    (with-current-buffer buffer
+      (epub-reader-bookmark-list--refresh selected-id))))
 
 (defun epub-reader-bookmark-list-activate ()
-  "Jump to the bookmark at point."
+  "Press the panel tab at point, or jump to the bookmark at point."
   (interactive)
-  (let ((bookmark (epub-reader-bookmark-list--at-point))
-        (reader epub-reader-bookmark-list--reader-buffer))
-    (unless bookmark (user-error "No bookmark at point"))
-    (with-current-buffer reader
-      (epub-reader-ui--record-history)
-      (epub-reader-ui--goto-locator (epub-reader-bookmark-locator bookmark)))
-    (pop-to-buffer reader)))
+  (unless (epub-reader-ui--press-panel-widget)
+    (let ((bookmark (epub-reader-bookmark-list--at-point))
+          (reader epub-reader-ui--panel-view-reader))
+      (unless bookmark (user-error "No bookmark at point"))
+      (with-current-buffer reader
+        (epub-reader-ui--record-history)
+        (epub-reader-ui--goto-locator (epub-reader-bookmark-locator bookmark)))
+      (epub-reader-ui--select-reader-window reader))))
 
 (defun epub-reader-bookmark-list-activate-mouse (event)
   "Move to mouse EVENT and jump to the bookmark there."
@@ -2022,7 +2704,7 @@ carries no properties, so the row is also looked up at the line's end."
   "Delete the bookmark at point from the sidecar."
   (interactive)
   (let* ((bookmark (epub-reader-bookmark-list--at-point))
-         (session (epub-reader-bookmark-list--session)))
+         (session (epub-reader-ui--panel-reader-session)))
     (unless bookmark (user-error "No bookmark at point"))
     (epub-reader-store-delete-bookmark
      (epub-reader-session-store session) (epub-reader-bookmark-id bookmark))
@@ -2036,35 +2718,15 @@ carries no properties, so the row is also looked up at the line's end."
 (defun epub-reader-bookmark-list-quit ()
   "Hide the bookmark list."
   (interactive)
-  (delete-windows-on (current-buffer) t))
+  (let ((reader epub-reader-ui--panel-view-reader))
+    (if (buffer-live-p reader)
+        (epub-reader-ui--hide-session-panel reader)
+      (quit-restore-window (selected-window)))))
 
 (defun epub-reader-bookmarks ()
-  "Display this book's bookmarks in a secondary TextUI buffer."
+  "Open and focus this book's bookmarks in the panel."
   (interactive)
-  (let* ((reader (current-buffer))
-         (session (epub-reader-ui--current-session))
-         (existing (epub-reader-session-bookmark-buffer session)))
-    (if (buffer-live-p existing)
-        (let ((selected
-               (with-current-buffer existing
-                 (epub-reader-bookmark-list--at-point))))
-          (epub-reader-ui--refresh-live-bookmark-list
-           session (and selected (epub-reader-bookmark-id selected)))
-          (display-buffer existing)
-          existing)
-      (let* ((epub-reader-bookmark-list--reader-buffer reader)
-             (buffer
-              (textui-open
-               (generate-new-buffer-name
-                (format "*EPUB Bookmarks: %s*"
-                        (epub-reader-publication-title
-                         (epub-reader-session-publication session))))
-               #'epub-reader-bookmark-list-frame nil)))
-        (with-current-buffer buffer
-          (setq-local epub-reader-bookmark-list--reader-buffer reader)
-          (epub-reader-bookmark-list-mode 1))
-        (setf (epub-reader-session-bookmark-buffer session) buffer)
-        buffer))))
+  (epub-reader-ui--show-panel-view 'bookmarks))
 
 (defun epub-reader-add-highlight (start end)
   "Highlight the source text in the active region from START to END."
@@ -2080,12 +2742,14 @@ carries no properties, so the row is also looked up at the line's end."
          (annotation
           (epub-reader-annotation-create
            (epub-reader-publication-book-key
-            (epub-reader-session-publication session))
+           (epub-reader-session-publication session))
            range)))
     (epub-reader-store-stage-annotation
      (epub-reader-session-store session)
      (epub-reader-annotation-to-plist annotation))
     (push annotation (epub-reader-session-annotations session))
+    (epub-reader-annotation-index-put
+     (epub-reader-session-annotation-index session) annotation)
     (epub-reader-ui--flush-reader-marks session)
     (deactivate-mark)
     (epub-reader-ui--refresh-chunk
@@ -2129,11 +2793,43 @@ carries no properties, so the row is also looked up at the line's end."
 (defun epub-reader-ui--set-annotation-note (session annotation note)
   "Set ANNOTATION's NOTE, persist it through SESSION, and return it."
   (setf (epub-reader-annotation-note annotation) note)
+  (epub-reader-annotation-index-put
+   (epub-reader-session-annotation-index session) annotation)
   (epub-reader-store-stage-annotation
    (epub-reader-session-store session)
    (epub-reader-annotation-to-plist annotation))
   (epub-reader-ui--flush-reader-marks session)
   annotation)
+
+(defun epub-reader-ui--edit-annotation-note (reader annotation)
+  "Open a note editor for ANNOTATION owned by READER."
+  (let ((annotation-id (epub-reader-annotation-id annotation)))
+    (epub-reader-note-edit
+     (epub-reader-annotation-note annotation)
+     (lambda (note)
+       (unless (buffer-live-p reader)
+         (user-error "The EPUB reader buffer has been closed"))
+       (with-current-buffer reader
+         (let* ((session (epub-reader-ui--current-session))
+                (live-annotation
+                 (epub-reader-ui--annotation-by-id session annotation-id)))
+           (unless live-annotation
+             (user-error "This EPUB highlight no longer exists"))
+           (epub-reader-ui--set-annotation-note
+            session live-annotation note)
+           (epub-reader-ui--refresh-chunk
+            (plist-get textui-state :chunk-start)
+            (plist-get textui-state :chunk-end))
+           (epub-reader-ui--refresh-live-annotation-list
+            session annotation-id)
+           (message "Highlight note saved"))))
+     reader
+     (or (with-current-buffer reader
+           (and epub-reader-ui--session
+                (epub-reader-ui--session-panel-origin-window
+                 epub-reader-ui--session)))
+         (get-buffer-window reader t))
+     annotation-id)))
 
 (defun epub-reader-edit-note ()
   "View or edit the note attached to the highlight at point."
@@ -2141,15 +2837,7 @@ carries no properties, so the row is also looked up at the line's end."
   (let* ((session (epub-reader-ui--current-session))
          (annotation (epub-reader-ui--annotation-at-point session)))
     (unless annotation (user-error "Point is not on an EPUB highlight"))
-    (epub-reader-ui--set-annotation-note
-     session annotation
-     (read-string "Highlight note: " (epub-reader-annotation-note annotation)))
-    (epub-reader-ui--refresh-chunk
-     (plist-get textui-state :chunk-start)
-     (plist-get textui-state :chunk-end))
-    (epub-reader-ui--refresh-live-annotation-list
-     session (epub-reader-annotation-id annotation))
-    (message "Highlight note saved")))
+    (epub-reader-ui--edit-annotation-note (current-buffer) annotation)))
 
 (defun epub-reader-ui--resolve-annotation (session annotation)
   "Resolve ANNOTATION against its canonical chapter in SESSION."
@@ -2161,10 +2849,22 @@ carries no properties, so the row is also looked up at the line's end."
            (epub-reader-locator-path start)))
          (resolution
           (if index
-              (epub-reader-locator-range-resolve
-               range
-               (epub-reader-chapter-data-locator-index
-                (epub-reader-ui--chapter-data session index)))
+              (let ((chapter (epub-reader-ui--chapter-data session index)))
+                (or
+                 (epub-reader-annotation-index-validate
+                  (epub-reader-session-annotation-index session)
+                  (epub-reader-annotation-id annotation)
+                  index
+                  (epub-reader-chapter-data-locator-index chapter))
+                 (progn
+                   (epub-reader-annotation-index-put
+                    (epub-reader-session-annotation-index session)
+                    annotation)
+                   (epub-reader-annotation-index-validate
+                    (epub-reader-session-annotation-index session)
+                    (epub-reader-annotation-id annotation)
+                    index
+                    (epub-reader-chapter-data-locator-index chapter)))))
             (epub-reader-locator-range-unresolved 'identity-mismatch))))
     (setf (epub-reader-annotation-quality annotation)
           (epub-reader-locator-range-resolution-quality resolution))
@@ -2222,30 +2922,13 @@ carries no properties, so the row is also looked up at the line's end."
           (message "Highlight restored from quoted text; review its position"))
         resolution))))
 
-(defun epub-reader-annotation-list--session ()
-  "Return the live reader session owned by this annotation list."
-  (unless (buffer-live-p epub-reader-annotation-list--reader-buffer)
-    (user-error "The EPUB reader buffer has been closed"))
-  (with-current-buffer epub-reader-annotation-list--reader-buffer
-    (epub-reader-ui--current-session)))
-
 (defun epub-reader-annotation-list-frame (_available-width)
   "Return annotations grouped by chapter as a TextUI frame."
-  (let* ((session (epub-reader-annotation-list--session))
+  (let* ((session (epub-reader-ui--panel-reader-session))
          (publication (epub-reader-session-publication session))
-         (annotations
-          (sort (copy-sequence (epub-reader-session-annotations session))
-                (lambda (left right)
-                  (let ((left-start (epub-reader-locator-range-start
-                                     (epub-reader-annotation-range left)))
-                        (right-start (epub-reader-locator-range-start
-                                      (epub-reader-annotation-range right))))
-                    (if (= (epub-reader-locator-spine-index left-start)
-                           (epub-reader-locator-spine-index right-start))
-                        (< (epub-reader-annotation-created left)
-                           (epub-reader-annotation-created right))
-                      (< (epub-reader-locator-spine-index left-start)
-                         (epub-reader-locator-spine-index right-start)))))))
+         (items
+          (epub-reader-annotation-index-list-items
+           (epub-reader-session-annotation-index session)))
          (children
           (list (list :type :text
                       :value
@@ -2254,58 +2937,144 @@ carries no properties, so the row is also looked up at the line's end."
                                (epub-reader-publication-title publication))
                        'face 'epub-reader-header-face))))
          previous-index)
-    (dolist (annotation annotations)
-      (epub-reader-ui--resolve-annotation session annotation)
-      (let* ((range (epub-reader-annotation-range annotation))
-             (index (epub-reader-locator-spine-index
-                     (epub-reader-locator-range-start range))))
+    (dolist (item items)
+      (let* ((annotation
+              (epub-reader-annotation-index-item-annotation item))
+             (index
+              (epub-reader-annotation-index-item-chapter-index item)))
         (unless (equal index previous-index)
-          (setq children
-                (append children
-                        (list (list :type :text
-                                    :value
-                                    (propertize
-                                     (epub-reader-ui--chapter-label
-                                      session index)
-                                     'face 'epub-reader-toc-group-face)))))
+          (push (list :type :text
+                      :value
+                      (propertize
+                       (epub-reader-ui--chapter-label session index)
+                       'face 'epub-reader-toc-group-face))
+                children)
           (setq previous-index index))
         (let* ((note (epub-reader-annotation-note annotation))
                (warning
-                (if (not (eq (epub-reader-annotation-quality annotation)
-                             'exact))
+                (if (and
+                     (epub-reader-annotation-index-item-validated-p item)
+                     (not (eq
+                           (epub-reader-annotation-index-item-quality item)
+                           'exact)))
                     "⚠ " ""))
-               (value
+               (excerpt-value
                 (propertize
-                 (format "%s“%s”%s" warning
+                 (format "%s“%s”" warning
                          (epub-reader-ui--short-text
-                          (epub-reader-locator-range-exact range) 60)
-                         (if (string-empty-p note) ""
-                           (format " — %s"
-                                   (epub-reader-ui--short-text note 48))))
+                          (epub-reader-annotation-index-item-exact item) 60))
                  'epub-reader-annotation annotation
                  'mouse-face 'highlight
                  'keymap epub-reader-annotation-row-map
-                 'help-echo "RET or mouse-1: jump; d: delete; e: edit note")))
-          (setq children
-                (append children (list (list :type :text :value value)))))))
-    (unless annotations
-      (setq children
-            (append children
-                    (list (list :type :text
-                                :value (propertize
-                                        "No highlights yet" 'face 'shadow))))))
+                 'help-echo "RET or mouse-1: jump; d: delete; e: edit note"))
+               (note-value
+                (and
+                 (not (string-empty-p note))
+                 (propertize
+                  (format "Note: %s" note)
+                  'epub-reader-annotation annotation
+                  'mouse-face 'highlight
+                  'keymap epub-reader-annotation-row-map
+                  'help-echo
+                  "RET or mouse-1: jump; d: delete; e: edit note"))))
+          (push
+           (list :type :flex :direction :column :gap 0
+                 :children
+                 (delq nil
+                       (list
+                        (list :type :text :value excerpt-value
+                              :wrap 'greedy)
+                        (and note-value
+                             (list :type :text :value note-value
+                                   :wrap 'greedy)))))
+           children))))
+    (unless items
+      (push (list :type :text
+                  :value (propertize "No highlights yet" 'face 'shadow))
+            children))
     (list (list :type :flex :direction :column :gap 1
-                :children children))))
+                :children (nreverse children)))))
 
 (defun epub-reader-annotation-list--at-point ()
-  "Return the annotation at or immediately before point."
+  "Return the annotation at point, immediately before it, or on its row."
   (or (get-text-property (point) 'epub-reader-annotation)
       (and (> (point) (point-min))
-           (get-text-property (1- (point)) 'epub-reader-annotation))))
+           (get-text-property (1- (point)) 'epub-reader-annotation))
+      (let ((position
+             (text-property-not-all
+              (line-beginning-position) (line-end-position)
+              'epub-reader-annotation nil)))
+        (and position
+             (get-text-property position 'epub-reader-annotation)))))
+
+(defun epub-reader-annotation-list--positions ()
+  "Return the first buffer position of each displayed annotation."
+  (let ((cursor (point-min))
+        (seen (make-hash-table :test #'equal))
+        positions)
+    (while (< cursor (point-max))
+      (let ((annotation
+             (get-text-property cursor 'epub-reader-annotation)))
+        (when (and annotation
+                   (not (gethash (epub-reader-annotation-id annotation)
+                                 seen)))
+          (puthash (epub-reader-annotation-id annotation) t seen)
+          (push (cons annotation cursor) positions)))
+      (setq cursor
+            (or (next-single-property-change
+                 cursor 'epub-reader-annotation nil (point-max))
+                (point-max))))
+    (nreverse positions)))
+
+(defun epub-reader-annotation-list--move (direction)
+  "Move to the annotation in DIRECTION, either `next' or `previous'."
+  (let* ((positions (epub-reader-annotation-list--positions))
+         (current (epub-reader-annotation-list--at-point))
+         (current-index
+          (and current
+               (cl-position (epub-reader-annotation-id current) positions
+                            :key (lambda (entry)
+                                   (epub-reader-annotation-id (car entry)))
+                            :test #'equal)))
+         (target
+          (cond
+           ((eq direction 'next)
+            (if current-index
+                (nth (1+ current-index) positions)
+              (cl-find-if (lambda (entry) (> (cdr entry) (point)))
+                          positions)))
+           ((eq direction 'previous)
+            (if current-index
+                (and (> current-index 0)
+                     (nth (1- current-index) positions))
+              (car (last (cl-remove-if-not
+                          (lambda (entry) (< (cdr entry) (point)))
+                          positions)))))
+           (t (error "Invalid annotation direction: %S" direction)))))
+    (unless positions
+      (user-error "No highlights"))
+    (unless target
+      (user-error "No %s highlight"
+                  (if (eq direction 'next) "next" "previous")))
+    (goto-char (cdr target))))
+
+(defun epub-reader-annotation-list-next ()
+  "Move point to the next highlight in the annotation list."
+  (interactive)
+  (epub-reader-annotation-list--move 'next))
+
+(defun epub-reader-annotation-list-previous ()
+  "Move point to the previous highlight in the annotation list."
+  (interactive)
+  (epub-reader-annotation-list--move 'previous))
 
 (defun epub-reader-annotation-list--refresh (&optional selected-id)
   "Refresh this annotation list, restoring SELECTED-ID when present."
   (textui-refresh (current-buffer))
+  (when (buffer-live-p epub-reader-ui--panel-view-reader)
+    (with-current-buffer epub-reader-ui--panel-view-reader
+      (epub-reader-ui--refit-panel-view
+       (epub-reader-ui--current-session) 'annotations)))
   (when selected-id
     (let ((position
            (cl-loop for cursor from (point-min) below (point-max)
@@ -2319,21 +3088,21 @@ carries no properties, so the row is also looked up at the line's end."
 
 (defun epub-reader-ui--refresh-live-annotation-list
     (session &optional selected-id)
-  "Refresh SESSION's live annotation list, preserving SELECTED-ID."
-  (let ((buffer (epub-reader-session-annotation-buffer session)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (epub-reader-annotation-list--refresh selected-id)))))
+  "Refresh SESSION's panel when it shows annotations, keeping SELECTED-ID."
+  (when-let* ((buffer (epub-reader-ui--panel-view-buffer session 'annotations)))
+    (with-current-buffer buffer
+      (epub-reader-annotation-list--refresh selected-id))))
 
 (defun epub-reader-annotation-list-activate ()
-  "Jump to the annotation at point."
+  "Press the panel tab at point, or jump to the annotation at point."
   (interactive)
-  (let ((annotation (epub-reader-annotation-list--at-point))
-        (reader epub-reader-annotation-list--reader-buffer))
-    (unless annotation (user-error "No annotation at point"))
-    (with-current-buffer reader
-      (epub-reader-ui--goto-annotation annotation))
-    (pop-to-buffer reader)))
+  (unless (epub-reader-ui--press-panel-widget)
+    (let ((annotation (epub-reader-annotation-list--at-point))
+          (reader epub-reader-ui--panel-view-reader))
+      (unless annotation (user-error "No annotation at point"))
+      (with-current-buffer reader
+        (epub-reader-ui--goto-annotation annotation))
+      (epub-reader-ui--select-reader-window reader))))
 
 (defun epub-reader-annotation-list-activate-mouse (event)
   "Move to mouse EVENT and jump to the annotation there."
@@ -2345,8 +3114,8 @@ carries no properties, so the row is also looked up at the line's end."
   "Delete the annotation at point from the sidecar and reader."
   (interactive)
   (let* ((annotation (epub-reader-annotation-list--at-point))
-         (reader epub-reader-annotation-list--reader-buffer)
-         (session (epub-reader-annotation-list--session)))
+         (reader epub-reader-ui--panel-view-reader)
+         (session (epub-reader-ui--panel-reader-session)))
     (unless annotation (user-error "No annotation at point"))
     (epub-reader-store-delete-annotation
      (epub-reader-session-store session)
@@ -2355,6 +3124,9 @@ carries no properties, so the row is also looked up at the line's end."
           (cl-delete (epub-reader-annotation-id annotation)
                      (epub-reader-session-annotations session)
                      :key #'epub-reader-annotation-id :test #'equal))
+    (epub-reader-annotation-index-remove
+     (epub-reader-session-annotation-index session)
+     (epub-reader-annotation-id annotation))
     (epub-reader-ui--flush-reader-marks session)
     (with-current-buffer reader
       (epub-reader-ui--refresh-chunk
@@ -2366,51 +3138,23 @@ carries no properties, so the row is also looked up at the line's end."
   "Edit the note for the annotation at point."
   (interactive)
   (let* ((annotation (epub-reader-annotation-list--at-point))
-         (reader epub-reader-annotation-list--reader-buffer)
-         (session (epub-reader-annotation-list--session)))
+         (reader epub-reader-ui--panel-view-reader))
     (unless annotation (user-error "No annotation at point"))
-    (epub-reader-ui--set-annotation-note
-     session annotation
-     (read-string "Highlight note: " (epub-reader-annotation-note annotation)))
-    (with-current-buffer reader
-      (epub-reader-ui--refresh-chunk
-       (plist-get textui-state :chunk-start)
-       (plist-get textui-state :chunk-end)))
-    (epub-reader-annotation-list--refresh
-     (epub-reader-annotation-id annotation))))
+    (epub-reader-ui--panel-reader-session)
+    (epub-reader-ui--edit-annotation-note reader annotation)))
 
 (defun epub-reader-annotation-list-quit ()
   "Hide the annotation list."
   (interactive)
-  (delete-windows-on (current-buffer) t))
+  (let ((reader epub-reader-ui--panel-view-reader))
+    (if (buffer-live-p reader)
+        (epub-reader-ui--hide-session-panel reader)
+      (quit-restore-window (selected-window)))))
 
 (defun epub-reader-annotations ()
-  "Display this book's highlights and notes in a TextUI buffer."
+  "Open and focus this book's highlights and notes in the panel."
   (interactive)
-  (let* ((reader (current-buffer))
-         (session (epub-reader-ui--current-session))
-         (existing (epub-reader-session-annotation-buffer session)))
-    (if (buffer-live-p existing)
-        (let ((selected
-               (with-current-buffer existing
-                 (epub-reader-annotation-list--at-point))))
-          (epub-reader-ui--refresh-live-annotation-list
-           session (and selected (epub-reader-annotation-id selected)))
-          (display-buffer existing)
-          existing)
-      (let* ((epub-reader-annotation-list--reader-buffer reader)
-             (buffer
-              (textui-open
-               (generate-new-buffer-name
-                (format "*EPUB Highlights: %s*"
-                        (epub-reader-publication-title
-                         (epub-reader-session-publication session))))
-               #'epub-reader-annotation-list-frame nil)))
-        (with-current-buffer buffer
-          (setq-local epub-reader-annotation-list--reader-buffer reader)
-          (epub-reader-annotation-list-mode 1))
-        (setf (epub-reader-session-annotation-buffer session) buffer)
-        buffer))))
+  (epub-reader-ui--show-panel-view 'annotations))
 
 (defun epub-reader-follow-link ()
   "Follow the EPUB hyperlink at point."
@@ -2465,30 +3209,41 @@ carries no properties, so the row is also looked up at the line's end."
 When the book took over the frame on opening, bring back the window layout
 that was in place before it was opened."
   (interactive)
-  (let ((configuration epub-reader-ui--window-configuration))
-    (when (and (kill-buffer (current-buffer))
-               (window-configuration-p configuration)
-               (frame-live-p (window-configuration-frame configuration)))
-      (set-window-configuration configuration))))
+  (let* ((reader (current-buffer))
+         (configuration epub-reader-ui--window-configuration)
+         (group epub-reader-ui--layout-group)
+         (side-windows
+          (and (epub-reader-layout-live-p group)
+               (epub-reader-layout-side-windows group))))
+    (epub-reader-layout-with-inhibited
+      (when (kill-buffer reader)
+        (if (and (window-configuration-p configuration)
+                 (frame-live-p (window-configuration-frame configuration)))
+            (set-window-configuration configuration)
+          (dolist (window side-windows)
+            (when (window-live-p window)
+              (ignore-errors (delete-window window)))))))))
 
 (defun epub-reader-ui-open-and-display (file)
   "Open EPUB FILE, display its reader buffer, and return that buffer.
 With `epub-reader-open-full-frame' non-nil the reader fills the selected frame
 and remembers the previous window layout for `epub-reader-quit'."
-  (let* ((configuration (and epub-reader-open-full-frame
-                             (current-window-configuration)))
-         (buffer (epub-reader-ui-open file)))
-    (when configuration
-      (pop-to-buffer-same-window buffer)
-      (let ((window (get-buffer-window buffer)))
-        (when window
-          (condition-case nil
-              (delete-other-windows window)
-            (error nil))
-          (select-window window)))
-      (with-current-buffer buffer
-        (setq epub-reader-ui--window-configuration configuration)))
-    buffer))
+  (epub-reader-layout-with-inhibited
+    (let* ((configuration (and epub-reader-open-full-frame
+                               (current-window-configuration)))
+           (buffer (epub-reader-ui-open file)))
+      (when configuration
+        (pop-to-buffer-same-window buffer)
+        (let ((window (get-buffer-window buffer)))
+          (when window
+            (condition-case nil
+                (delete-other-windows window)
+              (error nil))
+            (select-window window)))
+        (with-current-buffer buffer
+          (setq epub-reader-ui--window-configuration configuration)))
+      (epub-reader-ui--ensure-layout buffer)
+      buffer)))
 
 (defun epub-reader-ui-open (file)
   "Open EPUB FILE in a new TextUI reader buffer and return that buffer."
@@ -2513,6 +3268,8 @@ and remembers the previous window layout for `epub-reader-quit'."
                   (epub-reader-ui--decode-values
                    (epub-reader-store-load-annotations store)
                    #'epub-reader-annotation-from-plist "annotation"))
+                 (annotation-index
+                  (epub-reader-annotation-index-create annotations))
                  (saved-index
                   (or (and saved-locator
                            (epub-reader-ui--spine-index-for-path
@@ -2527,6 +3284,7 @@ and remembers the previous window layout for `epub-reader-quit'."
                          :dom-cache (make-hash-table :test #'equal)
                          :store store :history-back nil :history-forward nil
                          :bookmarks bookmarks :annotations annotations
+                         :annotation-index annotation-index
                          :spine-weights weights
                          :total-weight
                          (cl-loop for weight across weights sum weight))))
@@ -2581,14 +3339,11 @@ and remembers the previous window layout for `epub-reader-quit'."
           (textui-register-cleanup
            buffer
            (lambda ()
-             (dolist (secondary
-                      (and session
-                           (list
-                            (epub-reader-session-toc-buffer session)
-                            (epub-reader-session-bookmark-buffer session)
-                            (epub-reader-session-annotation-buffer session))))
-               (when (buffer-live-p secondary)
-                 (kill-buffer secondary)))
+             (let ((panel-buffer
+                    (and session
+                         (epub-reader-session-panel-buffer session))))
+               (when (buffer-live-p panel-buffer)
+                 (kill-buffer panel-buffer)))
              (unwind-protect
                  (when (epub-reader-session-store session)
                    (condition-case error-data

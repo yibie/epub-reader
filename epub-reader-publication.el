@@ -474,7 +474,7 @@ key, but is not interpreted as a path."
   "Return NODE attribute NAME or signal an error naming CONTEXT."
   (let ((value (epub-reader-publication--attribute node name)))
     (if (and value
-             (not (string-match-p "\\`[[:space:]]*\\'" value)))
+             (not (string-match-p "\\`[ \t\r\n]*\\'" value)))
         value
       (signal 'epub-reader-publication-error
               (list (format "%s has no non-empty %s attribute"
@@ -543,8 +543,8 @@ key, but is not interpreted as a path."
                            idref))))))
 
 (defun epub-reader-publication--properties (string)
-  "Split an OPF space-separated property STRING."
-  (and string (split-string string "[[:space:]]+" t)))
+  "Split an OPF XML-whitespace-separated property STRING."
+  (and string (split-string string "[ \t\r\n]+" t)))
 
 (defun epub-reader-publication--manifest (publication package)
   "Parse PACKAGE manifest for PUBLICATION."

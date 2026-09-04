@@ -18,6 +18,41 @@
          (progn ,@body)
        (epub-reader-publication-close ,binding))))
 
+(ert-deftest epub-reader-publication-properties-use-xml-whitespace ()
+  (dolist (mode '(fundamental-mode emacs-lisp-mode python-mode sh-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (should
+       (equal (epub-reader-publication--properties
+               "nav\nscripted\tcover-image\rremote-resources")
+              '("nav" "scripted" "cover-image" "remote-resources")))
+      (let ((publication
+             (epub-reader-publication-open
+              (epub-reader-test-fixture "wrapped-chapter.epub"))))
+        (unwind-protect
+            (let ((nav
+                   (gethash "nav"
+                            (epub-reader-publication-manifest publication))))
+              (should (equal (epub-reader-resource-properties nav)
+                             '("nav" "scripted")))
+              (should (= (length (epub-reader-publication-toc publication))
+                         2)))
+          (epub-reader-publication-close publication))))))
+
+(ert-deftest epub-reader-publication-required-attributes-use-xml-whitespace ()
+  (dolist (mode '(fundamental-mode emacs-lisp-mode python-mode sh-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (should-error
+       (epub-reader-publication--required-attribute
+        '(item ((id . " \t\n\r"))) "id" "Manifest item")
+       :type 'epub-reader-publication-error)
+      (should
+       (equal (epub-reader-publication--required-attribute
+               '(item ((id . "nonbreaking\u00a0space\u2060")))
+               "id" "Manifest item")
+              "nonbreaking\u00a0space\u2060")))))
+
 (ert-deftest epub-reader-publication-parses-epub2-opf-spine-and-ncx ()
   (epub-reader-publication-test--with "epub2.epub" publication
     (should (equal (epub-reader-publication-version publication) "2.0"))

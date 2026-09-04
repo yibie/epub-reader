@@ -12,7 +12,7 @@ HTML: a centered reading column, automatic reflow, CJK-aware line breaking,
 incremental rendering for long chapters, a hierarchical table of contents,
 and reading positions that survive changes in window width and text scale.
 
-Version 0.2.0 requires Emacs 29.1 or later. It does not support DRM or
+Version 0.3.0 requires Emacs 29.1 or later. It does not support DRM or
 fixed-layout EPUBs.
 
 ![Frankenstein in epub-reader: table of contents, reading column, and highlights list](screenshots/reader-frankenstein.png)
@@ -54,7 +54,7 @@ locators. Keeping both installed is reasonable.
 Requirements:
 
 - Emacs 29.1 or later, built with libxml2 support;
-- TextUI 0.5.1 or later;
+- TextUI 0.7.0 or later;
 - either `unzip` or `bsdtar` on `exec-path`.
 
 Neither package is in a package archive yet. On Emacs 29.1 or later,
@@ -97,6 +97,10 @@ The reader takes over the frame and shows the book in a centered column;
 changing text scale reflows the visible content while keeping the same
 semantic position.
 
+Set `epub-reader-open-full-frame` to `nil` to open the book in the selected
+window instead. In that mode, `q` closes the reader without removing the
+surrounding user windows.
+
 Progress saving is enabled by default. Unless
 `epub-reader-store-directory` is set, reading progress, bookmarks, highlights,
 and notes are stored beside the book as `BOOK.epub.epub-reader`. The EPUB file
@@ -129,10 +133,20 @@ itself is never modified.
 |---|---|
 | `RET` | Visit the current entry; toggle a group that has no destination |
 | `TAB` | Collapse or expand the current group |
-| `q` | Hide the TOC buffer |
+| `n`, `]` | Visit the next spine chapter and keep focus in the TOC |
+| `p`, `[` | Visit the previous spine chapter and keep focus in the TOC |
+| `t`, `q` | Hide the panel and return to the reader |
 
-Clicking an entry with the mouse does the same as `RET`. Reopening the TOC
-restores its selected row.
+`RET` and mouse activation visit the entry and move focus to the reader.
+Reopening the TOC restores its selected row.
+
+### Panel tabs
+
+The TOC, highlights, and bookmarks are three views of one panel buffer. Its
+first line is a row of Contents, Highlights, and Bookmarks tab buttons: click
+one, or press `RET` on it, to switch views. In every view, `1`, `2`, and `3`
+switch to Contents, Highlights, and Bookmarks, and `t`, `a`, and `M` open the
+matching view or close it when it is already shown.
 
 ### Bookmarks and highlights
 
@@ -140,12 +154,33 @@ Select text within one chapter and press `h` to highlight it. Press `e` while
 point is on a highlight to add, read, or edit its plain-text note. The `M` and
 `a` list buffers use these keys:
 
-| List | `RET` | `d` | `e` | `q` |
-|---|---|---|---|---|
-| Bookmarks | Jump to the bookmark | Delete it | — | Hide the list |
-| Highlights | Jump to the quoted text | Delete it | Edit its note | Hide the list |
+| List | `n` / `p` | `RET` | `d` | `e` | Close |
+|---|---|---|---|---|---|
+| Bookmarks | — | Jump to the bookmark | Delete it | — | `q` |
+| Highlights | Next / previous highlight | Jump to the quoted text | Delete it | Edit its note | `a` or `q` |
 
 Clicking an entry in either list jumps to it, like `RET`.
+
+On graphical Emacs, the TOC, bookmarks, and highlights share one child-frame
+panel over the top-right of each reader. Switching views reuses that panel, so
+it does not resize or reflow the book. Terminal Emacs uses the same lifecycle
+through one managed side/bottom-window fallback. Customize
+`epub-reader-panel-display` to force `child-frame`, `side-window`, or `bottom`.
+The Contents, Highlights, and Bookmarks tabs on the panel's first line switch
+between the views.
+Opening the list is also lazy: highlights in chapters you have not visited are
+resolved only when you jump to them, and repeated opens reuse cached metadata.
+Child frames are inset from the reader edge and re-constrained after their
+parent is resized. The inset and border are customizable with
+`epub-reader-panel-child-frame-horizontal-margin`,
+`epub-reader-panel-child-frame-vertical-margin`, and
+`epub-reader-panel-child-frame-border-width`. Child-frame mode lines are
+hidden by default; set `epub-reader-panel-show-mode-line` non-nil to show them.
+Tab bars and per-window tab lines are always suppressed in child-frame panels.
+
+Notes open in a multiline editor below the reading area. Use `RET` for a new
+line, `C-c C-c` to save and close the editor, or `C-c C-k` to discard the
+changes. Closing a reader with an unsaved note asks for confirmation.
 
 Highlights are restored from the saved quote when an exact source position is
 no longer available. Such a match is shown with a wavy underline and a warning
@@ -160,7 +195,7 @@ The settings most readers are likely to change are:
 |---|---|
 | Reading column and images | `epub-reader-reading-width`, `epub-reader-image-rows`, `epub-reader-text-wrap-strategy` |
 | Fonts and spacing | `epub-reader-text-scale`, `epub-reader-line-spacing`, `epub-reader-paragraph-spacing` |
-| Window layout | `epub-reader-open-full-frame` |
+| Window layout | `epub-reader-open-full-frame`, `epub-reader-panel-display`, `epub-reader-panel-show-mode-line`, `epub-reader-panel-width`, `epub-reader-panel-height`, `epub-reader-panel-child-frame-horizontal-margin`, `epub-reader-panel-child-frame-vertical-margin`, `epub-reader-panel-child-frame-border-width`, `epub-reader-toc-width`, `epub-reader-list-width`, `epub-reader-reader-min-width`, `epub-reader-side-min-width`, `epub-reader-note-window-height` |
 | Initial chapter paint | `epub-reader-first-paint-max-blocks`, `epub-reader-first-paint-max-characters` |
 | Cold scrolling | `epub-reader-scroll-chunk-max-blocks`, `epub-reader-scroll-chunk-max-characters` |
 | Background work | `epub-reader-background-idle-delay` |
@@ -201,7 +236,7 @@ and TOC state also have `epub-reader-*` faces that can be adjusted with
 | Supported | EPUB container and publication model | Opens DRM-free, reflowable EPUB 2/3; validates the central directory; extracts metadata, spine documents, and visible images on demand; reads EPUB 2 NCX and EPUB 3 navigation documents |
 | Supported | Common XHTML semantics | Paragraphs, headings, emphasis, links, quotations, code, ordered and unordered lists, a text fallback for simple tables, and visible image errors |
 | Supported | CJK and reflow | Width-aware layout, common kinsoku rules, non-final-line justification, greedy or balanced break selection, and reflow after width/font/theme/text-scale changes |
-| Supported | Long chapters | Small initial and cold-scroll chunks, block and character budgets, viewport overscan, idle expansion, and next-chapter prefetch |
+| Supported | Long chapters | Small initial and cold-scroll chunks, block and character budgets, keyed incremental region rendering, initial idle expansion, and next-chapter prefetch |
 | Supported | Navigation | Previous/next chapter, automatic chapter crossing while scrolling, internal fragments, allowed external links, history, collapsible TOC, and title completion |
 | Supported | Progress | Book-fingerprint identity, versioned locators, debounced saves, atomic sidecar merge/write, exact or degraded restoration, and weighted whole-book progress |
 | Supported | Bookmarks and annotations | Named bookmarks; continuous highlights within one chapter; plain-text notes; lists for jumping, editing, and deleting; quote-based recovery after reflow or source-map changes |

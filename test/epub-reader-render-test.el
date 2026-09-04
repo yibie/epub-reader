@@ -49,6 +49,15 @@
              for value = (epub-reader-render-test--element-text child)
              when value return value)))
 
+(defun epub-reader-render-test--signature-in-mode
+    (publication section mode)
+  "Return SECTION's block count and keys after rendering in MODE."
+  (with-temp-buffer
+    (funcall mode)
+    (let ((blocks (epub-reader-render-section publication section)))
+      (list (length blocks)
+            (mapcar #'epub-reader-block-key blocks)))))
+
 (ert-deftest epub-reader-render-maps-xhtml-to-semantic-blocks ()
   (epub-reader-render-test--with-publication publication
     (let ((blocks (epub-reader-render-chapter publication 0)))
@@ -76,6 +85,43 @@
                (source (get-text-property 0 'epub-reader-source value)))
           (should (epub-reader-locator-source-p source))
           (should (equal (aref source 0) "OEBPS/chapter1.xhtml")))))))
+
+(ert-deftest epub-reader-render-wrapped-chapters-ignore-current-syntax-table ()
+  (let ((publication
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "wrapped-chapter.epub"))))
+    (unwind-protect
+        (dotimes (index 2)
+          (let* ((section
+                  (epub-reader-publication-load-section publication index))
+                 (expected-count (if (zerop index) 162 126))
+                 (expected
+                  (epub-reader-render-test--signature-in-mode
+                   publication section #'fundamental-mode)))
+            (should (= (car expected) expected-count))
+            (dolist (mode '(fundamental-mode emacs-lisp-mode
+                            python-mode sh-mode))
+              (let ((actual
+                     (epub-reader-render-test--signature-in-mode
+                      publication section mode)))
+                (should (= (car actual) (car expected)))
+                (should (equal (cadr actual) (cadr expected)))))))
+      (epub-reader-publication-close publication))))
+
+(ert-deftest epub-reader-render-preserves-non-xml-space-characters ()
+  (let ((publication
+         (epub-reader-publication-open
+          (epub-reader-test-fixture "wrapped-chapter.epub"))))
+    (unwind-protect
+        (let* ((blocks (epub-reader-render-chapter publication 0))
+               (block
+                (cl-find "section-p-000" blocks
+                         :key #'epub-reader-block-element-id :test #'equal))
+               (text (substring-no-properties
+                      (epub-reader-block-text block))))
+          (should (string-match-p "Nonbreaking\u00a0space" text))
+          (should (string-match-p "joined\u2060word" text)))
+      (epub-reader-publication-close publication))))
 
 (ert-deftest epub-reader-render-default-prose-selects-greedy-breaks ()
   "Reader defaults to TextUI's fast, still-justified break strategy."

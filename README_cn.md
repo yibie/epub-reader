@@ -10,14 +10,14 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 模型、稳定 locator 和 TextUI 的宽度感知 frame/分块 viewport 组织阅读体验。逐项对比见
 [与 nov.el 的比较](#与-novel-的比较)。
 
-当前版本为 0.2.0，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
+当前版本为 0.3.0，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
 
 ![epub-reader 打开紅樓夢：分组目录、正文阅读栏和高亮列表](screenshots/reader-hongloumeng.png)
 
 ![epub-reader 打开 Frankenstein：目录、正文阅读栏和高亮列表](screenshots/reader-frankenstein.png)
 
-左侧为目录，中间为正文阅读栏，右侧为高亮列表。示例文本为 Project Gutenberg 的《紅樓夢》
-和 Standard Ebooks 的《Frankenstein》，均属公有领域。
+截图展示目录、正文与高亮信息。示例文本为 Project Gutenberg 的《紅樓夢》和 Standard
+Ebooks 的《Frankenstein》，均属公有领域。
 
 ## 与 nov.el 的比较
 
@@ -43,7 +43,7 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 要求：
 
 - Emacs 29.1 或更高版本，且编译时带 libxml2 支持；
-- TextUI 0.5.1 或更高版本；
+- TextUI 0.7.0 或更高版本；
 - `unzip` 或 `bsdtar`，安装任意一个即可。两者都存在时默认先尝试 `unzip`。
 
 两个包都还没有进入软件源。Emacs 29.1 起自带的 `package-vc-install` 可以直接从 GitHub
@@ -98,20 +98,44 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | `RET` | 打开 point 所在的内部或允许的外部链接 |
 | `q` | 保存进度、关闭阅读 buffer 并恢复之前的窗口布局 |
 
-目录 buffer 中，`RET` 跳转（无目标的分组则折叠/展开），`TAB` 折叠/展开当前分组，`q`
-隐藏目录。鼠标点击条目等同于 `RET`。目录重开后会恢复先前选中的行。
+将 `epub-reader-open-full-frame` 设为 `nil` 时，阅读器只使用当前窗口；按 `q` 关闭阅读器不会
+删除周围的用户窗口。
+
+目录 buffer 中，`RET` 跳转并把焦点移到正文（无目标的分组则折叠/展开），`TAB` 折叠/展开
+当前分组；`n` / `]` 和 `p` / `[` 切换前后章节并把焦点留在目录；`t` 或 `q` 隐藏面板并返回
+正文。鼠标点击条目等同于 `RET`。目录重开后会恢复先前选中的行。
+
+目录、高亮和书签是同一个面板 buffer 的三个视图。面板第一行是 Contents、Highlights、
+Bookmarks 三个标签按钮，鼠标点击或在按钮上按 `RET` 即可切换视图。在任一视图中，`1`、`2`、
+`3` 分别切到目录、高亮、书签；`t`、`a`、`M` 打开对应视图，视图已显示时则关闭面板。
 
 ### 书签与标注
 
 在同一章内选中文字后按 `h` 即可高亮；光标放在高亮上按 `e`，可以添加、查看或修改纯文本
 笔记。`M` 和 `a` 打开的列表使用以下键位：
 
-| 列表 | `RET` | `d` | `e` | `q` |
-|---|---|---|---|---|
-| 书签 | 跳到书签 | 删除 | — | 隐藏列表 |
-| 高亮与笔记 | 跳到引文 | 删除 | 编辑笔记 | 隐藏列表 |
+| 列表 | `n` / `p` | `RET` | `d` | `e` | 关闭 |
+|---|---|---|---|---|---|
+| 书签 | — | 跳到书签 | 删除 | — | `q` |
+| 高亮与笔记 | 下一处 / 上一处高亮 | 跳到引文 | 删除 | 编辑笔记 | `a` 或 `q` |
 
 鼠标点击列表中的条目等同于 `RET`，直接跳转。
+
+在图形 Emacs 中，每个阅读会话的 TOC、书签和高亮列表共用一个覆盖在正文右上方的 child frame；
+切换视图会复用同一容器，不会改变正文宽度，也不会触发整页重排。终端 Emacs 以同样的生命周期
+回退到单个受控侧栏或底栏。可通过
+`epub-reader-panel-display` 强制选择 `child-frame`、`side-window` 或 `bottom`。列表采用惰性
+定位：未访问章节的高亮只在实际跳转时解析，重复打开则复用缓存的展示信息。
+面板第一行的 Contents / Highlights / Bookmarks 标签按钮在同一个面板中切换视图。
+child frame 会从正文边缘向内留白，并在父 frame 改变尺寸后重新约束到其内部。可通过
+`epub-reader-panel-child-frame-horizontal-margin`、
+`epub-reader-panel-child-frame-vertical-margin` 和
+`epub-reader-panel-child-frame-border-width` 调整留白与边框。child frame 默认隐藏 mode line；
+将 `epub-reader-panel-show-mode-line` 设为非 nil 可以重新显示。
+child frame 始终隐藏 frame tab bar 和窗口级 tab line。
+
+笔记会在阅读区下方的多行编辑窗口中打开。`RET` 插入换行，`C-c C-c` 保存并关闭，
+`C-c C-k` 放弃修改；存在未保存笔记时关闭阅读器会先询问确认。
 
 窗口宽度、字号或字体变化后，高亮会跟随原文恢复。如果精确位置已经找不到，reader 会按保存的
 引文重新定位，并用波浪下划线和列表中的警告标记提醒你检查位置。
@@ -124,7 +148,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 |------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 正文与图片       | epub-reader-reading-width、epub-reader-image-rows、epub-reader-text-wrap-strategy                                                                                                                                                                                                                                                                                   |
 | 字体与间距       | epub-reader-text-scale、epub-reader-line-spacing、epub-reader-paragraph-spacing                                                                                                                                                                                                                                                                                     |
-| 窗口布局         | epub-reader-open-full-frame |
+| 窗口布局         | epub-reader-open-full-frame、epub-reader-panel-display、epub-reader-panel-show-mode-line、epub-reader-panel-width、epub-reader-panel-height、epub-reader-panel-child-frame-horizontal-margin、epub-reader-panel-child-frame-vertical-margin、epub-reader-panel-child-frame-border-width、epub-reader-toc-width、epub-reader-list-width、epub-reader-reader-min-width、epub-reader-side-min-width、epub-reader-note-window-height |
 | 交互首绘         | epub-reader-first-paint-max-blocks、epub-reader-first-paint-max-characters                                                                                                                                                                                                                                                                                          |
 | 冷滚动 chunk     | epub-reader-scroll-chunk-max-blocks、epub-reader-scroll-chunk-max-characters                                                                                                                                                                                                                                                                                        |
 | 后台预取         | epub-reader-background-idle-delay                                                                                                                                                                                                                                                                                                                                   |
@@ -162,7 +186,7 @@ M-x epub-reader-open RET /path/to/book.epub RET
 | 已支持 | EPUB 容器与出版物模型 | 打开无 DRM 的 reflowable EPUB 2/3；中央目录安全 preflight 后按需解压 metadata、当前 spine 与当前 chunk 图片；解析 EPUB 2 NCX 与 EPUB 3 nav                                                                                 |
 | 已支持 | 常见 XHTML 语义       | 段落、标题、强调、链接、引用、代码、无序/有序列表、简单表格的文本降级、异步后到图片与可见错误提示                                                                                                                          |
 | 已支持 | CJK 与宽度重排        | TextUI 宽度感知折行、common kinsoku 与非末行两端对齐；默认 greedy 线性选断点，亦可选 balanced KP；窗口宽度、主题、字体或 text scale 变化时失效旧布局，并通过 focus/source anchor 保持位置；图片行预算跟随 remap 后字体高度 |
-| 已支持 | 长章节                | 首绘/冷滚动小 chunk、block 数与字符数双软预算、guard/overscan、章节 region refresh；idle 扩展 viewport 并预取下一章，不会为整章预先生成 TextUI leaf/source property                                                        |
+| 已支持 | 长章节                | 首绘/冷滚动小 chunk、block 数与字符数双软预算、guard/overscan、按稳定 block key 增量更新章节 region；首屏 idle 扩展 viewport 并预取下一章，不会为整章预先生成 TextUI leaf/source property                                                        |
 | 已支持 | 导航                  | 前后章、章尾自动前进、内部 fragment、外部链接 allowlist、history back/forward、层级/可折叠 TOC、标题补全跳转                                                                                                               |
 | 已支持 | 进度                  | 基于书籍 fingerprint 的版本化 locator；位置变化后 idle debounce、换章与关闭保存；原子 merge/write；exact/degraded 恢复提示；全书加权百分比                                                                                 |
 | 已支持 | 书签与标注            | 命名书签；同一章内的连续文字高亮；纯文本笔记；可跳转、编辑和删除的列表；重排或来源位置变化后按引文恢复                                                                                                                     |

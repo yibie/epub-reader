@@ -83,6 +83,46 @@
   (count-screen-lines (window-start window) (window-point window)
                       nil window))
 
+(defun epub-reader-ui-test--drain-background (session)
+  "Run SESSION's queued background jobs synchronously, then disarm it."
+  (while (epub-reader-session-background-jobs session)
+    (epub-reader-ui--run-background-job
+     session (epub-reader-session-background-generation session)))
+  (epub-reader-ui--cancel-background-work session))
+
+(defun epub-reader-ui-test--chunk-width ()
+  "Return the number of semantic blocks in the current rendered chunk."
+  (- (plist-get textui-state :chunk-end)
+     (plist-get textui-state :chunk-start)))
+
+(defun epub-reader-ui-test--chunk-source-characters ()
+  "Return source characters represented by the current rendered chunk."
+  (let ((blocks (epub-reader-ui--current-blocks))
+        (start (plist-get textui-state :chunk-start))
+        (end (plist-get textui-state :chunk-end)))
+    (cl-loop for index from start below end
+             sum (length (epub-reader-block-text (aref blocks index))))))
+
+(defun epub-reader-ui-test--assert-page-motion (before after direction)
+  "Assert a screen-sized move from BEFORE to AFTER in DIRECTION when resolvable."
+  (when (and before after)
+    (let ((before-position (epub-reader-locator-point before))
+          (after-position (epub-reader-locator-point after)))
+      (should before-position)
+      (should after-position)
+      (pcase direction
+        ('forward (should (< before-position after-position)))
+        ('backward (should (< after-position before-position))))
+      ;; Reader rows carry line spacing, so a 21-row window contains about
+      ;; ten physical TextUI lines.  A third of the body height distinguishes
+      ;; page motion from the former one-paragraph edge fallback.
+      (should
+       (>= (count-screen-lines
+            (min before-position after-position)
+            (max before-position after-position)
+            nil (selected-window))
+           (/ (window-body-height (selected-window)) 3))))))
+
 (defun epub-reader-ui-test--native-image-line-p (position)
   "Return non-nil when the physical line at POSITION contains an image slice."
   (save-excursion
@@ -409,7 +449,23 @@
     (should (equal (assq 'truncation fringe-indicator-alist)
                    '(truncation nil nil)))
     (should (equal (assq 'continuation fringe-indicator-alist)
-                   '(continuation nil nil)))))
+                   '(continuation nil nil)))
+    (should (eq (display-table-slot buffer-display-table 'truncation) ?\s))
+    (should (eq (display-table-slot buffer-display-table 'wrap) ?\s))))
+
+(ert-deftest epub-reader-ui-secondary-lists-hide-line-end-indicators ()
+  (dolist (mode '(epub-reader-toc-mode
+                  epub-reader-bookmark-list-mode
+                  epub-reader-annotation-list-mode))
+    (with-temp-buffer
+      (funcall mode 1)
+      (should truncate-lines)
+      (should (equal (assq 'truncation fringe-indicator-alist)
+                     '(truncation nil nil)))
+      (should (equal (assq 'continuation fringe-indicator-alist)
+                     '(continuation nil nil)))
+      (should (eq (display-table-slot buffer-display-table 'truncation) ?\s))
+      (should (eq (display-table-slot buffer-display-table 'wrap) ?\s)))))
 
 (ert-deftest epub-reader-ui-materializes-images-only-in-current-chunk ()
   (let ((epub-reader-first-paint-max-blocks 3)
@@ -603,6 +659,99 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest epub-reader-ui-default-scroll-crosses-long-chunk-edges ()
+  "Real page commands keep useful bounded chunks across both long fixtures."
+  (let ((epub-reader-enable-progress nil)
+        (epub-reader-background-idle-delay 3600))
+    (dolist (fixture '("long-chapter.epub" "wrapped-chapter.epub"))
+      (let ((buffer (epub-reader-open (epub-reader-test-fixture fixture))))
+        (unwind-protect
+            (save-window-excursion
+              (delete-other-windows)
+              (switch-to-buffer buffer)
+              (with-current-buffer buffer
+                (should (= (window-body-height (selected-window)) 21))
+                (epub-reader-ui-test--drain-background
+                 epub-reader-ui--session)
+                (should (= (plist-get textui-state :chunk-start) 0))
+                (should (= (plist-get textui-state :chunk-end) 64))
+                (let ((steps 0)
+                      (page-samples 0))
+                  (while (and (<= (plist-get textui-state :chunk-end) 64)
+                              (< steps 80))
+                    (let ((before
+                           (epub-reader-ui--locator-at-reading-row
+                            0 (window-start (selected-window)))))
+                      (epub-reader-scroll-forward)
+                      (let ((after
+                             (epub-reader-ui--locator-at-reading-row
+                              0 (window-start (selected-window)))))
+                        (when (and before after)
+                          (setq page-samples (1+ page-samples)))
+                        (epub-reader-ui-test--assert-page-motion
+                         before after 'forward)))
+                    (should (> (epub-reader-ui-test--chunk-width) 2))
+                    (should
+                     (<= (epub-reader-ui-test--chunk-width)
+                         epub-reader-chunk-max-blocks))
+                    (setq steps (1+ steps)))
+                  (should (< steps 80))
+                  (should (> page-samples 3))
+                  (should (> (plist-get textui-state :chunk-start) 0))
+                  (should (> (plist-get textui-state :chunk-end) 64))
+                  (should-not
+                   (cl-some
+                    (lambda (job) (eq (car job) 'expand))
+                    (epub-reader-session-background-jobs
+                     epub-reader-ui--session)))
+                  (let ((forward-start
+                         (plist-get textui-state :chunk-start))
+                        (backward-steps 0))
+                    (while (and (>= (plist-get textui-state :chunk-start)
+                                    forward-start)
+                                (< backward-steps 80))
+                      (let ((before
+                             (epub-reader-ui--locator-at-reading-row
+                              0 (window-start (selected-window)))))
+                        (epub-reader-scroll-backward)
+                        (let ((after
+                               (epub-reader-ui--locator-at-reading-row
+                                0 (window-start (selected-window)))))
+                          (epub-reader-ui-test--assert-page-motion
+                           before after 'backward)))
+                      (should (> (epub-reader-ui-test--chunk-width) 2))
+                      (setq backward-steps (1+ backward-steps)))
+                    (should (< backward-steps 80))
+                    (should (< (plist-get textui-state :chunk-start)
+                               forward-start))))))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-ui-full-chunk-shift-renders-only-entering-blocks ()
+  "A settled long-chapter viewport must reuse its overlapping keyed blocks."
+  (let ((epub-reader-enable-progress nil)
+        (epub-reader-background-idle-delay 3600)
+        buffer)
+    (setq buffer
+          (epub-reader-open (epub-reader-test-fixture "long-chapter.epub")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (epub-reader-ui-test--drain-background epub-reader-ui--session)
+          (should (= (epub-reader-ui-test--chunk-width) 64))
+          (let ((rendered 0)
+                (original
+                 (symbol-function 'textui-keyed-region--render-item)))
+            (cl-letf (((symbol-function 'textui-keyed-region--render-item)
+                       (lambda (element width)
+                         (setq rendered (1+ rendered))
+                         (funcall original element width))))
+              (epub-reader-ui--refresh-chunk 4 68))
+            (should (= rendered 4)))
+          (should (= (plist-get textui-state :chunk-start) 4))
+          (should (= (plist-get textui-state :chunk-end) 68)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest epub-reader-ui-first-paint-uses-the-interactive-budget ()
   (let ((epub-reader-enable-progress nil)
         (epub-reader-first-paint-max-blocks 4)
@@ -627,6 +776,156 @@
                         epub-reader-scroll-chunk-max-blocks))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest epub-reader-ui-restore-materializes-forward-first-paint-chunk ()
+  "Restore paints its target and following context before later expansion."
+  (let ((directory (make-temp-file "epub-reader-restore-chunk-" t))
+        (epub-reader-enable-progress t)
+        (epub-reader-background-idle-delay 3600)
+        (epub-reader-first-paint-max-blocks 4)
+        (epub-reader-first-paint-max-characters 60)
+        (epub-reader-chunk-max-blocks 32)
+        (epub-reader-chunk-max-characters 4000)
+        (file (epub-reader-test-fixture "long-chapter.epub"))
+        (target-index 80)
+        target-key reader)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          (setq reader (epub-reader-open file))
+          (with-current-buffer reader
+            (setq target-key
+                  (epub-reader-block-key
+                   (aref (epub-reader-ui--current-blocks) target-index)))
+            (epub-reader-ui--goto-block-index target-index)
+            (epub-reader-ui--observe-progress t)
+            (epub-reader-ui--save-progress t))
+          (kill-buffer reader)
+          (setq reader (epub-reader-open file))
+          (with-current-buffer reader
+            (let* ((session epub-reader-ui--session)
+                   (start (plist-get textui-state :chunk-start))
+                   (end (plist-get textui-state :chunk-end))
+                   (first-width (epub-reader-ui-test--chunk-width))
+                   (before (epub-reader-ui--current-locator)))
+              (should (eq (plist-get textui-state :restore-quality) 'exact))
+              (should (= start target-index))
+              (should (equal (epub-reader-locator-block before) target-key))
+              (should (<= first-width epub-reader-first-paint-max-blocks))
+              ;; This fixture reaches the character budget before the block
+              ;; budget, proving that both first-paint limits participate.
+              (should (< first-width epub-reader-first-paint-max-blocks))
+              (should (<= (epub-reader-ui-test--chunk-source-characters)
+                          epub-reader-first-paint-max-characters))
+              ;; The target is the first block, with forward context available.
+              (should (> end (1+ start)))
+              (should
+               (cl-some (lambda (job) (eq (car job) 'expand))
+                        (epub-reader-session-background-jobs session)))
+              ;; The deferred pass is independently bounded by the normal
+              ;; steady-state budgets and preserves the restored locator.
+              (epub-reader-ui--background-expand-job session 0)
+              (should (> (epub-reader-ui-test--chunk-width) first-width))
+              (should (<= (epub-reader-ui-test--chunk-width)
+                          epub-reader-chunk-max-blocks))
+              (should (<= (epub-reader-ui-test--chunk-source-characters)
+                          epub-reader-chunk-max-characters))
+              (let ((after (epub-reader-ui--current-locator)))
+                (should (equal (epub-reader-locator-block before)
+                               (epub-reader-locator-block after)))
+                (should (= (epub-reader-locator-offset before)
+                           (epub-reader-locator-offset after)))))))
+      (when (buffer-live-p reader)
+        (kill-buffer reader))
+      (delete-directory directory t))))
+
+(ert-deftest epub-reader-ui-wrapped-open-restore-is-mode-independent ()
+  "Wrapped progress survives Lisp callers and historical wrapper locators."
+  (let ((directory (make-temp-file "epub-reader-wrapped-restore-" t))
+        (epub-reader-enable-progress t)
+        (epub-reader-open-full-frame nil)
+        (epub-reader-background-idle-delay 3600)
+        (epub-reader-first-paint-max-blocks 4)
+        (epub-reader-first-paint-max-characters 1200)
+        (file (epub-reader-test-fixture "wrapped-chapter.epub"))
+        (target-key "id:section-p-080")
+        healthy-count target-index reader)
+    (unwind-protect
+        (let ((epub-reader-store-directory directory))
+          ;; Establish the healthy shape from a neutral caller, then perform
+          ;; the complete public open/save/kill/reopen path from Lisp mode.
+          (with-temp-buffer
+            (fundamental-mode)
+            (setq reader (epub-reader-open file)))
+          (with-current-buffer reader
+            (setq healthy-count (length (epub-reader-ui--current-blocks)))
+            (should (= healthy-count 162)))
+          (kill-buffer reader)
+          (setq reader nil)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq reader (epub-reader-open file)))
+          (with-current-buffer reader
+            (should (= (length (epub-reader-ui--current-blocks))
+                       healthy-count))
+            (setq target-index
+                  (gethash target-key
+                           (epub-reader-ui--current-block-index
+                            epub-reader-ui--session)))
+            (should target-index)
+            (epub-reader-ui--goto-block-index target-index)
+            (epub-reader-ui--observe-progress t)
+            (epub-reader-ui--save-progress t))
+          (kill-buffer reader)
+          (setq reader nil)
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq reader (epub-reader-open file)))
+          (with-current-buffer reader
+            (should (= (length (epub-reader-ui--current-blocks))
+                       healthy-count))
+            (should (eq (plist-get textui-state :restore-quality) 'exact))
+            (should (equal (epub-reader-locator-block
+                            (epub-reader-ui--current-locator))
+                           target-key))
+            (should (= (plist-get textui-state :chunk-start) target-index)))
+          (kill-buffer reader)
+          (setq reader nil)
+          ;; Simulate a locator written by the historical renderer, where the
+          ;; section wrapper swallowed all descendant paragraphs into one key.
+          (let* ((publication (epub-reader-publication-open file))
+                 (store
+                  (epub-reader-store-open
+                   file (epub-reader-publication-book-key publication)))
+                 (locator (epub-reader-store-load-locator store)))
+            (should locator)
+            (should-not
+             (string-empty-p
+              (concat (or (epub-reader-locator-prefix locator) "")
+                      (or (epub-reader-locator-suffix locator) ""))))
+            (setf (epub-reader-locator-block locator)
+                  "path:body/0:section")
+            (epub-reader-store-stage store locator)
+            (epub-reader-store-close store)
+            (epub-reader-publication-close publication))
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (setq reader (epub-reader-open file)))
+          (with-current-buffer reader
+            (should (= (length (epub-reader-ui--current-blocks))
+                       healthy-count))
+            (should-not
+             (gethash "path:body/0:section"
+                      (epub-reader-ui--current-block-index
+                       epub-reader-ui--session)))
+            (should (eq (plist-get textui-state :restore-quality)
+                        'quote-in-spine))
+            (should (equal (epub-reader-locator-block
+                            (epub-reader-ui--current-locator))
+                           target-key))
+            (should (= (plist-get textui-state :chunk-start) target-index))))
+      (when (buffer-live-p reader)
+        (kill-buffer reader))
+      (delete-directory directory t))))
 
 (ert-deftest epub-reader-ui-chapter-switch-defers-image-materialization ()
   (let ((epub-reader-enable-progress nil)
@@ -704,6 +1003,16 @@
              (cadr (assq 'epub-reader-background effects))))
         (should (= (length dependencies) 1))
         (should (stringp (car dependencies)))))))
+
+(ert-deftest epub-reader-ui-narrow-window-keeps-chapter-region-refreshable ()
+  (epub-reader-ui-test--with-reader buffer
+    (cl-letf (((symbol-function 'textui--visible-width)
+               (lambda (_buffer) 9)))
+      (should (eq (textui-refresh buffer) buffer))
+      (should (assq 'chapter textui--refresh-regions))
+      (should (epub-reader-ui--first-source-position))
+      (should (eq (epub-reader-ui--refresh-chunk 0 1) buffer))
+      (should (epub-reader-ui--first-source-position)))))
 
 (ert-deftest epub-reader-ui-chunk-guards-are-inclusive-and-symmetric ()
   (let ((epub-reader-chunk-guard-blocks 8))
@@ -850,6 +1159,7 @@
               (redisplay t)
               (let ((before (epub-reader-ui--current-locator))
                     (before-percent (epub-reader-ui--progress-percent))
+                    (before-end (plist-get textui-state :chunk-end))
                     (before-row
                      (epub-reader-ui-test--visual-row (selected-window))))
                 (should (= (plist-get textui-state :chunk-start) 0))
@@ -857,6 +1167,13 @@
                 (redisplay t)
                 (let ((after (epub-reader-ui--current-locator)))
                   (should (= (plist-get textui-state :chunk-start) 0))
+                  (should (> (plist-get textui-state :chunk-end) before-end))
+                  (should (> (epub-reader-ui-test--chunk-width) 2))
+                  (should
+                   (cl-some
+                    (lambda (job) (eq (car job) 'expand))
+                    (epub-reader-session-background-jobs
+                     epub-reader-ui--session)))
                   (should (equal (epub-reader-locator-block before)
                                  (epub-reader-locator-block after)))
                   (should (= (epub-reader-locator-offset before)
@@ -914,7 +1231,7 @@
           (with-current-buffer toc
             (should epub-reader-toc-mode)
             (should-not (plist-member textui-state :reader-buffer))
-            (goto-char (point-min))
+            (goto-char (epub-reader-toc--key-position "0"))
             (let ((key (get-text-property (point) 'epub-reader-toc-key)))
               (should (equal key "0"))
               (epub-reader-toc-toggle)
@@ -1100,9 +1417,11 @@
                           "id:mixed" start-offset))
               (should (memq 'epub-reader-highlight-face
                             (ensure-list (get-text-property (point) 'face))))
-              (cl-letf (((symbol-function 'read-string)
-                         (lambda (&rest _arguments) "中英混排笔记")))
-                (epub-reader-edit-note))
+              (let ((editor (epub-reader-edit-note)))
+                (with-current-buffer editor
+                  (erase-buffer)
+                  (insert "中英混排笔记")
+                  (epub-reader-note-save)))
               (cl-letf (((symbol-function 'textui--visible-width)
                          (lambda (_buffer) 42)))
                 (textui-refresh reader)
@@ -1136,8 +1455,7 @@
               (goto-char position)
               (should (string-match-p "中英混排笔记"
                                       (buffer-substring-no-properties
-                                       (line-beginning-position)
-                                       (line-end-position))))
+                                       (point-min) (point-max))))
               (epub-reader-annotation-list-delete)))
           (with-current-buffer reader
             (should-not (epub-reader-session-annotations
@@ -1284,29 +1602,33 @@
           (with-current-buffer reader
             (goto-char (epub-reader-ui-test--source-position "id:english" 0))
             (epub-reader-add-bookmark "First")
-            (setq bookmark-list (epub-reader-bookmarks))
+            (setq bookmark-list (epub-reader-bookmarks)))
+          (with-current-buffer reader
             (goto-char (epub-reader-ui-test--source-position "id:mixed" 0))
-            (epub-reader-add-bookmark "Second")
+            (epub-reader-add-bookmark "Second"))
+          (with-current-buffer reader
             (cl-letf (((symbol-function 'display-buffer) #'identity))
               (epub-reader-bookmarks)))
           (with-current-buffer bookmark-list
             (should (= (epub-reader-ui-test--property-count
                         'epub-reader-bookmark)
                        2)))
-          (with-current-buffer reader
-            (cl-labels ((add-highlight
-                         (key from to)
-                         (let ((start (epub-reader-ui-test--source-position
-                                       key from))
-                               (end (1+ (epub-reader-ui-test--source-position
-                                        key (1- to)))))
-                           (goto-char end)
-                           (set-mark start)
-                           (setq mark-active t transient-mark-mode t)
-                           (epub-reader-add-highlight start end))))
+          (cl-labels ((add-highlight
+                       (key from to)
+                       (let ((start (epub-reader-ui-test--source-position
+                                     key from))
+                             (end (1+ (epub-reader-ui-test--source-position
+                                      key (1- to)))))
+                         (goto-char end)
+                         (set-mark start)
+                         (setq mark-active t transient-mark-mode t)
+                         (epub-reader-add-highlight start end))))
+            (with-current-buffer reader
               (add-highlight "id:english" 0 5)
-              (setq annotation-list (epub-reader-annotations))
-              (add-highlight "id:mixed" 3 8)
+              (setq annotation-list (epub-reader-annotations)))
+            (with-current-buffer reader
+              (add-highlight "id:mixed" 3 8))
+            (with-current-buffer reader
               (cl-letf (((symbol-function 'display-buffer) #'identity))
                 (epub-reader-annotations))))
           (with-current-buffer annotation-list
@@ -1331,7 +1653,8 @@
         (epub-reader-first-paint-max-blocks epub-reader-chunk-max-blocks)
         (epub-reader-first-paint-max-characters
          epub-reader-chunk-max-characters)
-        reader list-buffer)
+        reader list-buffer
+        (resolve-count 0))
     (unwind-protect
         (let ((epub-reader-store-directory directory))
           (setq reader (epub-reader-open
@@ -1369,16 +1692,36 @@
                      :created 1.0)))
               (setf (epub-reader-locator-offset end) (1- (length exact)))
               (push annotation (epub-reader-session-annotations session))
-              (setq list-buffer (epub-reader-annotations))
-              (should (eq (epub-reader-annotation-quality annotation) 'quote))))
+              (epub-reader-annotation-index-put
+               (epub-reader-session-annotation-index session) annotation)
+              (cl-letf (((symbol-function 'epub-reader-locator-range-resolve)
+                         (let ((original
+                                (symbol-function
+                                 'epub-reader-locator-range-resolve)))
+                           (lambda (&rest arguments)
+                             (cl-incf resolve-count)
+                             (apply original arguments)))))
+                (setq list-buffer (epub-reader-annotations)))
+              ;; Opening the global list must not resolve an annotation from
+              ;; an unvisited chapter.
+              (should (= resolve-count 0))
+              (should-not (epub-reader-annotation-quality annotation))))
           (with-current-buffer list-buffer
-            (should (string-match-p "⚠" (buffer-string)))
+            (should-not (string-match-p "⚠" (buffer-string)))
             (goto-char
              (cl-loop for cursor from (point-min) below (point-max)
                       when (get-text-property cursor 'epub-reader-annotation)
                       return cursor))
-            (cl-letf (((symbol-function 'pop-to-buffer) #'identity))
+            (cl-letf (((symbol-function 'pop-to-buffer) #'identity)
+                      ((symbol-function 'epub-reader-locator-range-resolve)
+                       (let ((original
+                              (symbol-function
+                               'epub-reader-locator-range-resolve)))
+                         (lambda (&rest arguments)
+                           (cl-incf resolve-count)
+                           (apply original arguments)))))
               (epub-reader-annotation-list-activate))
+            (should (= resolve-count 1))
             (should (string-match-p "⚠" (buffer-string)))))
       (when (buffer-live-p list-buffer) (kill-buffer list-buffer))
       (when (buffer-live-p reader) (kill-buffer reader))

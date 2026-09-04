@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package version="3.0" unique-identifier="pub-id" xmlns="http://www.idpf.org/2007/opf" prefix="dc: http://purl.org/dc/elements/1.1/">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Wrapped Chapter Fixture</dc:title>
+    <dc:language>en</dc:language>
+    <dc:identifier id="pub-id">urn:fixture:wrapped-chapter</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav&#xA;scripted"/>
+    <item id="section" href="text/section.xhtml" media-type="application/xhtml+xml"/>
+    <item id="div" href="text/div.xhtml" media-type="application/xhtml+xml"/>
+    <item id="pixel" href="images/pixel.svg" media-type="image/svg+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="section"/>
+    <itemref idref="div"/>
+  </spine>
+</package>

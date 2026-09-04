@@ -1,0 +1,673 @@
+;;; epub-reader-panel-test.el --- EPUB panel presentation tests -*- lexical-binding: t; -*-
+
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;;; Code:
+
+(require 'ert)
+(require 'cl-lib)
+(require 'epub-reader-panel)
+
+(defun epub-reader-panel-test--buffer (name)
+  "Return a fresh hidden test buffer named with NAME."
+  (generate-new-buffer (format " *epub-reader-panel-%s*" name)))
+
+(ert-deftest epub-reader-panel-auto-falls-back-and-restores-reader-focus ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "reader"))
+           (content (epub-reader-panel-test--buffer "content"))
+           (reader-window (selected-window))
+           (initial-width (window-total-width reader-window))
+           (epub-reader-panel-display 'auto)
+           panel panel-window)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (cl-letf (((symbol-function 'display-graphic-p)
+                       (lambda (&optional _display) nil)))
+              (setq panel (epub-reader-panel-open content reader-window)))
+            (setq panel-window (epub-reader-panel-focus panel))
+            (should (epub-reader-panel-live-p panel))
+            (should (window-live-p panel-window))
+            (should (eq (window-buffer panel-window) content))
+            (should (eq (window-parameter panel-window 'window-side) 'right))
+            (should (< (window-total-width reader-window) initial-width))
+            (should (eq (epub-reader-panel-close panel) reader-window))
+            (should (eq (selected-window) reader-window))
+            (should-not (epub-reader-panel-live-p panel))
+            (should-not (window-live-p panel-window)))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-close panel))
+        (dolist (buffer (list reader content))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-child-frame-error-falls-back-safely ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "child-reader"))
+           (content (epub-reader-panel-test--buffer "child-content"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'child-frame)
+           panel)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (cl-letf (((symbol-function 'display-graphic-p)
+                       (lambda (&optional _display) t))
+                      ((symbol-function 'make-frame)
+                       (lambda (&rest _parameters)
+                         (error "No child frames in this test"))))
+              (setq panel (epub-reader-panel-open content reader-window)))
+            (let ((panel-window (epub-reader-panel-focus panel)))
+              (should (window-live-p panel-window))
+              (should (eq (window-parameter panel-window 'window-side)
+                          'right))))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-close panel))
+        (dolist (buffer (list reader content))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-bottom-uses-real-window-adapter ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "bottom-reader"))
+           (content (epub-reader-panel-test--buffer "bottom-content"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'bottom)
+           panel)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (setq panel (epub-reader-panel-open content reader-window))
+            (let ((panel-window (epub-reader-panel-focus panel)))
+              (should (eq (window-parameter panel-window 'window-side)
+                          'bottom))
+              (should (eq (window-buffer panel-window) content))))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-close panel))
+        (dolist (buffer (list reader content))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-injects-only-ordinary-display-operation ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "injected-reader"))
+           (content (epub-reader-panel-test--buffer "injected-content"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'side-window)
+           called closed panel panel-window)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (setq panel
+                  (epub-reader-panel-open
+                   content reader-window
+                   (lambda (buffer placement origin)
+                     (setq called (list buffer placement origin))
+                     (let ((window (split-window origin nil 'below)))
+                       (set-window-buffer window buffer)
+                       window))
+                   (lambda (window)
+                     (setq closed window)
+                     (delete-window window))))
+            (should (equal called
+                           (list content 'side-window reader-window)))
+            (setq panel-window (epub-reader-panel-focus panel))
+            (should (epub-reader-panel-live-p panel))
+            (epub-reader-panel-close panel)
+            (should (eq closed panel-window))
+            (should-not (window-live-p panel-window)))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-close panel))
+        (dolist (buffer (list reader content))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-hide-and-show-reuses-ordinary-adapter ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "reuse-reader"))
+           (content (epub-reader-panel-test--buffer "reuse-content"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'side-window)
+           (display-count 0)
+           (close-count 0)
+           panel first-window second-window)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (setq panel
+                  (epub-reader-panel-open
+                   content reader-window
+                   (lambda (buffer _placement origin)
+                     (setq display-count (1+ display-count))
+                     (let ((window (split-window origin nil 'below)))
+                       (set-window-buffer window buffer)
+                       window))
+                   (lambda (window)
+                     (setq close-count (1+ close-count))
+                     (delete-window window))))
+            (setq first-window (epub-reader-panel-focus panel))
+            (should (= display-count 1))
+            (should (epub-reader-panel-visible-p panel))
+            (should (eq (epub-reader-panel-hide panel) reader-window))
+            (should (epub-reader-panel-live-p panel))
+            (should-not (epub-reader-panel-visible-p panel))
+            (should-not (window-live-p first-window))
+            (should (= close-count 1))
+            (should (eq (selected-window) reader-window))
+            (setq second-window (epub-reader-panel-show panel))
+            (should (= display-count 2))
+            (should (window-live-p second-window))
+            (should (epub-reader-panel-visible-p panel))
+            ;; Showing does not steal focus; focusing is a separate operation.
+            (should (eq (selected-window) reader-window))
+            (should (eq (epub-reader-panel-focus panel) second-window))
+            (should (eq (selected-window) second-window))
+            (should (eq (epub-reader-panel-destroy panel) reader-window))
+            (should (= close-count 2))
+            (should-not (epub-reader-panel-live-p panel)))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-destroy panel))
+        (dolist (buffer (list reader content))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-hidden-view-switch-transfers-buffer-lifetime ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "switch-reader"))
+           (old-view (epub-reader-panel-test--buffer "switch-old"))
+           (new-view (epub-reader-panel-test--buffer "switch-new"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'side-window)
+           panel panel-window)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (setq panel (epub-reader-panel-open old-view reader-window))
+            (epub-reader-panel-hide panel)
+            (should (eq (epub-reader-panel-set-buffer panel new-view) panel))
+            (kill-buffer old-view)
+            (should (epub-reader-panel-live-p panel))
+            (setq panel-window (epub-reader-panel-show panel))
+            (should (eq (window-buffer panel-window) new-view))
+            (kill-buffer new-view)
+            (should-not (epub-reader-panel-live-p panel))
+            (should-not (window-live-p panel-window)))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-destroy panel))
+        (dolist (buffer (list reader old-view new-view))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-visible-ordinary-switch-reenters-adapter ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "adapter-reader"))
+           (old-view (epub-reader-panel-test--buffer "adapter-old"))
+           (new-view (epub-reader-panel-test--buffer "adapter-new"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'side-window)
+           (display-count 0)
+           (close-count 0)
+           panel old-window new-window)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (setq panel
+                  (epub-reader-panel-open
+                   old-view reader-window
+                   (lambda (buffer _placement origin)
+                     (setq display-count (1+ display-count))
+                     (let ((window (split-window origin nil 'below)))
+                       (set-window-buffer window buffer)
+                       window))
+                   (lambda (window)
+                     (setq close-count (1+ close-count))
+                     (delete-window window))))
+            (setq old-window (selected-window))
+            (should (eq (window-buffer old-window) old-view))
+            (should (eq (epub-reader-panel-set-buffer panel new-view) panel))
+            (setq new-window (selected-window))
+            (should (= display-count 2))
+            (should (= close-count 1))
+            (should-not (window-live-p old-window))
+            (should (window-live-p new-window))
+            (should (eq (window-buffer new-window) new-view))
+            (should (epub-reader-panel-live-p panel)))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-destroy panel))
+        (dolist (buffer (list reader old-view new-view))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-visible-child-view-switch-refits-in-place ()
+  (let* ((old-view (epub-reader-panel-test--buffer "child-switch-old"))
+         (new-view (epub-reader-panel-test--buffer "child-switch-new"))
+         (kill-function #'ignore)
+         (panel (epub-reader-panel--make
+                 :active-p t
+                 :visible-p t
+                 :buffer old-view
+                 :reader-buffer (current-buffer)
+                 :reader-window 'reader
+                 :presentation 'child
+                 :kind 'child-frame
+                 :child-frame-side 'right
+                 :panel-kill-function kill-function))
+         prepared synced)
+    (unwind-protect
+        (progn
+          (with-current-buffer old-view
+            (add-hook 'kill-buffer-hook kill-function nil t))
+          (cl-letf (((symbol-function 'epub-reader-panel-live-p)
+                     (lambda (_panel) t))
+                    ((symbol-function 'epub-reader-panel-visible-p)
+                     (lambda (_panel) t))
+                    ((symbol-function 'epub-reader-panel--prepare-child-window)
+                     (lambda (&rest arguments) (setq prepared arguments)))
+                    ((symbol-function 'epub-reader-panel--sync-child-frame)
+                     (lambda (&rest arguments) (setq synced arguments))))
+            (should (eq (epub-reader-panel-set-buffer panel new-view) panel)))
+          (should (equal prepared (list 'child new-view)))
+          (should (equal synced '(child reader right t)))
+          (should-not
+           (memq kill-function
+                 (buffer-local-value 'kill-buffer-hook old-view)))
+          (should
+           (memq kill-function
+                 (buffer-local-value 'kill-buffer-hook new-view))))
+      (dolist (buffer (list old-view new-view))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest epub-reader-panel-child-frame-uses-attached-focus-safe-parameters ()
+  (let ((epub-reader-panel-child-frame-geometry-function
+         (lambda (_window _side)
+           '(:left 1 :top 2 :width 100 :height 80)))
+        parameters sync-calls)
+    (cl-letf (((symbol-function 'window-frame)
+               (lambda (_window) 'parent))
+              ((symbol-function 'minibuffer-window)
+               (lambda (_frame) 'parent-minibuffer))
+              ((symbol-function 'make-frame)
+               (lambda (frame-parameters)
+                 (setq parameters frame-parameters)
+                 'child))
+              ((symbol-function 'frame-parent)
+               (lambda (_frame) 'parent))
+              ((symbol-function 'epub-reader-panel--prepare-child-window)
+               #'ignore)
+              ((symbol-function 'epub-reader-panel--apply-child-frame-border)
+               #'ignore)
+              ((symbol-function 'epub-reader-panel--sync-child-frame)
+               (lambda (&rest arguments)
+                 (push arguments sync-calls)))
+              ((symbol-function 'make-frame-visible) #'ignore))
+      (should (eq (epub-reader-panel--child-frame
+                   'content 'reader 'right)
+                  'child))
+      (should (eq (alist-get 'parent-frame parameters) 'parent))
+      (should (assq 'parent-id parameters))
+      (should-not (alist-get 'parent-id parameters))
+      (should (eq (alist-get 'minibuffer parameters) 'parent-minibuffer))
+      (should (eq (alist-get 'no-focus-on-map parameters) t))
+      ;; One estimate before mapping and one correction after mapping.
+      (should (= (length sync-calls) 2)))))
+
+(ert-deftest epub-reader-panel-child-frame-rejects-detached-result ()
+  (let ((epub-reader-panel-child-frame-geometry-function
+         (lambda (_window _side)
+           '(:left 1 :top 2 :width 100 :height 80)))
+        deleted)
+    (cl-letf (((symbol-function 'window-frame)
+               (lambda (_window) 'parent))
+              ((symbol-function 'minibuffer-window)
+               (lambda (_frame) 'parent-minibuffer))
+              ((symbol-function 'make-frame)
+               (lambda (_parameters) 'detached-child))
+              ((symbol-function 'frame-parent)
+               (lambda (_frame) nil))
+              ((symbol-function 'frame-live-p)
+               (lambda (_frame) t))
+              ((symbol-function 'delete-frame)
+               (lambda (frame &optional force)
+                 (setq deleted (list frame force)))))
+      (should-error
+       (epub-reader-panel--child-frame 'content 'reader 'right)
+       :type 'error)
+      (should (equal deleted '(detached-child t))))))
+
+(ert-deftest epub-reader-panel-explicitly-restores-native-parent-focus ()
+  (let (focused selected)
+    (cl-letf (((symbol-function 'window-live-p) (lambda (_window) t))
+              ((symbol-function 'window-frame) (lambda (_window) 'parent))
+              ((symbol-function 'display-graphic-p) (lambda (_frame) t))
+              ((symbol-function 'frame-parent) (lambda (_frame) nil))
+              ((symbol-function 'selected-frame) (lambda () 'parent))
+              ((symbol-function 'select-frame-set-input-focus)
+               (lambda (frame) (setq focused frame)))
+              ((symbol-function 'select-window)
+               (lambda (window &optional _norecord) (setq selected window))))
+      (should (eq (epub-reader-panel--select-window 'reader-window t)
+                  'reader-window))
+      (should (eq focused 'parent))
+      (should (eq selected 'reader-window)))))
+
+(ert-deftest epub-reader-panel-hide-and-show-reuses-child-frame ()
+  (let ((panel (epub-reader-panel--make
+                :active-p t
+                :visible-p t
+                :buffer 'content
+                :reader-window 'reader
+                :presentation 'child
+                :kind 'child-frame
+                :child-frame-side 'right))
+        (mapped t)
+        prepared synced hidden shown)
+    (cl-letf (((symbol-function 'epub-reader-panel-live-p)
+               (lambda (_panel) t))
+              ((symbol-function 'epub-reader-panel--origin-live-p)
+               (lambda (_panel) nil))
+              ((symbol-function 'make-frame-invisible)
+               (lambda (frame)
+                 (setq hidden frame
+                       mapped nil)))
+              ((symbol-function 'frame-visible-p)
+               (lambda (_frame) mapped))
+              ((symbol-function 'make-frame-visible)
+               (lambda (frame)
+                 (setq shown frame
+                       mapped t)))
+              ((symbol-function 'epub-reader-panel--prepare-child-window)
+               (lambda (&rest arguments) (setq prepared arguments)))
+              ((symbol-function 'epub-reader-panel--sync-child-frame)
+               (lambda (&rest arguments) (setq synced arguments))))
+      (should-not (epub-reader-panel-hide panel))
+      (should (eq hidden 'child))
+      (should-not (epub-reader-panel--handle-visible-p panel))
+      (should (eq (epub-reader-panel-show panel) 'child))
+      (should (eq shown 'child))
+      (should (equal prepared '(child content)))
+      (should (equal synced '(child reader right t)))
+      (should (epub-reader-panel--handle-visible-p panel)))))
+
+(ert-deftest epub-reader-panel-reader-death-cleans-presentation ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "dead-reader"))
+           (content (epub-reader-panel-test--buffer "dead-content"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'bottom)
+           panel panel-window)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (setq panel (epub-reader-panel-open content reader-window)
+                  panel-window (epub-reader-panel-focus panel))
+            (kill-buffer reader)
+            (should-not (epub-reader-panel-live-p panel))
+            (should-not (window-live-p panel-window))
+            (should (buffer-live-p content)))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-close panel))
+        (dolist (buffer (list reader content))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-content-death-cleans-presentation ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "owner-reader"))
+           (content (epub-reader-panel-test--buffer "dead-content"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'side-window)
+           panel panel-window)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (setq panel (epub-reader-panel-open content reader-window)
+                  panel-window (epub-reader-panel-focus panel))
+            (kill-buffer content)
+            (should-not (epub-reader-panel-live-p panel))
+            (should-not (window-live-p panel-window))
+            (should (eq (selected-window) reader-window)))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-close panel))
+        (dolist (buffer (list reader content))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest epub-reader-panel-geometry-insets-inside-reader ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader-window (selected-window))
+           (epub-reader-panel-width 17)
+           (epub-reader-panel-child-frame-max-height-ratio 0.75)
+           (epub-reader-panel-child-frame-horizontal-margin 2)
+           (epub-reader-panel-child-frame-vertical-margin 1)
+           (edges (window-pixel-edges reader-window))
+           (body (window-body-pixel-edges reader-window))
+           (horizontal-margin
+            (min (* epub-reader-panel-child-frame-horizontal-margin
+                    (frame-char-width))
+                 (/ (max 0 (1- (- (nth 2 edges) (nth 0 edges)))) 2)))
+           (vertical-margin
+            (min (* epub-reader-panel-child-frame-vertical-margin
+                    (frame-char-height))
+                 (/ (max 0 (1- (- (nth 3 body) (nth 1 body)))) 2)))
+           (geometry
+            (epub-reader-panel-child-frame-geometry reader-window)))
+      (should (= (+ (plist-get geometry :left)
+                    (plist-get geometry :width)
+                    horizontal-margin)
+                 (nth 2 edges)))
+      ;; The header line is above the body, so the panel starts below it.
+      (should (= (plist-get geometry :top)
+                 (+ (nth 1 body) vertical-margin)))
+      (should (<= (plist-get geometry :height)
+                  (floor (* 0.75 (- (nth 3 body) (nth 1 body))))))
+      (should (<= (plist-get geometry :width)
+                  (- (nth 2 edges) (nth 0 edges)))))))
+
+(ert-deftest epub-reader-panel-geometry-starts-below-header-line ()
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (set-window-buffer (selected-window) (current-buffer))
+      (setq-local header-line-format "header")
+      (let* ((reader-window (selected-window))
+             (epub-reader-panel-child-frame-vertical-margin 0)
+             (body-top (nth 1 (window-body-pixel-edges reader-window)))
+             (header-height (window-header-line-height reader-window))
+             (geometry
+              (epub-reader-panel-child-frame-geometry reader-window)))
+        (should (= (plist-get geometry :top) body-top))
+        (should (>= (plist-get geometry :top)
+                    (+ (nth 1 (window-pixel-edges reader-window))
+                       header-height)))))))
+
+(ert-deftest epub-reader-panel-geometry-can-anchor-left ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader-window (selected-window))
+           (epub-reader-panel-width 17)
+           (epub-reader-panel-child-frame-horizontal-margin 2)
+           (edges (window-pixel-edges reader-window))
+           (horizontal-margin
+            (min (* epub-reader-panel-child-frame-horizontal-margin
+                    (frame-char-width))
+                 (/ (max 0 (1- (- (nth 2 edges) (nth 0 edges)))) 2)))
+           (geometry
+            (epub-reader-panel-child-frame-geometry reader-window 'left)))
+      (should (= (plist-get geometry :left)
+                 (+ (nth 0 edges) horizontal-margin))))))
+
+(ert-deftest epub-reader-panel-opposite-anchors-do-not-overlap ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader-window (selected-window))
+           (epub-reader-panel-width 1000)
+           (epub-reader-panel-child-frame-max-width-ratio 0.45)
+           (left (epub-reader-panel-child-frame-geometry
+                  reader-window 'left))
+           (right (epub-reader-panel-child-frame-geometry
+                   reader-window 'right)))
+      (should (<= (+ (plist-get left :left) (plist-get left :width))
+                  (plist-get right :left))))))
+
+(ert-deftest epub-reader-panel-child-window-hides-mode-line-by-default ()
+  (let (frame-parameters parameters margins)
+    (cl-letf (((symbol-function 'frame-root-window)
+               (lambda (_frame) 'panel-window))
+              ((symbol-function 'set-frame-parameter)
+               (lambda (_frame parameter value)
+                 (push (cons parameter value) frame-parameters)))
+              ((symbol-function 'set-window-buffer) #'ignore)
+              ((symbol-function 'set-window-dedicated-p) #'ignore)
+              ((symbol-function 'set-window-parameter)
+               (lambda (_window parameter value)
+                 (push (cons parameter value) parameters)))
+              ((symbol-function 'set-window-fringes) #'ignore)
+              ((symbol-function 'set-window-margins)
+               (lambda (&rest arguments)
+                 (setq margins arguments)))
+              ((symbol-function 'set-window-scroll-bars) #'ignore))
+      (let ((epub-reader-panel-show-mode-line nil))
+        (epub-reader-panel--prepare-child-window 'panel-frame 'content))
+      (should (equal (alist-get 'tab-bar-lines frame-parameters) 0))
+      (should (equal (alist-get 'mode-line-format parameters) 'none))
+      (should (equal (alist-get 'tab-line-format parameters) 'none))
+      (should (equal margins '(panel-window 1 1)))
+      (setq parameters nil)
+      (let ((epub-reader-panel-show-mode-line t))
+        (epub-reader-panel--prepare-child-window 'panel-frame 'content))
+      (should-not (alist-get 'mode-line-format parameters)))))
+
+(ert-deftest epub-reader-panel-sync-uses-measured-outer-frame-size ()
+  (let ((epub-reader-panel-child-frame-geometry-function
+         (lambda (_window _side)
+           '(:left 100 :top 50 :width 200 :height 300)))
+        calls cache)
+    (cl-letf (((symbol-function 'frame-live-p) (lambda (_frame) t))
+              ((symbol-function 'window-live-p) (lambda (_window) t))
+              ((symbol-function 'window-frame) (lambda (_window) 'parent))
+              ((symbol-function 'set-frame-width)
+               (lambda (&rest arguments)
+                 (push (cons 'width arguments) calls)))
+              ((symbol-function 'set-frame-height)
+               (lambda (&rest arguments)
+                 (push (cons 'height arguments) calls)))
+              ((symbol-function 'frame-char-height) (lambda (_frame) 20))
+              ((symbol-function 'fit-frame-to-buffer)
+               (lambda (&rest arguments)
+                 (push (cons 'fit arguments) calls)))
+              ((symbol-function 'frame-pixel-width)
+               (lambda (frame) (if (eq frame 'child) 230 500)))
+              ((symbol-function 'frame-pixel-height)
+               (lambda (frame) (if (eq frame 'child) 300 400)))
+              ((symbol-function 'set-frame-position)
+               (lambda (&rest arguments)
+                 (push (cons 'position arguments) calls)))
+              ((symbol-function 'frame-parameter)
+               (lambda (_frame _parameter) cache))
+              ((symbol-function 'set-frame-parameter)
+               (lambda (_frame _parameter value)
+                 (setq cache value))))
+      (epub-reader-panel--sync-child-frame 'child 'reader 'right)
+      (should (member '(width child 200 nil t) calls))
+      (should (member '(height child 300 nil t) calls))
+      (should (member '(fit child 15 6 nil nil vertically) calls))
+      ;; Target right is 300, but native frame chrome made the actual width
+      ;; 230.  Position from that measured width, not the 200px request.
+      (should (member '(position child 70 50) calls)))))
+
+(ert-deftest epub-reader-panel-sync-skips-unchanged-geometry ()
+  (let ((epub-reader-panel-child-frame-geometry-function
+         (lambda (_window _side)
+           '(:left 100 :top 50 :width 200 :height 300)))
+        cache
+        (native-call-count 0))
+    (cl-letf (((symbol-function 'frame-live-p) (lambda (_frame) t))
+              ((symbol-function 'window-live-p) (lambda (_window) t))
+              ((symbol-function 'window-frame) (lambda (_window) 'parent))
+              ((symbol-function 'frame-char-height) (lambda (_frame) 20))
+              ((symbol-function 'frame-pixel-width)
+               (lambda (frame) (if (eq frame 'child) 200 500)))
+              ((symbol-function 'frame-pixel-height)
+               (lambda (frame) (if (eq frame 'child) 300 400)))
+              ((symbol-function 'frame-parameter)
+               (lambda (_frame _parameter) cache))
+              ((symbol-function 'set-frame-parameter)
+               (lambda (_frame _parameter value) (setq cache value)))
+              ((symbol-function 'set-frame-width)
+               (lambda (&rest _arguments)
+                 (setq native-call-count (1+ native-call-count))))
+              ((symbol-function 'set-frame-height) #'ignore)
+              ((symbol-function 'fit-frame-to-buffer) #'ignore)
+              ((symbol-function 'set-frame-position) #'ignore))
+      (should (epub-reader-panel--sync-child-frame
+               'child 'reader 'right))
+      (should (= native-call-count 1))
+      (should-not (epub-reader-panel--sync-child-frame
+                   'child 'reader 'right))
+      (should (= native-call-count 1))
+      (should (epub-reader-panel--sync-child-frame
+               'child 'reader 'right t))
+      (should (= native-call-count 2)))))
+
+(ert-deftest epub-reader-panel-refit-only-syncs-child-frames ()
+  (let ((child (epub-reader-panel--make
+                :active-p t :kind 'child-frame :presentation 'child
+                :reader-window 'reader :child-frame-side 'left))
+        (ordinary (epub-reader-panel--make
+                   :active-p t :kind 'side-window :presentation 'side
+                   :reader-window 'reader))
+        calls)
+    (cl-letf (((symbol-function 'epub-reader-panel-live-p)
+               (lambda (_panel) t))
+              ((symbol-function 'epub-reader-panel--sync-child-frame)
+               (lambda (&rest arguments)
+                 (push arguments calls))))
+      (should (eq (epub-reader-panel-refit child) child))
+      (should (equal calls '((child reader left t))))
+      (should-not (epub-reader-panel-refit ordinary))
+      (should (equal calls '((child reader left t)))))))
+
+(ert-deftest epub-reader-panel-narrow-reader-skips-child-frame ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((reader (epub-reader-panel-test--buffer "narrow-reader"))
+           (content (epub-reader-panel-test--buffer "narrow-content"))
+           (reader-window (selected-window))
+           (epub-reader-panel-display 'auto)
+           (epub-reader-panel-child-frame-min-reader-width 60)
+           made-child panel)
+      (unwind-protect
+          (progn
+            (set-window-buffer reader-window reader)
+            (cl-letf (((symbol-function 'display-graphic-p)
+                       (lambda (&optional _display) t))
+                      ((symbol-function 'window-body-width)
+                       (lambda (&optional _window _pixelwise) 59))
+                      ((symbol-function 'make-frame)
+                       (lambda (&rest _parameters)
+                         (setq made-child t))))
+              (setq panel (epub-reader-panel-open content reader-window)))
+            (should-not made-child)
+            (should (eq (window-parameter
+                         (epub-reader-panel-focus panel) 'window-side)
+                        'right)))
+        (when (and panel (epub-reader-panel-live-p panel))
+          (epub-reader-panel-close panel))
+        (dolist (buffer (list reader content))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(provide 'epub-reader-panel-test)
+;;; epub-reader-panel-test.el ends here

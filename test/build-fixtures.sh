@@ -35,6 +35,66 @@ build_epub epub3 "$source_dir/epub3"
 build_epub epub3-edge "$source_dir/epub3-edge"
 build_epub language-mix "$source_dir/language-mix"
 
+wrapped_chapter_source="$work_dir/wrapped-chapter-source"
+cp -R "$source_dir/wrapped-chapter" "$wrapped_chapter_source"
+python3 -c '
+import pathlib, sys
+
+root = pathlib.Path(sys.argv[1])
+(root / "EPUB/text").mkdir(parents=True, exist_ok=True)
+prose = (
+    "This deliberately long fixture paragraph keeps enough prose in every "
+    "semantic block to exercise viewport materialization and scrolling in a "
+    "wrapped chapter. Its words remain ordinary XML text while the paragraph "
+    "boundaries are separated by source newlines."
+)
+
+section_paragraphs = []
+for index in range(160):
+    text = prose
+    if index == 0:
+        text += " Nonbreaking&#160;space and joined&#8288;word stay intact."
+    section_paragraphs.append(
+        f"      <p id=\"section-p-{index:03d}\">{index:03d}: {text}</p>"
+    )
+(root / "EPUB/text/section.xhtml").write_text(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<html xmlns=\"http://www.w3.org/1999/xhtml\">\n"
+    "  <head><title>Wrapped section</title></head>\n"
+    "  <body>\n"
+    "    <section id=\"section-wrapper\">\n"
+    "      <h1>Wrapped section</h1>\n"
+    + "\n".join(section_paragraphs)
+    + "\n    </section>\n"
+    "  </body>\n"
+    "</html>\n",
+    encoding="utf-8",
+)
+
+div_paragraphs = [
+    f"      <p id=\"div-p-{index:03d}\">{index:03d}: {prose}</p>"
+    for index in range(120)
+]
+div_paragraphs.append(
+    "      <p id=\"illustrated\">Before the image "
+    "<img src=\"../images/pixel.svg\" alt=\"Fixture pixel\"/> after the image.</p>"
+)
+(root / "EPUB/text/div.xhtml").write_text(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<html xmlns=\"http://www.w3.org/1999/xhtml\">\n"
+    "  <head><title>Wrapped div</title></head>\n"
+    "  <body>\n"
+    "    <div id=\"div-wrapper\">\n"
+    "      <h1>Wrapped div</h1>\n"
+    + "\n".join(div_paragraphs)
+    + "\n    </div>\n"
+    "  </body>\n"
+    "</html>\n",
+    encoding="utf-8",
+)
+' "$wrapped_chapter_source"
+build_epub wrapped-chapter "$wrapped_chapter_source"
+
 shared_identifier_source="$work_dir/shared-identifier-source"
 cp -R "$source_dir/epub2" "$shared_identifier_source"
 perl -0pi -e 's/urn:fixture:epub2/urn:fixture:shared-identifier/' \

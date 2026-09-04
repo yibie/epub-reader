@@ -283,6 +283,12 @@ Image tokens are vectors whose second item is the source XML element."
   "Return non-nil when CHARACTER is collapsible XML whitespace."
   (memq character '(?\s ?\t ?\r ?\n)))
 
+(defun epub-reader-render--xml-non-whitespace-string-p (string)
+  "Return non-nil when STRING contains a non-XML-whitespace character."
+  (cl-some (lambda (character)
+             (not (epub-reader-render--xml-whitespace-p character)))
+           string))
+
 (defun epub-reader-render--cjk-context-p (character)
   "Return non-nil when CHARACTER participates in CJK line joining."
   (and character
@@ -635,7 +641,8 @@ This validates URL resolution without materializing the image member."
                  (if (cl-some
                       (lambda (child)
                         (and (stringp child)
-                             (string-match-p "[^[:space:]]" child)))
+                             (epub-reader-render--xml-non-whitespace-string-p
+                              child)))
                       (cddr node))
                      (emit-inline-runs (or (and (symbolp context) context)
                                            'paragraph)
@@ -651,10 +658,12 @@ This validates URL resolution without materializing the image member."
    publication
    (epub-reader-publication-load-section publication spine-index)))
 
-(defun epub-reader-render--text-element (value)
-  "Return a width-aware TextUI prose element for VALUE."
-  (list :type :text :value value :wrap epub-reader-text-wrap-strategy
-        :layout '(:min-width 20 :grow 1)))
+(defun epub-reader-render--text-element (value &optional cache-key)
+  "Return a width-aware TextUI prose element for VALUE and CACHE-KEY."
+  (append (list :type :text :value value
+                :wrap epub-reader-text-wrap-strategy)
+          (and cache-key (list :cache-key cache-key))
+          (list :layout '(:min-width 20 :grow 1))))
 
 (defun epub-reader-render--apply-highlights (text highlights)
   "Apply HIGHLIGHTS to source-attributed TEXT and return it.
@@ -734,12 +743,14 @@ Cache either the local file or a visible diagnostic on BLOCK."
   block)
 
 (defun epub-reader-render-block-element
-    (block &optional publication section image-rows defer-image highlights)
+    (block &optional publication section image-rows defer-image highlights
+           cache-key)
   "Convert semantic BLOCK to one public TextUI element.
 When PUBLICATION and SECTION are supplied, materialize an image block just
 before producing its leaf unless DEFER-IMAGE is non-nil.  IMAGE-ROWS overrides
 the configured image row budget when the UI has a buffer-specific font metric.
-HIGHLIGHTS are source-offset spans for this block."
+HIGHLIGHTS are source-offset spans for this block.  CACHE-KEY identifies this
+block's complete attributed text for TextUI's width-specific layout cache."
   (when (and publication section (not defer-image))
     (epub-reader-render-materialize-image block publication section))
   (let ((text (epub-reader-render--materialized-text block highlights)))
@@ -748,11 +759,13 @@ HIGHLIGHTS are source-offset spans for this block."
     ;; measured in character cells and does not line up with variable-pitch
     ;; prose or with the reader's per-line spacing.
     ((or 'quote 'code)
-     (epub-reader-render--text-element text))
+     (epub-reader-render--text-element
+      text (and cache-key (list cache-key 'text))))
     ('list-item
      (epub-reader-render--text-element
       (concat (or (epub-reader-block-list-marker block) "• ")
-              text)))
+              text)
+      (and cache-key (list cache-key 'list-item))))
     ('image
      (let* ((rows (or image-rows epub-reader-image-rows))
             (source
@@ -768,14 +781,19 @@ HIGHLIGHTS are source-offset spans for this block."
                 0 (length image-alt) 'epub-reader-image-anchor
                 (list source rows book-key spine-index)
                 image-alt)))
-            (caption (epub-reader-render--text-element text))
+            (caption
+             (epub-reader-render--text-element
+              text (and cache-key (list cache-key 'caption))))
             (diagnostic
              (and (epub-reader-block-image-error block)
                   (epub-reader-render--text-element
                    (propertize
                     (format "[%s]"
                             (epub-reader-block-image-error block))
-                    'face 'epub-reader-image-error-face)))))
+                    'face 'epub-reader-image-error-face)
+                   (and cache-key
+                        (list cache-key 'diagnostic
+                              (epub-reader-block-image-error block)))))))
        (cond
         ((epub-reader-block-image-file block)
          (list :type :flex :direction :column :gap 0
@@ -801,7 +819,8 @@ HIGHLIGHTS are source-offset spans for this block."
                       :layout '(:min-width 12 :grow 1))
                 caption)))
         (t caption))))
-    (_ (epub-reader-render--text-element text)))))
+    (_ (epub-reader-render--text-element
+        text (and cache-key (list cache-key 'text)))))))
 
 (defun epub-reader-render-blocks
     (blocks &optional publication section image-rows)
