@@ -12,7 +12,7 @@ HTML: a centered reading column, automatic reflow, CJK-aware line breaking,
 incremental rendering for long chapters, a hierarchical table of contents,
 and reading positions that survive changes in window width and text scale.
 
-Version 0.3.0 requires Emacs 29.1 or later. It does not support DRM or
+Version 0.3.1 requires Emacs 29.1 or later. It does not support DRM or
 fixed-layout EPUBs.
 
 ![Frankenstein in epub-reader: table of contents, reading column, and highlights list](screenshots/reader-frankenstein.png)
@@ -54,7 +54,7 @@ locators. Keeping both installed is reasonable.
 Requirements:
 
 - Emacs 29.1 or later, built with libxml2 support;
-- TextUI 0.7.0 or later;
+- TextUI 0.7.1 or later;
 - either `unzip` or `bsdtar` on `exec-path`.
 
 Neither package is in a package archive yet. On Emacs 29.1 or later,

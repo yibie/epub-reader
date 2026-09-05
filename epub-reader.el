@@ -3,8 +3,8 @@
 ;; Copyright (C) 2026 chenyibin
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Author: chenyibin
-;; Version: 0.3.0
-;; Package-Requires: ((emacs "29.1") (textui "0.7.0"))
+;; Version: 0.3.1
+;; Package-Requires: ((emacs "29.1") (textui "0.7.1"))
 ;; Keywords: multimedia, hypermedia
 
 ;;; Commentary:

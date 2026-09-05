@@ -10,7 +10,7 @@ TextUI 按窗口宽度排版；除 TextUI 和系统归档命令外不引入重�
 模型、稳定 locator 和 TextUI 的宽度感知 frame/分块 viewport 组织阅读体验。逐项对比见
 [与 nov.el 的比较](#与-novel-的比较)。
 
-当前版本为 0.3.0，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
+当前版本为 0.3.1，面向无 DRM、可重排（reflowable）的 EPUB 2/3。
 
 ![epub-reader 打开紅樓夢：分组目录、正文阅读栏和高亮列表](screenshots/reader-hongloumeng.png)
 
@@ -43,7 +43,7 @@ Ebooks 的《Frankenstein》，均属公有领域。
 要求：
 
 - Emacs 29.1 或更高版本，且编译时带 libxml2 支持；
-- TextUI 0.7.0 或更高版本；
+- TextUI 0.7.1 或更高版本；
 - `unzip` 或 `bsdtar`，安装任意一个即可。两者都存在时默认先尝试 `unzip`。
 
 两个包都还没有进入软件源。Emacs 29.1 起自带的 `package-vc-install` 可以直接从 GitHub

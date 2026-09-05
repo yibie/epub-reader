@@ -2,6 +2,15 @@
 
 本文件记录 epub-reader 的公开版本变化。版本号遵循 Semantic Versioning。
 
+## 0.3.1 - 2026-09-05
+
+### Fixed
+
+- 修复普通宽度下含图片的章节也可能报
+  `Refresh region chapter must occupy complete lines`：图片像素宽度取整会让同级布局多出一格，
+  TextUI 现在会让外层布局补出的空格继承完整行 refresh region 的所有权。0.3.0 对极窄窗口的
+  降级仍然保留，但不再承担这个通用布局问题。
+
 ## 0.3.0 - 2026-09-04
 
 ### Changed
